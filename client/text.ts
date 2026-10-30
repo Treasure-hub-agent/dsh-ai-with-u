@@ -180,7 +180,7 @@ const zh = {
   // ---- 使用指南（第 4 个 tab）----
   'panel.tab.guide': '指南',
   'guide.notice.title': '一个会话，一个角色',
-  'guide.notice.body': '不建议在同一个会话里反复切换或插拔角色卡。每次换人设都会改写系统提示词，缓存前缀随即失效，同一段对话要按新价重新计费——聊得越长，账单涨得越明显。换角色请开一个新会话。',
+  'guide.notice.body': '切换或插拔角色卡都会改写系统提示词，缓存前缀当场失效。下一次请求要把之前整段对话按「未命中缓存」的价格重新读一遍——这一笔是一次性补交的，会话越长补得越多。频繁切换等于反复补这一笔。换角色请开新会话；同一个会话里一直聊下去本身并不涨价。',
   'guide.quickstart.title': '三步上手',
   'guide.quickstart.step1': '在角色簿里挑一张卡，点「启用」。',
   'guide.quickstart.step2': '回到任意会话直接发消息，不用重新介绍自己。',
@@ -424,7 +424,7 @@ const en: Dict = {
   // ---- Guide (4th tab) ----
   'panel.tab.guide': 'Guide',
   'guide.notice.title': 'One session, one character',
-  'guide.notice.body': 'Avoid switching or plugging cards in and out during the same chat. Every change rewrites the system prompt, which invalidates the cached prefix: the same history gets re-billed at full price, and the longer the chat, the more it costs. Open a new chat when you switch characters.',
+  'guide.notice.body': 'Switching or plugging cards in and out rewrites the system prompt, so the cached prefix dies on the spot. The next request has to re-read the whole history at the non-cached price — a one-off catch-up charge that grows with how long the session already is. Switching often means paying it over and over. Open a new chat when you switch characters; chatting continuously in one session does not cost extra by itself.',
   'guide.quickstart.title': 'Three steps',
   'guide.quickstart.step1': 'Pick a card in the roster and press Enable.',
   'guide.quickstart.step2': 'Return to any chat and just type; no reintroduction needed.',
