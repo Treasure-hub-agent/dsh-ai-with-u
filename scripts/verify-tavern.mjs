@@ -805,7 +805,7 @@ section('V24 · PromptController 四段装配（激活 → L1/世界书/时间�
 
     // 1) 未启用：除 L0 外全部空串
     const idle = render()
-    check(idle['aiwu:baseline']?.includes('AI WITH U'), 'L0 段恒在')
+    check(idle['aiwu:baseline'] === '', '未启用：L0 段也是空串（L0 与角色同进同出）')
     check(idle['aiwu:active-character'] === '' && idle['aiwu:lore'] === '' && idle['aiwu:clock'] === '',
       '未启用：L1 / 世界书 / 时间差都是空串（宿主过滤空段 = 干净拔出）')
     check([...sections.values()].every(s => s.interpolate === false), '四段都带 interpolate:false')
@@ -848,7 +848,8 @@ section('V24 · PromptController 四段装配（激活 → L1/世界书/时间�
     await pc.deactivate()
     const off = render()
     check(off['aiwu:active-character'] === '' && off['aiwu:lore'] === '' && off['aiwu:clock'] === '',
-      '退出后三段全部清空（L0 常驻不动）')
+      '退出后 L1 / 世界书 / 时间差清空')
+    check(off['aiwu:baseline'] === '', '退出后 L0 也清空（系统提示词零残留）')
     pc.uninstall()
     check(sections.size === 0, 'uninstall 后段全部释放')
   } finally {

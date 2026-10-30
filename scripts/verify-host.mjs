@@ -140,9 +140,9 @@ const clockSection = sp.layers.get('aiwu:clock')
 check(loreSection?.order === 10300, `世界书段 order = ${String(loreSection?.order)}（期望 10300，易变段垫底）`)
 check((clockSection?.order ?? 0) > (loreSection?.order ?? 0),
   `时间差段在最后：clock ${String(clockSection?.order)} > lore ${String(loreSection?.order)}`)
-const rendered = sp.render()
-check(rendered.includes('AI WITH U · 角色扮演底线'), 'L0 段能渲染出底线文本')
-check(rendered.length > 100, `渲染长度正常（${rendered.length} 字符）`)
+const renderedIdle = sp.render()
+check(!renderedIdle.includes('角色扮演底线'), '未启用时系统提示词里没有 L0 底线（L0 与角色同进同出）')
+check(renderedIdle.trim() === '', `未启用时宿主渲染结果为空（实际 ${renderedIdle.length} 字符）`)
 
 // webServer 路由注册成功
 const paths = registered.routes.map(r => r.path)
@@ -172,7 +172,7 @@ const fakeRes = () => {
     end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
   }
 }
-const fakeReq = (method) => ({ method, url: '/', async *[Symbol.asyncIterator]() {} })
+const fakeReq = (method, body) => ({ method, url: '/', async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) } })
 const routeOf = (suffix) => registered.routes.find(r => r.path.endsWith(suffix))
 
 if (routeOf('/distill/arm') === undefined) {
@@ -190,6 +190,28 @@ if (routeOf('/distill/arm') === undefined) {
   check(res2.out.body?.armed === false, 'disarm 接口报告已解除')
   check(!registered.tools.includes('awu_card_save'), 'disarm 之后工具被卸下')
   check(registered.tools.length === before, `工具数回到 ${before}`)
+}
+
+// ---------------------------------------------------------------- L0 同进同出（启用出现 / 退出归零）
+if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) {
+  fail('没有注册 /activate 或 /deactivate 路由')
+} else {
+  const resOn = fakeRes()
+  await routeOf('/activate').handler(fakeReq('POST', { name: '虞照' }), resOn)
+  check(resOn.out.status === 200 && resOn.out.body?.ok === true, `POST /activate → ${resOn.out.status}`)
+  const renderedOn = sp.render()
+  check(renderedOn.includes('角色扮演底线'), '启用后 L0 底线出现')
+  check(renderedOn.includes('你现在的身份'), '启用后 L1 角色段出现')
+  check(renderedOn.includes('人设部分'), 'L0 文案是精简后的新版（含「人设部分」判据）')
+  check(!renderedOn.includes('何时让位给任务模式'), 'L0 里不再有「何时让位给任务模式」整节')
+  check(renderedOn.length > 500, `启用后渲染长度 ${renderedOn.length} 字符`)
+
+  const resOff = fakeRes()
+  await routeOf('/deactivate').handler(fakeReq('POST'), resOff)
+  check(resOff.out.status === 200, `POST /deactivate → ${resOff.out.status}`)
+  const renderedOff = sp.render()
+  check(renderedOff.trim() === '', `退出后系统提示词归零（实际 ${renderedOff.length} 字符）`)
+  check(!renderedOff.includes('角色扮演'), '退出后连"角色扮演"字样都没有')
 }
 
 // ---------------------------------------------------------------- 卸载

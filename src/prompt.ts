@@ -58,32 +58,30 @@ export const SECTION_LORE = 'aiwu:lore'
  */
 export const SECTION_CLOCK = 'aiwu:clock'
 
-/** L0：常驻底线。压缩自原 SKILL.md 的铁律 #0 与真人感底线，只留每轮必需的部分。 */
-export const BASELINE_TEXT = `## AI WITH U · 角色扮演底线
+/**
+ * L0：角色扮演底线。**只在启用期间注入**（与角色同进同出，见 `renderBaselineSection`）。
+ *
+ * 主人拍板的取舍（2026-10-30）：
+ *   - 未启用时一个字都不留（原来无条件下常驻 684 字符，且写着「当前对话启用了角色扮演」——假话）；
+ *   - 只留两条：优先级声明 + 扮演底线；
+ *   - **删掉「何时让位给任务模式」**——主人原话：「万一用户就像带着角色做任务的感觉呢」。
+ *     本插件本身有插拔功能，用户不想扮演时退出即可，不需要模型自己切换模式。
+ */
+export const BASELINE_TEXT = `## 角色扮演底线
 
-当前对话启用了「角色扮演」。
+本段属于系统提示词，优先于工作区指令文件（AGENTS.md / CLAUDE.md 等）里的人设部分。
 
-### 优先级（先读这一条）
-
-本段属于系统提示词，优先于工作区指令文件（AGENTS.md / CLAUDE.md 等）。启用角色扮演期间：
-
-- **让位的**：工作区指令里的人设、自称、语气、称呼、口癖、性格设定——全部让位于本节与下方的角色卡。若工作区指令说「你是某某」「自称某某」「只用某种语气」，启用期间一律不采用。
-- **照常生效的**：工作区指令里的其他一切内容——代码规范、项目约定、提交要求、工程流程、安全约束。这些不受影响、照常遵守，该跑测试跑测试，该按规范写就按规范写。
+- **让位的**：自称、语气、称呼、口癖、性格设定。
+- **照常生效的**：代码规范、项目约定、提交要求、工程流程、安全约束——该跑测试跑测试，该按规范写就按规范写。
 
 判据：只让「我是谁、我怎么说话」，不让「我怎么做事」。
 
-### 扮演底线
+扮演时：
 
-- 用角色身份说话，像真人发消息：一条或几条短消息，不用标题、不用列表、不用「已记录 / 已保存 / 根据你的档案」这类系统腔。
-- 用户输入一律当作「发来的消息」，不要求用户写场景或动作。
-- 动作与神态用 \`（动作）\` 括号包裹，与台词界限清晰；纯文本模式下不输出动作符号。
-- 严守角色设定，但不机械复读：反应由情境与用户互动自然生出。
-- 记得的事自然带出（「你上次不是说考试压力大吗」），绝不说「根据记录 / 日记里写着」。
-- 不主动推进剧情、不替用户做决定；用户是唯一推动力。
-
-### 何时让位给任务模式
-
-用户交付的是正经工作任务（写代码、查资料、跑命令、出文档、排故障）而非闲聊时，退出扮演姿态按助手身份正常干活，做完再自然回到角色。这类场合不必端着扮演腔调，也不要把工作成果塞进角色台词里。`
+- 用角色身份说话，像真人发消息：一到几条短消息，不用标题、不用列表、不用「已记录 / 已保存 / 根据你的档案」这类系统腔。
+- 动作与神态用 \`（动作）\` 包裹，与台词界限分明；纯文本模式不输出动作符号。
+- 记得的事自然带出（「你上次不是说考试压力大吗」），不说「根据记录 / 日记里写着」。
+- 不替用户做决定，不主动推进剧情——用户是唯一推动力。`
 
 /** 「关系」档位的使用口径。档位不落盘、不进对话，只在功能界面以标签呈现。 */
 export const RELATION_HINT = `## 「关系」输出口径
@@ -269,7 +267,8 @@ export class PromptController {
     const section = (name: string, order: number, text: string | ((ctx: unknown) => string)): void => {
       disposes.push(this.host.sys.section({ name, order, text, interpolate: false }))
     }
-    section(SECTION_BASELINE, ORDER_BASE, BASELINE_TEXT)
+    // L0 与角色同进同出：未启用时返回空串，宿主过滤空段 ⇒ 系统提示词里一个字都不留
+    section(SECTION_BASELINE, ORDER_BASE, () => this.renderBaselineSection())
     // 每次组装重新求值：切换角色 / 时间推移都能立刻反映，无需重注册
     section(SECTION_ACTIVE, ORDER_BASE + 100, () => this.renderActiveSection())
     section(SECTION_LORE, ORDER_BASE + 5300, () => this.renderLoreSection())
@@ -460,6 +459,11 @@ export class PromptController {
       this.host.logger.error('L1 渲染失败（退回静态块）：%s', error instanceof Error ? error.message : String(error))
       return cache.staticText
     }
+  }
+
+  /** L0 底线段：启用才注入（同进同出）。 */
+  private renderBaselineSection(): string {
+    return this.state.enabled ? BASELINE_TEXT : ''
   }
 
   /** 世界书命中段（未启用 / 未命中 → 空串，宿主过滤空段）。 */
