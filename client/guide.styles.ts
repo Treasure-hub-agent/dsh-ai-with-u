@@ -109,6 +109,47 @@ export const GUIDE_CSS = `
   color: var(--awu-ink-dim);
 }
 
+/* 置顶提示：比正文高一级的信息块。用 warn 底色 + 左侧标记，
+   背景走 token（深色态下是同色系更暗的一档），不做纯色硬编码。 */
+.awu-guide-alert {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 1px solid var(--awu-line-strong);
+  border-radius: var(--awu-r-lg, 14px);
+  background: color-mix(in srgb, var(--awu-gold) 10%, transparent);
+}
+
+.awu-guide-alertMark {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--awu-surface-opaque, #fff);
+  background: var(--awu-gold);
+}
+
+.awu-guide-alertBody { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+.awu-guide-alertTitle {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--awu-ink);
+}
+
+.awu-guide-alertText {
+  font-size: 13px;
+  line-height: 21px;
+  color: var(--awu-ink-dim);
+}
+
 /* 小注：比正文低一级，但仍用 ink-mute —— ink-faint 是线条专用，12px 上会看不清 */
 .awu-guide-note {
   padding-left: 24px;

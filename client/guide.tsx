@@ -98,6 +98,19 @@ export function GuideView(props: { t: Translate }): JSX.Element {
   const { t } = props
   return (
     <div className="awu-guide">
+      {/*
+        置顶提示：这条建议关系到真金白银，必须放在第一屏。
+        原因是机制层面的：角色卡会改写系统提示词，而宿主按「系统提示词内部顺序」计算缓存，
+        一轮里换了人设，前面那整段前缀就作废，同样的历史要按新价重新计费。
+      */}
+      <div className="awu-guide-alert" data-tone="warn" role="note">
+        <span className="awu-guide-alertMark" aria-hidden="true">!</span>
+        <div className="awu-guide-alertBody">
+          <div className="awu-guide-alertTitle">{t('guide.notice.title')}</div>
+          <div className="awu-guide-alertText">{t('guide.notice.body')}</div>
+        </div>
+      </div>
+
       <GuideSection title={t('guide.quickstart.title')}>
         <Step index={1} text={t('guide.quickstart.step1')} />
         <Step index={2} text={t('guide.quickstart.step2')} />

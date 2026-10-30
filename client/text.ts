@@ -179,6 +179,8 @@ const zh = {
 
   // ---- 使用指南（第 4 个 tab）----
   'panel.tab.guide': '指南',
+  'guide.notice.title': '一个会话，一个角色',
+  'guide.notice.body': '不建议在同一个会话里反复切换或插拔角色卡。每次换人设都会改写系统提示词，缓存前缀随即失效，同一段对话要按新价重新计费——聊得越长，账单涨得越明显。换角色请开一个新会话。',
   'guide.quickstart.title': '三步上手',
   'guide.quickstart.step1': '在角色簿里挑一张卡，点「启用」。',
   'guide.quickstart.step2': '回到任意会话直接发消息，不用重新介绍自己。',
@@ -217,9 +219,9 @@ const zh = {
   'guide.faq.q1': '换会话还算吗？',
   'guide.faq.a1': '算。启用状态写在磁盘上，新旧会话都带人设，重启 DSH 也会自动恢复。',
   'guide.faq.q2': '退出后有残留吗？',
-  'guide.faq.a2': '人设和 8 个工具都卸下；只剩一段约 690 字的 L0 底线常驻，里面没有任何角色内容。',
+  'guide.faq.a2': '没有。人设、8 个工具、底线声明一次性全卸下，系统提示词里一个字都不留（和没装插件一样）。',
   'guide.faq.q3': 'L0 底线是什么？',
-  'guide.faq.a3': '一条常驻声明：工作区里的人设、语气让位；代码规范、安全约束照常。判据是「只让我是谁，不让我怎么做」。',
+  'guide.faq.a3': '启用期间注入的一段短声明（约 370 字）：让位的只有「我是谁、我怎么说话」，代码规范与安全约束照常。退出后它也随之消失。',
 
   // ---- 蒸馏角色卡（发送通道部分；粘贴校验的键等 CCv3 定稿再加）----
   'distill.entry': '蒸馏',
@@ -421,6 +423,8 @@ const en: Dict = {
 
   // ---- Guide (4th tab) ----
   'panel.tab.guide': 'Guide',
+  'guide.notice.title': 'One session, one character',
+  'guide.notice.body': 'Avoid switching or plugging cards in and out during the same chat. Every change rewrites the system prompt, which invalidates the cached prefix: the same history gets re-billed at full price, and the longer the chat, the more it costs. Open a new chat when you switch characters.',
   'guide.quickstart.title': 'Three steps',
   'guide.quickstart.step1': 'Pick a card in the roster and press Enable.',
   'guide.quickstart.step2': 'Return to any chat and just type; no reintroduction needed.',
@@ -459,9 +463,9 @@ const en: Dict = {
   'guide.faq.q1': 'Does it carry into new chats?',
   'guide.faq.a1': 'Yes. The state is saved to disk; new and old chats both get the persona, and a restart keeps it.',
   'guide.faq.q2': 'Anything left after Exit?',
-  'guide.faq.a2': 'The persona and all eight tools are unmounted. Only a ~690-character L0 baseline stays in the system prompt, with no character content.',
+  'guide.faq.a2': 'Nothing. The persona, all eight tools and the baseline are unmounted together — not a single character stays in the system prompt.',
   'guide.faq.q3': 'What is the L0 baseline?',
-  'guide.faq.a3': 'Workspace personas and tone step aside; code, process and safety rules still apply. The test: who I am yields, how I work does not.',
+  'guide.faq.a3': 'A short notice injected only while a character is active (~370 chars): only "who I am / how I speak" steps aside; code and safety rules still apply. It disappears on Exit.',
 
   // ---- Distillation (send channel only; paste-validation keys land with CCv3) ----
   'distill.entry': 'Distill',
