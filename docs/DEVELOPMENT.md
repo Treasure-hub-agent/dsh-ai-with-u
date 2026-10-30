@@ -315,6 +315,39 @@ html:not([data-ds-dark-theme]) .awu-dialog { ... }
 **教训**：用 scoped CSS 变量 + portal 时，「变量定义在哪」和「元素渲染在哪」必须对一遍。
 我们第一次只补了深色块，浅色块漏了 —— 症状比原 bug 更难看（暗底亮字）。
 
+### 🔴 坑 13：宿主会对段文本做 `{{var}}` 插值，未知变量**直接抛错**（导入即崩）
+
+`@deepseek-ai/dsh-system-prompt@0.2.1-rc.5` 的组装代码：
+
+```js
+// lib/index.js:118 —— 只有显式 false 才豁免
+return assembly.sections.map((s) => s.interpolate === false ? s.text : interpolate(s, assembly.variables, "section"))
+// lib/index.js:158
+if (!Object.hasOwn(variables, name)) throw new Error(`unknown prompt variable "{{${name}}}" ...`)
+```
+
+CCv3 卡里 `{{char}}` / `{{user}}` 是通用写法 ⇒ 不关插值 = **启用该角色后整轮对话进不去**
+（不是显示成字面量，是请求失败）。调研员用 rc.5 实跑验证过：
+① 不传 `interpolate` → THROW `unknown prompt variable "{{char}}"`；② `interpolate:false` → OK；
+③ 注册同名变量 → OK（证明是变量表查找，不是黑名单）；
+④ **`{{Char}}` 大写变体同样 THROW `malformed`**；⑤ 孤立 `{{` 不闭合反而不抛。
+
+**修法**：`host.sys.section({ name, order, text, interpolate: false })` —— **每一段都要传**；
+再由 `tavern.expandMacros` 处理：认识的展开（char/user/random/pick/roll/注释），
+**不认识的 `{{xxx}}` 原样保留、绝不抛错**。宏层**大小写敏感**（只认规范小写）。
+
+**回归网**：`scripts/verify-host.mjs` 断言任何 `aiwu:*` 段 `interpolate !== false` 就红；
+`verify-tavern` 的 V20 覆盖未知宏 / 未闭合 / 大写变体 / `\,` 转义 / `roll` 三种写法。
+
+### 🔴 坑 14：易变段放前面 = 每轮把后面全部缓存烧掉
+
+宿主文档（`dsh-system-prompt/README.zh.md:152-154`）：头节点重写会从首个变化的 token 起失去前缀复用。
+所以「每轮都会变」的内容要**垫底**。反面教材：有社区插件把每轮都变的世界书段放 `order: -999999`（最前），
+等于每轮全废；另一家专门写了「缓存安全改道」机制来绕这件事。
+
+我们的四段位见 §四「v0.2.0 数据格式」。另外**没有**用 `systemPrompt.context()`：它确实能落到消息数组末尾，
+但会以 `source.kind='runtime-context'` 的 **user 消息落进会话表面**，与 L0 的「零系统痕迹」冲突。
+
 ---
 
 ## 四、当前架构
@@ -361,6 +394,62 @@ dsh-ai-with-u/
 ```
 
 **完全兼容原 skill 格式**，把原 `~/.ai-with-u/characters/` 拷过来就能用。
+
+### v0.2.0 数据格式（CCv3）
+
+> 上面那段是 **v0.1 的形态**，保留不动——它描述的中文键视图**仍在使用**（`Store.readCard()` 返回的就是
+> 旧 34 字段视图，面板 / 工具 / 旧自检全都按它读）。变的只是**落盘格式**：CCv3。
+
+```
+~/.dsh/ai-with-u/
+├── _index.json                  # 角色索引（结构不变）
+├── _active.json                 # 启用状态（结构不变）
+└── characters/<角色名>/
+    ├── card.json                # 酒馆卡 CCv3（spec: chara_card_v3）
+    ├── card.v1.bak.json         # 旧格式原件（首次迁移写一次，回滚用）
+    ├── diary.md                 # 日记（不变）
+    └── session.json             # 会话状态（不变）
+```
+
+**四条规则（改存储前先读这四条）**
+
+1. **读时归一**：盘上是旧 34 字段卡也能读（`tavern.normalizeCard` 在内存里补成 CCv3），
+   只有真正写盘时才落 CCv3。所以旧卡不会在「某次升级后凭空消失」；
+   `card.v1.bak.json` 是回滚兜底（`Copy-Item` 回去 + 重启即可，读时归一永远兼容旧格式）。
+2. **结构权威、原生投影**：34 字段结构存 `data.extensions.aiwu`；原生字段
+   （`description` / `personality` / `scenario` / `system_prompt` / `post_history_instructions` /
+   `first_mes` / `alternate_greetings`）由结构**单向**生成，原生**不反写**结构。
+   外部导入卡走 `aiwu.imported.raw` 保真（L1 优先用原文，用户一改就转结构权威）。
+   > 为什么单向：双向同步必然打架；实测同一份内容两种写法，L1 每段**只选一个来源渲染**，
+   > 所以文件 +42% 但 L1 反而略小（见 §九 v0.2.0）。
+3. **保存契约 C7 三键**：`Store.saveCard({ name, card?, ccv3? })` ——
+   `card` 是旧视图（编辑面，给了就重投影原生）、`ccv3` 是原始对象（世界书从这里走）；
+   `extensions.aiwu` 没被覆盖的键、`character_book`、别人的 `extensions.*` **一律原样保留**。
+   写入口只有 `fromLegacyView`（结构 → 卡），不做"原生反解析回结构"（导入时那次 `deriveFromNative` 例外）。
+4. **`presets/*/card.json` 故意保持旧格式**：全新安装时真的跑一遍迁移逻辑 = 迁移代码天天在跑回归。
+
+**四个提示词段位（v0.2.0 起；`src/prompt.ts`）**
+
+| order | 段名 | 内容 | 易变度 |
+|---|---|---|---|
+| 5000 | `aiwu:baseline` | L0 常驻底线 | 恒定 |
+| 5100 | `aiwu:active-character` | 酒馆卡渲染 + 会话摘要 + 日记 + 交互模式 + 关系口径 + 收尾提醒 | 每轮（会话写盘后） |
+| 10300 | `aiwu:lore` | 世界书命中（关键词 + 预算） | 命中集合变才变 |
+| 10350 | `aiwu:clock` | 距上次互动 + 当前时间 | 每分钟 |
+
+易变段**垫底**的理由：宿主文档（`dsh-system-prompt/README.zh.md:152-154`）说头节点重写会从首个变化的 token
+起失去前缀复用 —— 把每分钟都变的内容放最前，等于每轮把后面的缓存全烧掉（坑 14）。
+表述纪律：按宿主文档这是**失效范围最小**的摆法，**不承诺**实际命中率。
+
+**格式层的三个入口（都在 `src/tavern.ts`，纯函数零 IO）**
+
+| 函数 | 用途 |
+|---|---|
+| `normalizeCard(input)` | 任意输入（V3 / V2 / 旧 34 字段 / 无法识别）→ 规范 CCv3；`migrateLegacyCard` 是它的旧格式分支 |
+| `renderL1(card, extras)` | 卡 + 外部段落 → L1 文本（顺序：静态 → 世界书 → 时间差 → 会话 → 日记 → 模式 → 关系 → 收尾） |
+| `selectLoreEntries(book, texts, opts)` | 世界书命中（含预算/去重/四值 selective/稳定哈希 probability），返回文本 + `diag` |
+
+设计全文：`docs/design/2026-10-30-tavern-card.md`；社区对照与坑：`06-tmp/tavern-study/REPORT.md`。
 
 ---
 
@@ -410,6 +499,10 @@ npm run verify:host    # 真实 cordis 宿主验证
 ```
 
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
+
+> **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
+> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(186 项) → `verify-import`(47 项) → `verify-session`(94 项) → `verify-host`(19 项)**，
+> 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 ### 安装到 DSH（desktop profile）
 
@@ -490,3 +583,40 @@ pnpm install --lockfile-only --prefer-offline
 5. **`prompt.refresh` 的串行化是坏的**（`src/prompt.ts:301-307`）：A 的 `finally` 会无条件清掉 B 的登记，第三轮起并发。
 6. **保存角色卡会静默删空分组**（`client/card-schema.ts:283-285`）：新建角色只填 `basic`，动一个字段保存就丢掉 `personality` / `relationship` / `voice` 三个空组。
 7. **`openingNote` 只写不读**（`client/index.tsx:892` 声明、`1133-1138` 赋值、全文件无渲染）：「换一句开场」没有任何反馈。
+
+### v0.2.0（CCv3）—— 格式层重做 + 世界书按需注入（tavern-architect）
+
+设计全文 `docs/design/2026-10-30-tavern-card.md`（含 34 字段逐字段映射、完整样例、验收清单）。
+
+| 改动 | 文件 | 为什么 |
+|---|---|---|
+| 新增格式层：识别 / 归一 / 迁移 / 投影 / 渲染 / 世界书 / 宏 / 忘却 / 长度告警 | `src/tavern.ts`（新，约 1800 行） | 纯函数零 IO，能脱离宿主单测（`verify-tavern` 186 项） |
+| `card.json` 落 CCv3、读时归一、首次迁移写 `card.v1.bak.json` | `src/store.ts` | 无损导入导出；旧卡不会消失；可一条命令回滚 |
+| 保存契约 C7 三键 `{name, card?, ccv3?}` | `src/store.ts` + `src/web.ts` | 结构权威、原生投影；`character_book` / 别人的 extensions 不被洗掉 |
+| **`readCard()` 仍返回旧 34 字段视图**，完整对象走 `readCcV3()` | `src/store.ts` | 面板 / 工具 / 92 项旧自检零改动（Lead 决策 A）；内部一律 `readCcV3` |
+| L1 改由 `tavern.renderL1` 渲染；**删掉**旧的 `renderCharacterCard` | `src/prompt.ts` | 两套渲染并存 = L1 token 翻倍 |
+| 提示词拆四段 + **全部 `interpolate:false`** | `src/prompt.ts` | 坑 13 / 坑 14 |
+| 世界书按需注入（关键词 + 12 条 / 6000 字预算 + 四值 `selectiveLogic` + 稳定哈希 `probability` + Unicode 整词边界 + 同轮防抖） | `src/tavern.ts` | 调研四家社区实现后定稿（`REPORT.md` §4.3） |
+| 导入接口 `POST /character/import`（16 MB、按魔数判格式、预览不落盘） | `src/web.ts` | 带立绘的 PNG 卡常 3–10 MB，原 4 MB 上限会让好卡直接进不来 |
+| **P0：写盘按角色串行**（`Store.locked`，跨角色并行） | `src/store.ts` | `atomicWrite` 只防半个文件，防不了「读-改-写」丢更新（host.md P0-2） |
+| **P0：损坏文件走 `.corrupt-*` 备份且不删索引** | `src/store.ts` | 原来 JSON 坏了当"不存在"，`ensureIndex` 会把卡从列表剔除 = 卡凭空消失（host.md P0-23） |
+| 忘却改成「全卡按句手术」：遍历 `aiwu` 整棵树 + 世界书 + 外部原文 + 开场白，返回 `scanned` 计数 | `src/store.ts` + `src/tavern.ts` | 旧实现只认 `memory_anchor`/`dynamic_state` 两个键，迁 CCv3 后会**提示成功、一个字没删** |
+| 顺手修：`commitTurn` 的 turnId 去重从**单字段**改成按角色 Map | `src/store.ts` | 多角色并发时共用一个字段会互相踩掉去重 |
+| 新增 `scripts/verify-tavern.mjs`（186 项）并串进 `npm run build` | `scripts/`、`package.json` | 格式 / 迁移幂等 / 34 字段零丢失 / 世界书 / 忘却 / 并发写盘 / 四段装配 |
+
+**实测（预置三张卡）**
+
+- 文件：旧卡 2021 B → CCv3 2871 B（**+42%**，双写投影的代价）
+- L1：旧渲染 1107 字 → 新 L1 1142 字（含收尾提醒），**静态块 1042 字**——文件变大但 L1 没变大，
+  因为原生投影与结构是同一份内容，每段只选一个来源渲染
+- 内容保真：旧卡 42 条文本字段**零丢失**
+- 世界书成本：虞照 + 10 条真实世界书，典型对话命中 4 条、注入 **168 字**（L1 的 11%），
+  6000 字预算是防爆炸不是常态成本
+
+**还没做的（接手者从这里起手）**
+
+1. **`assets` 立绘落地**：导入时一律剥掉并告警（`import-card.ts`），要显示立绘得先定"存在哪、怎么引用"。
+2. **世界书递归激活**：`recursive_scanning` 字段认了但不执行（收益低、放大预算风险，报告 §4.3.3）。
+3. **`lore_lookup` 查询工具**：条目涨到几百条、预算装不下时再谈（需要挂常驻工具，主人已否）。
+4. **会话隔离**：仍是全局单角色（`_active.json` 一个 `character`）；两个会话同时启用**同一个角色**会写同一份
+   `session.json`（写盘已串行，但语义上是同一份会话）。
