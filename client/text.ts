@@ -73,6 +73,7 @@ const zh = {
   'detail.delete': '删除',
   'detail.diary': '最近日记',
   'detail.diaryEmpty': '这位角色还没有日记。',
+  'detail.loadFailed': '这个角色没能加载出来',
 
   'new.title': '新建角色',
   'new.name': '角色名',
@@ -240,6 +241,7 @@ const en: Dict = {
   'detail.delete': 'Delete',
   'detail.diary': 'Recent diary',
   'detail.diaryEmpty': 'This character has no diary yet.',
+  'detail.loadFailed': 'This character could not be loaded',
 
   'new.title': 'New character',
   'new.name': 'Name',

@@ -196,10 +196,11 @@ New-Item -ItemType Junction `
 
 ```bash
 npm install
-npm run build            # tsc + 前端打包 + 三套自检
+npm run build            # tsc(宿主) + tsc(前端类型) + 前端打包 + 三套自检
 npm run verify           # 产物自检（导出形状 / inject 形式 / 产物新鲜度）
 npm run verify:session   # 会话与指令自检（92 项）
 npm run verify:host      # 真实 cordis 宿主验证（14 项）
+npm run typecheck:client # 只查浏览器侧类型（tsconfig.client.json，noEmit）
 ```
 
 **详细开发记录与踩坑大全见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)**——包含 9 个真实踩过的坑、架构决策理由、以及给未来维护者的忠告。

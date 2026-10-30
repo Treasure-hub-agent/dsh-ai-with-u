@@ -685,18 +685,48 @@ function ResetAllDialog(props: {
 function CharacterDetailView(props: {
   detail: CharacterDetail | undefined
   loading: boolean
+  error: string
   live: boolean
   busy: boolean
   t: Translate
   onBack: () => void
+  onRetry: () => void
   onActivate: () => void
   onDeactivate: () => void
   onDelete: () => void
   onEdit: () => void
 }): JSX.Element {
-  const { detail, loading, live, busy, t, onBack, onActivate, onDeactivate, onDelete, onEdit } = props
+  const { detail, loading, error, live, busy, t, onBack, onRetry, onActivate, onDeactivate, onDelete, onEdit } = props
 
-  if (loading || detail === undefined) return <Skeleton />
+  if (loading) return <Skeleton />
+
+  // 加载失败：detail 已被清空，必须显式给出「空态 + 重试」，否则只会永远转圈
+  if (detail === undefined) {
+    if (error === '') return <Skeleton />
+    return (
+      <div className="awu-detail">
+        <div className="awu-detailNav">
+          <button type="button" className="awu-navBack" onClick={onBack} aria-label={t('detail.back')} title={t('detail.back')}>
+            <IconBack size={13} />
+            <span>{t('detail.back')}</span>
+          </button>
+        </div>
+        <div className="awu-empty">
+          <span className="awu-emptyMark"><IconAlert size={20} /></span>
+          <span className="awu-emptyTitle">{t('detail.loadFailed')}</span>
+          <span className="awu-emptyHint">{error}</span>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="button" className="awu-btn" data-size="sm" onClick={onRetry} disabled={busy}>
+              {t('common.retry')}
+            </button>
+            <button type="button" className="awu-btn" data-size="sm" onClick={onBack}>
+              {t('detail.back')}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   const card = detail.card
   const basic = entriesOf(card.basic)
@@ -883,6 +913,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [detailName, setDetailName] = useState('')
   const [detail, setDetail] = useState<CharacterDetail | undefined>(undefined)
   const [detailLoading, setDetailLoading] = useState(false)
+  // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
+  const [detailError, setDetailError] = useState('')
 
   const [dialog, setDialog] = useState<'' | 'new' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll'>('')
   const [deleteTarget, setDeleteTarget] = useState('')
@@ -938,17 +970,19 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [open, reload])
 
   const loadDetail = useCallback(async (name: string): Promise<void> => {
-    if (name === '') { setDetail(undefined); return }
+    if (name === '') { setDetail(undefined); setDetailError(''); return }
     setDetailLoading(true)
     try {
       const body = await fetchCharacter(name)
       if (!aliveRef.current) return
       setDetail(body)
+      setDetailError('')
       setError('')
     } catch (e) {
       if (!aliveRef.current) return
       setDetail(undefined)
-      setError(errorText(e))
+      // 不再顶到全局 error：这条错误属于详情区，由 CharacterDetailView 就地展示 + 重试
+      setDetailError(errorText(e))
     } finally {
       if (aliveRef.current) setDetailLoading(false)
     }
@@ -1372,10 +1406,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               <CharacterDetailView
                 detail={currentDetail}
                 loading={detailLoading}
+                error={detailError}
                 live={live && liveName === detailName}
                 busy={busy}
                 t={t}
-                onBack={() => { setDetailName(''); setDetail(undefined) }}
+                onBack={() => { setDetailName(''); setDetail(undefined); setDetailError('') }}
+                onRetry={() => { void loadDetail(detailName) }}
                 onActivate={() => onActivate(detailName)}
                 onDeactivate={onDeactivate}
                 onDelete={() => openDelete(detailName)}

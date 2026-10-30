@@ -56,17 +56,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`连不上宿主接口（${path}）：${error instanceof Error ? error.message : String(error)}`)
   }
 
-  // 路由没注册时宿主会落到 404 的通用处理上，拿不到 JSON——按「能力缺失」处理
-  if (res.status === 404 || res.status === 501) throw new ApiUnavailableError(path)
+  // 404 / 501 有两种截然不同的来源，必须分开：
+  //   a) 路由压根没注册（宿主版本旧 / 插件没挂上）→ 宿主落到通用 404，拿不到 JSON 信封；
+  //   b) 宿主自己的业务 404（`web.ts` 的「找不到角色：X」）→ 有 `{ ok:false, error }` 信封。
+  // 以前一律按 (a) 处理，于是「角色刚被删掉」会被提示成「宿主侧尚未提供该能力」，
+  // 而且 ErrorBar 的「重试」永远重试同一个地址。这里改成「先看响应体能不能解析」。
+  const missingStatus = res.status === 404 || res.status === 501
+  const asUnavailable = (): never => { throw new ApiUnavailableError(path) }
+
+  let text: string
+  try {
+    text = await res.text()
+  } catch (error) {
+    throw new Error(`读取宿主响应失败（${path}）：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  if (text.trim() === '') {
+    if (missingStatus) asUnavailable()
+    throw new Error(`宿主返回了空响应（HTTP ${res.status}）`)
+  }
 
   let body: unknown
   try {
-    body = await res.json()
+    body = JSON.parse(text)
   } catch {
+    if (missingStatus) asUnavailable()
     throw new Error(`宿主返回了非 JSON 响应（HTTP ${res.status}）`)
   }
 
-  if (typeof body !== 'object' || body === null) throw new Error(`宿主返回了无法解析的数据（${path}）`)
+  if (typeof body !== 'object' || body === null) {
+    if (missingStatus) asUnavailable()
+    throw new Error(`宿主返回了无法解析的数据（${path}）`)
+  }
   const envelope = body as { ok?: unknown; error?: unknown }
   if (envelope.ok !== true) {
     const message = typeof envelope.error === 'string' && envelope.error !== ''

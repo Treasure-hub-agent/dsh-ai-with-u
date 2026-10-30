@@ -239,6 +239,39 @@ ellipsis 没有裁切上下文。
 
 ---
 
+### 🟡 坑 10：`client/` 根本不在 `tsc` 里（2026-10-30 补）
+
+接手时才发现：`tsconfig.json` 的 `include` 只有 `src/**/*.ts`、`exclude` 里还明写了 `client`，
+而前端产物由 esbuild 打包——**esbuild 只转译不查类型**。于是 150 KB 的浏览器侧代码
+（`index.tsx` 单文件 750 行、`styles.ts` 1 897 行模板串）全程没有类型安全网，
+写错一个属性名也能进 `lib/client.js`，只在运行时炸。
+
+修法（已落地）：
+
+```jsonc
+// tsconfig.client.json —— 只做 noEmit 校验，产物仍归 esbuild
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "strict": true
+  },
+  "include": ["client/**/*.ts", "client/**/*.tsx"]
+}
+```
+
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 三套自检`，
+另有独立的 `npm run typecheck:client`。
+
+> 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
+> 不带类型声明；不装这两个包，`tsc` 会把 `JSX` 命名空间整个当作不存在。
+
+**教训：构建链里「不报错」不等于「检查过」。** 转译器和类型检查器是两件事，缺哪个都要补。
+
+---
+
 ## 四、当前架构
 
 ```
@@ -322,13 +355,16 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc + 前端打包 + 三套自检
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 三套自检
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
+npm run typecheck:client # 只查前端类型（noEmit）
 npm run verify         # 产物自检
 npm run verify:session # 会话/指令自检
 npm run verify:host    # 真实 cordis 宿主验证
 ```
+
+> ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -338,15 +374,22 @@ desktop profile 由 Electron 独占，**不能用 `dsh plugin` CLI**（会报 `m
 # 1. 建 junction（不要用 ln -sfn！）
 New-Item -ItemType Junction `
   -Path "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-ai-with-u" `
-  -Target "G:\ds-work\projects\dsh-ai-with-u"
+  -Target "D:\CODEX\deepseek-work\01-projects\dsh-ai-with-u"
 
 # 2. package.json 的 dependencies 加 link:，bundles 加 dsh-ai-with-u
+#    "dsh-ai-with-u": "link:D:/CODEX/deepseek-work/01-projects/dsh-ai-with-u"
 
-# 3. 重启 DSH（宿主不会热加载 lib/index.js）
+# 3. 让 pnpm-lock 与 package.json 对齐（只改锁、不动 node_modules）
+pnpm install --lockfile-only --prefer-offline
+
+# 4. 重启 DSH（宿主不会热加载 lib/index.js）
 ```
 
 > ⚠️ `cordis.patch.yml` **不需要**手写插件行——包内 `cordis.patch.yml` 的 `bundle.patch` 会自动挂载。
 > 手写重复行反而干扰故障定位。
+
+> 💡 用 `link:` 而不是 `file:`：`file:` 在 hoisted 模式下可能落成**实体拷贝**（坑 5 的同类），
+> 改源码后看不到效果；`link:` 是 junction，`npm run build` 一跑，宿主下次加载就是新代码。
 
 ---
 
@@ -374,3 +417,31 @@ New-Item -ItemType Junction `
 3. **不要盲信第一直觉**——卡片贴边框我以为是 padding，实际是 flex 链断
 4. **截图要先验证完整性**——烂脚手架会骗你
 5. **插件开发的大部分坑都在「声明与实际的错位」**：声明了不存在的服务、没声明的服务却去读、插槽没声明就去注册
+
+---
+
+## 九、接手记录（2026-10-30，v0.1.0 → 待发 0.1.1）
+
+接手时做了一轮全量源码勘察（宿主 4 文件 + 前端 8 文件），报告在
+`D:\CODEX\deepseek-work\06-tmp\aiwu-survey\host.md` 与 `client.md`（31 + 17 条风险，带行号）。
+本机安装位置：`D:\CODEX\deepseek-work\01-projects\dsh-ai-with-u`，桌面 profile 用 `link:` + junction 挂载。
+
+### 这一批改了什么
+
+| 改动 | 文件 | 为什么 |
+|---|---|---|
+| 补 `tsconfig.client.json` + `typecheck:client`，`build` 串进去 | `tsconfig.client.json`（新）、`package.json` | 前端 150 KB 代码原本零类型检查（坑 10） |
+| 加 `@types/react` / `@types/react-dom` | `package.json`（devDependencies） | 不装则 `JSX` 命名空间不存在，`tsc` 直接报错 |
+| 404 语义分开：只有「响应体不是 JSON 信封」才判 `ApiUnavailableError` | `client/api.ts` | 原本角色被删也被提示成「宿主侧尚未提供该能力」，重试永远打同一个死地址 |
+| 详情加载失败 → 空态 + 重试，不再永久骨架屏 | `client/index.tsx`、`client/text.ts` | 清 `detailError` 前，失败后 `detail` 为 `undefined`，`loading=false` 也只会渲染 `<Skeleton />` |
+| 文档同步 | `README.md`、本文件 | 安装路径 / 命令 / 坑 10 |
+
+### 还没修的（按优先级，接管者从这里起手）
+
+1. **写盘无互斥**（`src/store.ts:249-257 / 356-367 / 418-441`）：`atomicWrite` 只防写坏，不防丢更新；两个会话并发 `agent/turn-stopping` 会互相覆盖 `turn_count` / `recent`。建议给 `Store` 加一把按角色名的串行队列。
+2. **`diary.md` 写入器会丢内容**（`src/store.ts:369-384`）：整文件重写抹掉 `- ` 前缀与自定义标题；`date` 为空时写出永远解析不到的块。写入前应先校验 `date`、解析器与生成器对齐。
+3. **路由 `method` 是装饰品**（`src/index.ts:208-214`）：`webServer.register` 本身只有 `{kind,path,handler}`，同机 dsh-pet / dsh-whale-game 都在 handler 里自己看 `req.method` 分发。要么照做，要么把 `web.ts` 里的 `method` 字段删掉免得误导。
+4. **`commitTurn` 默认 mode 会篡改用户选择**（`src/store.ts:436`）：`/session/commit` 不传 mode 时，`_active.json` 的 `text` 会被写成 `text+action`。
+5. **`prompt.refresh` 的串行化是坏的**（`src/prompt.ts:301-307`）：A 的 `finally` 会无条件清掉 B 的登记，第三轮起并发。
+6. **保存角色卡会静默删空分组**（`client/card-schema.ts:283-285`）：新建角色只填 `basic`，动一个字段保存就丢掉 `personality` / `relationship` / `voice` 三个空组。
+7. **`openingNote` 只写不读**（`client/index.tsx:892` 声明、`1133-1138` 赋值、全文件无渲染）：「换一句开场」没有任何反馈。

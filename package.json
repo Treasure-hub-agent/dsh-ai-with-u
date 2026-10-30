@@ -50,13 +50,16 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
+    "typecheck:client": "tsc -p tsconfig.client.json",
     "verify": "node scripts/verify.mjs",
     "verify:session": "node scripts/verify-session.mjs",
     "verify:host": "node scripts/verify-host.mjs"
