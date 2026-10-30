@@ -121,6 +121,8 @@ const zh = {
   'relation.baseline': '起点',
   'relation.turns': '{n} 轮',
   'relation.note': '档位由模型根据对话现算，这里只显示起点锚定。',
+  'relation.baselineShort': '关系起点',
+  'detail.lastActive': '最近互动',
   'relation.none': '暂无关系档案',
 
   'opening.title': '开场',
@@ -370,6 +372,8 @@ const en: Dict = {
   'relation.baseline': 'Start',
   'relation.turns': '{n} turns',
   'relation.note': 'The live band is computed by the model from the conversation; this shows only the starting anchor.',
+  'relation.baselineShort': 'Starts at',
+  'detail.lastActive': 'Last active',
   'relation.none': 'No relationship record yet',
 
   'opening.title': 'Opening',

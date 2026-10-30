@@ -513,17 +513,29 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
+  /* 滚动条：细轨 + 静息态几乎透明，指针进到栏内 / 键盘聚焦时才显形。
+     配色只走 --awu-scroll（滚动条专用 token，深浅两态各一档）。 */
   scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--awu-scroll) 22%, transparent) transparent;
+}
+
+.awu-pane:hover,
+.awu-pane:focus-within {
   scrollbar-color: var(--awu-scroll) transparent;
 }
 
 .awu-pane::-webkit-scrollbar { width: 8px; }
 .awu-pane::-webkit-scrollbar-track { background: transparent; }
 .awu-pane::-webkit-scrollbar-thumb {
-  background: var(--awu-scroll);
+  background: transparent;
   border-radius: var(--awu-r-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
+  transition: background-color var(--awu-dur-2) var(--awu-ease);
+}
+.awu-pane:hover::-webkit-scrollbar-thumb,
+.awu-pane:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--awu-scroll) 80%, transparent);
 }
 
 /* 左栏头部：蒸馏 CTA → 分段器 → 计数行 的唯一 gutter 容器。
@@ -1012,7 +1024,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   font-size: var(--awu-fs-title);
   font-weight: 600;
   letter-spacing: .01em;
-  line-height: var(--awu-lh-tight);
+  line-height: 22px;
   color: var(--awu-gold);
   white-space: nowrap;
   overflow: hidden;
@@ -1023,7 +1035,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   display: block;
   max-width: 100%;
   font-size: var(--awu-fs-label);
-  line-height: var(--awu-lh-snug);
+  line-height: 18px;
   color: var(--awu-ink-mute);
   white-space: nowrap;
   overflow: hidden;
@@ -1038,9 +1050,13 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 
 .awu-card:hover .awu-cardChevron { color: var(--awu-ink-mute); transform: translateX(2px); }
 
+/* 卡片里的四行（名字 / 角色 / 摘要 / 页脚）全部用整数 px 行高：
+   2026-10-30 主人：「卡片高度差 1-2px，滚动时像三块不同尺寸的砖」。
+   根因是 1.25/1.4/1.65 这些比例行高乘 14/18px 会算出 22.5 / 23.1 这种小数，
+   不同内容的字面高度再叠一层，卡片就长短不一。锁死行高 + 摘要固定 2 行即可。 */
 .awu-cardBlurb {
   font-size: var(--awu-fs-body);
-  line-height: var(--awu-lh-body);
+  line-height: 23px;
   color: var(--awu-ink-dim);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1048,7 +1064,9 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   overflow: hidden;
   word-break: normal;
   overflow-wrap: break-word;
-  min-height: calc(var(--awu-fs-body) * var(--awu-lh-body) * 2);
+  /* 固定两行高：多一行字也截断，少一行字也留白，卡高由这里定死 */
+  height: 46px;
+  min-height: 0;
 }
 
 .awu-cardFoot {
@@ -1056,6 +1074,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   align-items: center;
   gap: var(--awu-gap-3);
   min-width: 0;
+  min-height: 22px;
+  line-height: 22px;
   font-size: var(--awu-fs-caption);
   letter-spacing: 0;
   color: var(--awu-ink-mute);
@@ -1065,10 +1085,11 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   display: inline-flex;
   align-items: center;
   gap: var(--awu-gap-2);
-  padding: 2px var(--awu-gap-4);
+  padding: 1px var(--awu-gap-4);
   border-radius: var(--awu-r-pill);
   border: 1px solid var(--awu-line);
   font-size: var(--awu-fs-caption);
+  line-height: 18px;
   letter-spacing: 0;
   color: var(--awu-ink-mute);
   white-space: nowrap;
@@ -1713,17 +1734,25 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   display: flex;
   flex-direction: column;
   gap: var(--awu-gap-5);
+  /* 与 .awu-pane 同一套滚动条：细轨 + hover 才显形 */
   scrollbar-width: thin;
-  scrollbar-color: var(--awu-scroll) transparent;
+  scrollbar-color: color-mix(in srgb, var(--awu-scroll) 22%, transparent) transparent;
 }
+
+.awu-editorBody:hover,
+.awu-editorBody:focus-within { scrollbar-color: var(--awu-scroll) transparent; }
 
 .awu-editorBody::-webkit-scrollbar { width: 8px; }
 .awu-editorBody::-webkit-scrollbar-track { background: transparent; }
 .awu-editorBody::-webkit-scrollbar-thumb {
-  background: var(--awu-scroll);
+  background: transparent;
   border-radius: var(--awu-r-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
+}
+.awu-editorBody:hover::-webkit-scrollbar-thumb,
+.awu-editorBody:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--awu-scroll) 80%, transparent);
 }
 
 /* ---- 分组：iOS inset grouped list ---- */

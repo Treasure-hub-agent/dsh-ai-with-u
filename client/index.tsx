@@ -691,6 +691,7 @@ function CharacterDetailView(props: {
   detail: CharacterDetail | undefined
   loading: boolean
   error: string
+  relation: RelationState | undefined
   live: boolean
   busy: boolean
   t: Translate
@@ -701,7 +702,7 @@ function CharacterDetailView(props: {
   onDelete: () => void
   onEdit: () => void
 }): JSX.Element {
-  const { detail, loading, error, live, busy, t, onBack, onRetry, onActivate, onDeactivate, onDelete, onEdit } = props
+  const { detail, loading, error, relation, live, busy, t, onBack, onRetry, onActivate, onDeactivate, onDelete, onEdit } = props
 
   if (loading) return <Skeleton />
 
@@ -770,6 +771,25 @@ function CharacterDetailView(props: {
             {t('roster.memory', { n: detail.diary.reduce((n, d) => n + d.timeline.length, 0) })}
             {' · '}
             {turns} {t('stats.turns')}
+          </div>
+          {/*
+            第二行元信息：把 hero 左右之间那块空处填上「关系起点 / 最近互动」。
+            这两项在详情数据里本来就有（relation.baseline、session.last_ts），
+            只是原先只画在「日记」tab 里，详情页看不到。
+          */}
+          <div className="awu-heroMeta">
+            {relation !== undefined && relation.baseline !== '' && (
+              <span className="awu-heroMetaItem" data-role="relation">
+                {t('relation.baselineShort')}
+                <b>{relation.baseline}</b>
+              </span>
+            )}
+            {(relation?.lastActive ?? detail.session?.last_ts ?? '') !== '' && (
+              <span className="awu-heroMetaItem" data-role="active">
+                {t('detail.lastActive')}
+                <b>{relativeDay(String(relation?.lastActive ?? detail.session?.last_ts ?? ''))}</b>
+              </span>
+            )}
           </div>
         </div>
         <div className="awu-heroActions">
@@ -1565,6 +1585,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     detail={currentDetail}
                     loading={detailLoading}
                     error={detailError}
+                    relation={relation}
                     live={live && liveName === detailName}
                     busy={busy}
                     t={t}
