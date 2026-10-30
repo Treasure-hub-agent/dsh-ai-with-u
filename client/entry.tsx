@@ -13,7 +13,7 @@
  * @module dsh-ai-with-u/client
  */
 import { CharacterPanel } from './index.js'
-import { DockEntry, DockSink } from './distill.js'
+import { DockSink } from './distill.js'
 import { localeDictionaries } from './text.js'
 import { installStyles } from './styles.js'
 
@@ -76,15 +76,14 @@ export function apply(ctx: ClientCtx): void {
   }, CharacterPanel))
 
   /*
-   * 蒸馏的发送通道。
+   * 蒸馏的发送通道（**不提供可见入口**）。
    *
-   * 面板挂在 `sidebar.footer.action`，那个席位**拿不到** `inputActions`；
+   * 面板挂在 `sidebar.footer.action`，那个席位拿不到 `inputActions`；
    * 只有会话级席位（`conversation.composer.dock`）的标准 props 里才有
-   * `inputActions` / `sessionId`。所以这里挂两个东西：
-   *  1. DockSink —— 无渲染组件，负责把 inputActions 存进模块级 sink，供面板侧调用；
-   *  2. DockEntry —— 输入框上方那个「蒸馏角色卡」小入口（会话级，天然带 sessionId）。
+   * `inputActions` / `sessionId`。所以这里只挂一个**无渲染**的 DockSink，
+   * 把能力存进模块级 sink 供面板里的「蒸馏」按钮调用。
    *
-   * 两者都走声明制插槽 `slots.inject`，席位被撤掉时自动清理。
+   * 主人明确要求：底部托盘不要再留一个单独的蒸馏按钮 —— 入口只在面板里。
    */
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
@@ -92,13 +91,6 @@ export function apply(ctx: ClientCtx): void {
     locale: NS,
     order: 90,
   }, DockSink))
-
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock',
-    id: `${NS}:distill-entry`,
-    locale: NS,
-    order: 20,
-  }, DockEntry))
 }
 
 export { CharacterPanel }

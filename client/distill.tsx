@@ -260,10 +260,15 @@ async function copyText(text: string): Promise<boolean> {
 // ---------------------------------------------------------------- 可见的 dock 入口
 
 /**
- * 输入框上方的「蒸馏」小入口（可选注册）。
+ * 输入框上方的「蒸馏」小入口 —— **当前未注册，保留备用**。
  *
- * **只填入、不发送**：用户此刻就在输入框旁边，自己按回车最安全，也避免「点一下就把一整个
- * 流程塞进正在生成的回合里」。输入框已有文字时不动它，只提示先清空。
+ * 2026-10-30 主人明确要求「dsh 底部托盘也不需要留这个单独的蒸馏按钮」，Lead 已把它的 dock 席位
+ * 从 `entry.tsx` 删掉（只保留无渲染的 `DockSink`，那是拿 `inputActions` 的唯一通道）。
+ * 组件本身留着（零成本）：将来若要做「输入框旁的快捷入口」直接捡回来，注册写法见
+ * `docs/design/2026-10-30-distill-entry.md` §6.3a（第二个 dock 席位、不同 id）。
+ *
+ * 如果哪天它真的回到 UI，请保持现在的取舍：**只填入、不发送**（用户人就在输入框旁，
+ * 自己按回车最安全；也避免把整个流程塞进一个正在生成的回合）。输入框已有文字时不动它。
  */
 export function DockEntry(props: { t: Translate }): JSX.Element {
   const { t } = props
@@ -499,10 +504,17 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
 }
 
 /**
- * 面板侧的「蒸馏」按钮：自带弹层，接线只需要一行。
+ * 面板侧的「蒸馏角色卡」主入口按钮：自带弹层，接线只需要一行。
+ *
+ * 2026-10-30 视觉反馈后重做（主人原话：「'蒸馏'按钮在面板上有些小了不明显」）：
+ *  - 从 `data-size="sm"` + `data-kind="ghost"`（被「新建角色」压住的小字）改成 **默认尺寸 + primary**；
+ *  - 文案从「蒸馏」改成完整的「蒸馏角色卡」（`distill.title`），图标保留；
+ *  - **不写死尺寸/颜色**：尺寸与配色全部交给 `data-*` 和 `awu-distill-*` 类，面板从 452px 改到 720px
+ *    大窗、以及液态玻璃视觉都不需要动这个组件。
  *
  * ```tsx
- * <DistillButton t={t} />
+ * <DistillButton t={t} />          // 只要按钮
+ * <DistillEntry t={t} />           // 按钮 + 一行说明（角色簿顶部的独立一块，推荐）
  * ```
  */
 export function DistillButton(props: { t: Translate; label?: string }): JSX.Element {
@@ -512,14 +524,15 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
     <>
       <button
         type="button"
-        className="awu-btn"
-        data-size="sm"
-        data-kind="ghost"
+        className="awu-btn awu-distill-cta"
+        data-kind="primary"
         title={t('distill.entryTitle')}
+        aria-haspopup="dialog"
+        aria-expanded={open}
         onClick={() => setOpen(true)}
       >
-        <IconQuill size={12} />
-        {label ?? t('distill.entry')}
+        <IconQuill size={14} />
+        {label ?? t('distill.title')}
       </button>
       {open && (
         <DistillDialog
@@ -529,5 +542,27 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
         />
       )}
     </>
+  )
+}
+
+/**
+ * 角色簿顶部的**独立一块**：主 CTA + 一行极短说明。
+ *
+ * 为什么单独做一个组件而不是把说明塞进 `DistillButton`：按钮可以在工具行里内联用，
+ * 而「CTA + 说明」是块级排版（`awu-distill-entry` 用 flex 竖排，宽度随容器走），两者共用一个按钮。
+ *
+ * 文案回退：`distill.entryHint` 还没并进 `client/text.ts` 时，`makeTranslator` 会把 key 原样返回
+ * （`text.ts` 的兜底行为），这里检测到「原样返回」就退到已有的 `distill.entryTitle`，
+ * 保证在 Lead 合并文案之前界面上也不会出现裸 key。
+ */
+export function DistillEntry(props: { t: Translate; label?: string }): JSX.Element {
+  const { t, label } = props
+  const raw = t('distill.entryHint')
+  const hint = raw === 'distill.entryHint' ? t('distill.entryTitle') : raw
+  return (
+    <div className="awu-distill-entry">
+      <DistillButton t={t} label={label} />
+      <div className="awu-distill-entryHint">{hint}</div>
+    </div>
   )
 }

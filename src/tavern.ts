@@ -434,7 +434,7 @@ export function normalizeCard(input: unknown, opts: NormalizeOptions = {}): Char
   if (Object.keys(raw).length > 0) {
     data.creator_notes = '⚠️ 这张卡的格式未被识别，原始内容已完整保留在 extensions.aiwu.legacy.extra。'
   }
-  if (opts.now !== undefined) stampCard(data, opts.now)
+  if (opts.now !== undefined) stampCardTimes({ spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }, opts.now)
   return { spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }
 }
 
@@ -656,7 +656,7 @@ export function migrateLegacyCard(input: Json, opts: NormalizeOptions = {}): Cha
   if (!isEmptyText(input['creator_notes'])) data.creator_notes = str(input['creator_notes'])
 
   projectNative(data)
-  if (now !== undefined) stampCard(data, now)
+  if (now !== undefined) stampCardTimes({ spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }, now)
   return { spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }
 }
 
@@ -726,7 +726,8 @@ function buildPostHistoryText(aiwu: AiwuExtension): string {
   return lines.length === 0 ? '' : ['【收尾提醒】', ...lines].join('\n')
 }
 
-function stampCard(data: CardData, now: Date): void {
+export function stampCardTimes(card: CharacterCardV3, now: Date): void {
+  const data = card.data
   const seconds = unixSeconds(now)
   if (typeof data.creation_date !== 'number') data.creation_date = seconds
   data.modification_date = seconds
@@ -884,8 +885,14 @@ export function fromLegacyView(view: LegacyCardView, base?: CharacterCardV3 | Js
     assignText(world, 'sharedPast', worldIn, '你与他的旧')
     aiwu.world = compact(world)
   }
-  if (isRecord(view.memory_anchor) && '要点' in view.memory_anchor) {
-    aiwu.memoryAnchors = list(view.memory_anchor['要点'])
+  if (isRecord(view.memory_anchor)) {
+    const bucket = view.memory_anchor
+    // 标准形状是 `{ 要点: string[] }`；但旧卡也出现过 `{ 背景: "..." }` 这种自定义键，
+    // 一律拍平成 string[]，**不许因为键名不认识就把记忆丢了**（后者曾是真实数据丢失点）。
+    const anchors = '要点' in bucket
+      ? list(bucket['要点'])
+      : Object.values(bucket).flatMap(value => list(value))
+    if (anchors.length > 0) aiwu.memoryAnchors = anchors
   }
   if (Object.keys(stateIn).length > 0) {
     const state: AiwuDynamicState = { ...(aiwu.dynamicState ?? {}) }
@@ -980,7 +987,23 @@ export interface MacroContext {
 const COMMENT_MACRO = /\{\{\s*(\/\/[\s\S]*?|comment\s*:[\s\S]*?)\}\}/gu
 const SIMPLE_MACRO = /\{\{\s*(char|user)\s*\}\}/gu
 const LIST_MACRO = /\{\{\s*(random|pick)\s*:([^{}]*)\}\}/gu
-const ROLL_MACRO = /\{\{\s*roll\s*:\s*(\d+)\s*\}\}/gu
+const ROLL_MACRO = /\{\{\s*roll\s*:\s*(?:1?d)?(\d+)\s*\}\}/giu
+
+/**
+ * 拆分 `{{random:A,B,C}}` 的参数：支持 `\,` 转义逗号（酒馆写法），去空白。
+ */
+function splitMacroList(body: string): string[] {
+  const items: string[] = []
+  let current = ''
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i]
+    if (ch === '\\' && body[i + 1] === ',') { current += ','; i += 1; continue }
+    if (ch === ',') { items.push(current.trim()); current = ''; continue }
+    current += ch
+  }
+  items.push(current.trim())
+  return items.filter(item => item !== '')
+}
 
 /**
  * 宏替换。
@@ -995,7 +1018,7 @@ export function expandMacros(text: string, ctx: MacroContext): string {
   let out = text.replace(COMMENT_MACRO, '')
   out = out.replace(SIMPLE_MACRO, (_match, name: string) => (name === 'char' ? ctx.char : ctx.user))
   out = out.replace(LIST_MACRO, (_match, _kind: string, body: string) => {
-    const items = body.split(',').map(s => s.trim()).filter(s => s !== '')
+    const items = splitMacroList(body)
     if (items.length === 0) return ''
     if (ctx.mode === 'stable') return items[0] ?? ''
     const index = Math.min(items.length - 1, Math.floor(random() * items.length))
@@ -1007,6 +1030,9 @@ export function expandMacros(text: string, ctx: MacroContext): string {
     if (ctx.mode === 'stable') return `d${n}`
     return String(1 + Math.floor(random() * n))
   })
+  // ⚠️ 不认识的 `{{xxx}}` **原样保留**（绝不抛错）。
+  // 宿主自己的 interpolate 会对未知变量 throw；所以我们把每段都注册成 interpolate:false，
+  // 由这一层负责"认识的展开、不认识的原样留着"（Lead 2026-10-30 调研结论）。
   return out
 }
 
@@ -1019,7 +1045,7 @@ export function parseDecorators(content: string): { content: string; decorators:
   const decorators: Record<string, string> = {}
   const kept: string[] = []
   for (const line of content.split(/\r?\n/u)) {
-    const match = /^\s*@@\s*([A-Za-z_]+)\s*(.*)$/u.exec(line)
+    const match = /^\s*@@\s*([^\s]+)\s*(.*)$/u.exec(line)
     if (match === null) { kept.push(line); continue }
     const key = (match[1] ?? '').toLowerCase()
     const value = (match[2] ?? '').trim()
@@ -1060,6 +1086,9 @@ export interface LoreSelectOptions {
 
 interface ScoredEntry {
   entry: CharacterBookEntry
+  /** 去重键（id/name/内容三选一，带命名空间防撞）。 */
+  key: string
+  /** 对外暴露的 id（原始 id / name / 内容摘要）。 */
   id: string
   name: string
   position: 'before_char' | 'after_char'
@@ -1152,6 +1181,9 @@ export function selectLoreEntries(
     if (text.trim() === '') continue
 
     const identity = entryIdentity(entry)
+    const displayId = (entry.id !== undefined && str(entry.id).trim() !== '')
+      ? str(entry.id).trim()
+      : (isEmptyText(entry.name) ? identity : str(entry.name).trim())
     const contentKey = text.replace(/\s+/gu, ' ').trim()
     const isConstant = entry.constant === true || parsed.decorators['activate'] !== undefined
 
@@ -1175,8 +1207,9 @@ export function selectLoreEntries(
     else hitCount += 1
     scored.push({
       entry,
-      id: identity,
-      name: isEmptyText(entry.name) ? identity : str(entry.name).trim(),
+      key: identity,
+      id: displayId,
+      name: isEmptyText(entry.name) ? displayId : str(entry.name).trim(),
       position: entry.position === 'before_char' ? 'before_char' : 'after_char',
       text,
       constant: isConstant,

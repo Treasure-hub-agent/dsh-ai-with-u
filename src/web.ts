@@ -15,8 +15,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store, DiaryEditInput } from './store.js'
 import type { PromptController } from './prompt.js'
 import { distillFlowInfo } from './distill.js'
+import { parseCardBuffer } from './import-card.js'
+import { normalizeCard, cardName, toLegacyView } from './tavern.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
+
+/** 普通请求体上限（4 MB）：面板的 JSON 请求远小于这个量。 */
+export const BODY_LIMIT = 4 * 1024 * 1024
+/**
+ * 导入接口的请求体上限（16 MB）。
+ * 带立绘的酒馆 PNG 卡常见 3–10 MB，走 base64 还要 ×1.33——4 MB 会让好卡直接进不来。
+ * **只对 `/character/import` 放宽**，其余路由保持 4 MB（不放大无谓的攻击面）。
+ */
+export const IMPORT_BODY_LIMIT = 16 * 1024 * 1024
 
 interface JsonBody { [key: string]: unknown }
 
@@ -30,12 +41,12 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(bytes)
 }
 
-async function readBody(req: IncomingMessage): Promise<JsonBody> {
+async function readBody(req: IncomingMessage, limitBytes: number = BODY_LIMIT): Promise<JsonBody> {
   const chunks: Buffer[] = []
   let total = 0
   for await (const chunk of req) {
     total += (chunk as Buffer).length
-    if (total > 4 * 1024 * 1024) throw new Error('请求体过大')
+    if (total > limitBytes) throw new Error(`请求体过大（上限 ${Math.round(limitBytes / 1024 / 1024)} MB）`)
     chunks.push(chunk as Buffer)
   }
   if (total === 0) return {}
@@ -121,13 +132,15 @@ export function buildRoutes(store: Store, prompt: PromptController): Array<{ met
       handler: guard(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const name = url.searchParams.get('name') ?? ''
-        const card = await store.readCard(name)
-        if (card === undefined) { send(res, 404, { ok: false, error: `找不到角色：${name}` }); return }
+        const ccv3 = await store.readCcV3(name)
+        if (ccv3 === undefined) { send(res, 404, { ok: false, error: `找不到角色：${name}` }); return }
         const relation = await store.relationState(name)
         send(res, 200, {
           ok: true,
           name,
-          card,
+          // 过渡期双视图（C7）：`card` 保持旧 34 字段语义（面板不改也能活），`ccv3` 是完整对象
+          card: toLegacyView(ccv3),
+          ccv3,
           diary: await store.readDiary(name),
           session: (await store.readSession(name)) ?? {},
           relation: { tag: `${name}（${relation.baseline}）`, bands: relation.bands, baseline: relation.baseline },
@@ -135,19 +148,55 @@ export function buildRoutes(store: Store, prompt: PromptController): Array<{ met
         })
       }),
     },
-    // ------------------------------------------------------------ 保存角色卡
+    // ------------------------------------------------------------ 保存角色卡（C7 三键契约）
     {
       method: 'POST',
       path: `${ROUTE_PREFIX}/character/save`,
       handler: guard(async (req, res) => {
         const body = await readBody(req)
         const name = String(body['name'] ?? '').trim()
-        const card = body['card']
         if (name === '') throw new Error('缺少角色名')
-        if (typeof card !== 'object' || card === null || Array.isArray(card)) throw new Error('card 必须是对象')
-        await store.writeCard(name, card as JsonBody)
+        const card = body['card']
+        const ccv3 = body['ccv3']
+        if (card === undefined && ccv3 === undefined) throw new Error('缺少 card 或 ccv3')
+        if (card !== undefined && (typeof card !== 'object' || card === null || Array.isArray(card))) {
+          throw new Error('card 必须是对象')
+        }
+        if (ccv3 !== undefined && (typeof ccv3 !== 'object' || ccv3 === null || Array.isArray(ccv3))) {
+          throw new Error('ccv3 必须是对象')
+        }
+        // 结构是权威、原生是投影：给 card 就重投影，extensions.aiwu / character_book 原样保留
+        const saved = await store.saveCard({ name, card, ccv3 })
         if (prompt.characterName === name) await afterWrite(prompt)
-        send(res, 200, { ok: true, name })
+        send(res, 200, { ok: true, name: saved.name, card: toLegacyView(saved.card), ccv3: saved.card })
+      }),
+    },
+    // ------------------------------------------------------------ 导入酒馆卡（PNG / CHARX / JSON）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/character/import`,
+      handler: guard(async (req, res) => {
+        // 只这个路由放宽到 16 MB：带立绘的 PNG 卡常超 4 MB
+        const body = await readBody(req, IMPORT_BODY_LIMIT)
+        const fileName = String(body['fileName'] ?? '').trim()
+        const dataBase64 = String(body['dataBase64'] ?? '').trim()
+        if (dataBase64 === '') throw new Error('缺少卡文件内容 dataBase64')
+        // 解析错误原样透出（解析器已经有成套中文文案，别统一压成"导入失败"）
+        const parsed = parseCardBuffer(Buffer.from(dataBase64, 'base64'), fileName)
+        const fallbackName = fileName.replace(/\.[^./\\]+$/u, '').trim()
+        const ccv3 = normalizeCard(parsed.card, { fallbackName })
+        const name = cardName(ccv3).trim()
+        if (name === '') throw new Error('无法确定角色名：卡片里没有 name，文件名也推不出来')
+        const conflict = (await store.readCcV3(name)) === undefined ? undefined : { name }
+        // **不写盘**：用户在面板确认后才走 /character/save
+        send(res, 200, {
+          ok: true,
+          format: parsed.format,
+          warnings: parsed.warnings,
+          ccv3,
+          name,
+          ...(conflict === undefined ? {} : { conflict }),
+        })
       }),
     },
     // ------------------------------------------------------------ 删除角色

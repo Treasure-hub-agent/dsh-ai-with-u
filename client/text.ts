@@ -243,6 +243,7 @@ const zh = {
   'distill.dockDraftNotEmpty': '输入框里已有文字，先用面板里的「发送」，或清空后再点这里',
   'distill.dockFilled': '指令已填入输入框，按回车发送',
   'distill.dockUnavailable': '没拿到输入框能力：去面板里点「发送」，或复制指令手动粘贴',
+  'distill.entryHint': '从作品或设定做一张卡',
 }
 
 type Dict = { [K in keyof typeof zh]: string }
@@ -478,6 +479,7 @@ const en: Dict = {
   'distill.dockDraftNotEmpty': 'The input already has text — use Send in the panel, or clear it first',
   'distill.dockFilled': 'Prompt filled into the input — press Enter to send',
   'distill.dockUnavailable': 'Composer API unavailable: use Send in the panel, or copy the prompt',
+  'distill.entryHint': 'Make a card from a story or a setup',
 }
 
 export const localeDictionaries = { zh, en }

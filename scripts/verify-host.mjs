@@ -113,6 +113,19 @@ const sp = app.systemPrompt
 const sectionNames = [...sp.layers.keys()]
 check(sectionNames.includes('aiwu:baseline'), `L0 常驻段已注册：${sectionNames.join(', ')}`)
 check(sectionNames.includes('aiwu:active-character'), 'L1 角色段已注册（未启用时为空串）')
+check(sectionNames.includes('aiwu:lore'), '世界书段已注册（垫底 order 10300）')
+check(sectionNames.includes('aiwu:clock'), '时间差段已注册（最后 order 10350）')
+
+// 🔴 宿主默认会对段文本做 {{var}} 插值，未知变量直接抛错 → 我们的段必须全部 interpolate:false
+const ourSections = [...sp.layers.values()].filter(s => String(s.name).startsWith('aiwu:'))
+const interpolated = ourSections.filter(s => s.interpolate !== false).map(s => s.name)
+check(interpolated.length === 0,
+  `所有 aiwu 段都关掉了宿主插值（interpolate:false）${interpolated.length === 0 ? '' : '：漏了 ' + interpolated.join(',')}`)
+const loreSection = sp.layers.get('aiwu:lore')
+const clockSection = sp.layers.get('aiwu:clock')
+check(loreSection?.order === 10300, `世界书段 order = ${String(loreSection?.order)}（期望 10300，易变段垫底）`)
+check((clockSection?.order ?? 0) > (loreSection?.order ?? 0),
+  `时间差段在最后：clock ${String(clockSection?.order)} > lore ${String(loreSection?.order)}`)
 const rendered = sp.render()
 check(rendered.includes('AI WITH U · 角色扮演底线'), 'L0 段能渲染出底线文本')
 check(rendered.length > 100, `渲染长度正常（${rendered.length} 字符）`)

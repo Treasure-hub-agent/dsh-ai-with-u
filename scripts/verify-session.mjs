@@ -6,7 +6,7 @@
  *
  * 覆盖：
  *   1. session.json 写入：turn_count / last_ts（带时区偏移）/ recent 滚动窗口
- *   2. 「忘记{事情}」：日记 + 会话摘要 + card.json memory_anchor/dynamic_state 三处同步清理
+ *   2. 「忘记{事情}」：日记 + 会话摘要 + 卡内记忆锚点/动态状态 三处同步清理（CCv3 下是全卡按句手术）
  *   3. 「改日记{内容}」：就地改写命中的一条，其他条目不动
  *   4. 「全新开始」：会话归零、mode 保留、日记保留
  *   5. 「彻底重置」：会话 + 日记全清
@@ -86,7 +86,17 @@ section('1. session.json 写入（turn_count / last_ts / recent）')
   check(Math.abs(Date.parse(onDisk.last_ts) - Date.now()) < 60_000, 'last_ts 是当前时间')
   check(Array.isArray(onDisk.recent) && onDisk.recent.length === 1, `recent 已写入：${JSON.stringify(onDisk.recent)}`)
   check(onDisk.recent[0].includes('考试'), 'recent 里含本轮摘要')
-  check(onDisk.mode === 'text+action', `mode 已落盘：${onDisk.mode}`)
+  // P0-4 修法：不传 mode 时**不编造**默认值（旧实现会写成 text+action，覆盖用户的 text 选择）
+  check(onDisk.mode === undefined || onDisk.mode === 'text+action',
+    `不传 mode 时不编造：${String(onDisk.mode)}`)
+  // 「不篡改用户选择」用另一张卡验证，避免污染本节的轮次计数
+  const MODE_NAME = `${NAME}-mode`
+  await store.writeCard(MODE_NAME, { ...CARD, name: MODE_NAME })
+  const withMode = await store.commitTurn({ character: MODE_NAME, user: '显式 mode', turnId: 'mode-1', mode: 'text' })
+  check(withMode.session?.mode === 'text', '显式传 mode 时落盘')
+  const keepMode = await store.commitTurn({ character: MODE_NAME, user: '不传 mode', turnId: 'mode-2' })
+  check(keepMode.session?.mode === 'text', '不传 mode 时保留已有值（不篡改用户的 text 选择）')
+  await store.deleteCharacter(MODE_NAME, true)
 
   // 同 turnId 重复触发只写一次
   const dup = await store.commitTurn({ character: NAME, user: '重复', turnId: 't1' })
@@ -132,7 +142,7 @@ section('2. 「忘记{事情}」三处同步清理')
   check(allTimeline.some(t => t.includes('火锅')), '无关条目「火锅」保留')
   check(allTimeline.some(t => t.includes('换工作')), '另一天的无关条目保留')
 
-  const card = await store.readCard(NAME)
+  const card = await store.readCardView(NAME)
   const dynText = Object.values(card.dynamic_state ?? {}).join('')
   check(!dynText.includes('考试'), `card.dynamic_state 里的「考试」已清掉：${JSON.stringify(card.dynamic_state)}`)
   const anchorText = Object.values(card.memory_anchor ?? {}).join('')
@@ -217,7 +227,7 @@ section('5. 「彻底重置」：会话 + 日记全清')
   try { rawDiary = await readFile(join(sandbox, 'characters', NAME, 'diary.md'), 'utf8') } catch { rawDiary = '(文件不存在)' }
   check(!rawDiary.includes('记忆'), 'diary.md 里已无历史条目')
 
-  const card = await store.readCard(NAME)
+  const card = await store.readCardView(NAME)
   check(card !== undefined && card.name === NAME, '角色卡本身不受重置影响')
 }
 
@@ -252,7 +262,7 @@ section('7. 「换一句开场」：openings 轮换')
   // 有历史档案（recent 非空）→ 不轮换、不写盘
   const withHistory = await store.rotateOpening(NAME)
   check(withHistory.history === true, '有历史档案时 history=true')
-  const cardAfterHistory = await store.readCard(NAME)
+  const cardAfterHistory = await store.readCardView(NAME)
   check(JSON.stringify(cardAfterHistory.openings) === JSON.stringify(CARD.openings), '有历史档案时不动 openings')
 
   // 全新开始 → 无历史档案 → 轮换
@@ -262,7 +272,7 @@ section('7. 「换一句开场」：openings 轮换')
   check(r1.opening === CARD.openings[0], `取到第一句：${r1.opening}`)
   check(r1.openings[r1.openings.length - 1] === CARD.openings[0], '取出的句子被移到数组末尾（游标持久化）')
 
-  const card1 = await store.readCard(NAME)
+  const card1 = await store.readCardView(NAME)
   check(JSON.stringify(card1.openings) === JSON.stringify(r1.openings), '顺序已写入 card.json')
 
   const r2 = await store.rotateOpening(NAME)
@@ -278,7 +288,7 @@ section('7. 「换一句开场」：openings 轮换')
   check(r4.needGenerate === true, 'openings 缺失时 needGenerate=true')
   const r5 = await store.rotateOpening(NAME, { candidates: ['新生成的 1', '新生成的 2'] })
   check(r5.opening === '新生成的 1', `生成候选后采用第一句：${r5.opening}`)
-  const card5 = await store.readCard(NAME)
+  const card5 = await store.readCardView(NAME)
   check(card5.openings.includes('新生成的 1') && card5.openings.includes('新生成的 2'), '生成的候选已写入 card.json')
 
   // 开局三态判定

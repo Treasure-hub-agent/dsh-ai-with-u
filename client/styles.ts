@@ -19,11 +19,18 @@ export const EASE = 'cubic-bezier(.22,.61,.36,1)'
 import { DISTILL_CSS } from './distill.styles'
 import { GUIDE_CSS } from './guide.styles'
 
-/** 面板宽度（px）：CSS 与 JS 共用的唯一来源（index.tsx 的 computePosition 也引用它）。 */
-export const PANEL_WIDTH = 452
+/**
+ * 面板宽度（px）：CSS 与 JS 共用的唯一来源。
+ *
+ * 2026-10-30 主人两次反馈：先是 452px 小气泡改角色卡太吃力，改成居中大窗后仍嫌小。
+ * 最终对齐已装的 dsh-context「上下文洞察」**主面板**（不是它的小模态）：
+ *   .lc-ov-card  { width: min(1120px, 100vw - 32px); height: calc(100% - 80px) }
+ *   .lc-modal-card { width: min(720px, 100vw - 48px) }   ← 那是它的明细小弹窗，别抄错
+ */
+export const PANEL_WIDTH = 1120
 
-/** 面板最大高（px）：同上，避免 CSS 与 JS 各写一份魔法数。 */
-export const PANEL_MAX_H = 720
+/** 面板上下留白（px）：主面板高度 = calc(100vh - 这个值)，与 dsh-context 一致。 */
+export const PANEL_MAX_H = 80
 
 /** 卡片错峰升起的每张延迟（ms）：JS 的 animationDelay 与 CSS 的动画节奏共用。 */
 export const CARD_STAGGER = 34

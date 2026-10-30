@@ -18,7 +18,7 @@
  *
  * 运行：node scripts/verify-tavern.mjs
  */
-import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -188,15 +188,16 @@ section('V5 · 世界书命中与扫描深度')
 
 section('V6 · 世界书预算')
 {
+  // 内容必须各条不同：相同内容会被去重（V7），就测不到预算了
   const many = Array.from({ length: 20 }, (_, i) =>
-    entry({ id: `e${i}`, keys: ['关键词'], content: '长'.repeat(400), insertion_order: i }))
+    entry({ id: `e${i}`, keys: ['关键词'], content: `第${i}条`.padEnd(400, '长'), insertion_order: i }))
   const sel = selectLoreEntries(bookOf(many), ['关键词出现了'], { budgetChars: 1500 })
   check(sel.text.length <= 1500, `预算生效（${sel.text.length} ≤ 1500 字）`)
   check(sel.diag.droppedByBudget.length > 0, `超预算条目被记入 droppedByBudget（${sel.diag.droppedByBudget.length} 条）`)
-  check(sel.diag.usedChars === sel.text.replace(/▎[^\n]*\n\n?/gu, '').length + 0 || sel.diag.usedChars <= 1500, 'usedChars 不超预算')
-  // token_budget 换算：1 token ≈ 1.5 字
-  const tokenBased = selectLoreEntries(bookOf(many), ['关键词'], { budgetChars: 999999 })
-  check(tokenBased.diag.budgetChars === Number.MAX_SAFE_INTEGER || tokenBased.diag.budgetChars >= LORE_DEFAULTS.budgetChars, '未给预算时用默认预算')
+  check(sel.diag.usedChars <= 1500, `usedChars 不超预算（${sel.diag.usedChars}）`)
+  // token_budget 换算：1 token ≈ 1.5 字（中文保守估计）
+  const tokenBased = selectLoreEntries(bookOf(many, { token_budget: 500 }), ['关键词'], {})
+  check(tokenBased.diag.budgetChars === 750, `token_budget 500 → 字符预算 750（实际 ${tokenBased.diag.budgetChars}）`)
 }
 
 section('V7 · 世界书去重')
@@ -223,10 +224,10 @@ section('V8 · constant 条目')
   const sel = selectLoreEntries(book, ['完全无关的话'])
   check(sel.entries.length === 1 && sel.entries[0].id === 'always', 'constant 不需要关键词也注入')
   check(sel.diag.constantCount === 1, 'constantCount 统计正确')
-  // constant 优先保留：预算只够一条时，constant 留下
+  // constant 优先保留：预算只够一条时，constant 留下（内容要不同，否则先去重了）
   const tight = selectLoreEntries(bookOf([
     entry({ id: 'k', keys: ['命中'], content: '◯'.repeat(300), insertion_order: 1 }),
-    entry({ id: 'c', keys: [], content: '◯'.repeat(300), constant: true, insertion_order: 2 }),
+    entry({ id: 'c', keys: [], content: '◎'.repeat(300), constant: true, insertion_order: 2 }),
   ]), ['命中'], { budgetChars: 320 })
   check(tight.entries.length === 1 && tight.entries[0].id === 'c', '预算吃紧时 constant 优先于关键词命中')
 }
@@ -302,6 +303,30 @@ for (const name of PRESETS) {
 }
 
 // ================================================================ V12 / V13
+
+section('V20 · 宏健壮性（宿主会抛错的那几种，这里必须不崩）')
+{
+  const ctx = { char: '虞照', user: '你', mode: 'stable' }
+  // 不认识的宏：原样保留，绝不抛错
+  check(expandMacros('{{未知宏}}', ctx) === '{{未知宏}}', '未知宏原样保留（不抛错）')
+  check(expandMacros('前缀 {{foo bar}} 后缀', ctx) === '前缀 {{foo bar}} 后缀', '不规则的 {{...}} 原样')
+  check(expandMacros('半截 {{char', ctx) === '半截 {{char', '未闭合的 {{ 原样（不抛错）')
+  check(expandMacros('}} 单独的 }}', ctx) === '}} 单独的 }}', '单独的 }} 原样')
+  // 转义逗号
+  check(expandMacros('{{random:a\\,b,c}}', ctx) === 'a,b', 'random 支持 \\, 转义逗号')
+  // roll 的两种写法
+  check(expandMacros('{{roll:20}}', ctx) === 'd20', 'roll:20 → d20')
+  check(expandMacros('{{roll:d20}}', ctx) === 'd20', 'roll:d20 → d20')
+  check(expandMacros('{{roll:1d20}}', ctx) === 'd20', 'roll:1d20 → d20')
+  // 中文不会被当成分隔符（不能用 \W 边界）
+  const zh = T.selectLoreEntries(bookOf([entry({ id: 'zh', keys: ['便利贴'], content: '中文关键词' })]), ['他贴了便利贴'])
+  check(zh.entries.length === 1, '中文关键词用包含匹配命中（不加 \\W 边界）')
+  // L1 渲染里 char/user 必须已展开，认识不了的保留
+  const card = migrated['虞照'].card
+  const withMacros = normalizeCard({ ...card, data: { ...card.data, description: '{{char}} 对 {{user}} 说：{{未知}}' } })
+  const text = renderL1Static(withMacros)
+  check(text.includes('虞照 对 你 说') && text.includes('{{未知}}'), 'L1 展开认识宏、保留不认识宏')
+}
 
 section('V12 · L1 段顺序（静态 → 世界书 → 时间 → 会话 → 日记 → 模式 → 关系 → 收尾）')
 {
@@ -489,6 +514,9 @@ section('V14 / V15 · 存储层：损坏文件不丢卡 / 并发写盘不丢更�
   const NAME = '测试角色'
   try {
     const legacy = await readPreset('虞照')
+    // 模拟"盘上已经有旧格式卡"：备份只在首次把旧卡写成 CCv3 时产生
+    await mkdir(join(sandbox, 'characters', NAME), { recursive: true })
+    await writeFile(store.cardPath(NAME), `${JSON.stringify({ ...legacy, name: NAME }, null, 2)}\n`, 'utf8')
     await store.writeCard(NAME, { ...legacy, name: NAME })
 
     // ---- 写盘后：盘上是 CCv3、旧卡有备份
@@ -496,21 +524,23 @@ section('V14 / V15 · 存储层：损坏文件不丢卡 / 并发写盘不丢更�
     check(raw.spec === 'chara_card_v3', 'writeCard 落盘为 CCv3')
     check(await exists(join(sandbox, 'characters', NAME, 'card.v1.bak.json')), '首次迁移写了 card.v1.bak.json 备份')
 
-    // ---- readCard 返回 CCv3；readCardView 返回旧 34 字段视图
-    const read = await store.readCard(NAME)
-    check(read?.spec === 'chara_card_v3', 'readCard 返回 CCv3')
-    const view = await store.readCardView(NAME)
-    check(view?.['basic']?.['身份'] === legacy.basic['身份'], 'readCardView 返回旧视图且内容一致')
+    // ---- 读接口形状（Lead 决策 A）：readCard 返回旧视图，readCcV3 返回完整对象
+    const view = await store.readCard(NAME)
+    check(view?.['basic']?.['身份'] === legacy.basic['身份'], 'readCard 返回旧 34 字段视图（既有调用方零改动）')
+    const read = await store.readCcV3(NAME)
+    check(read?.spec === 'chara_card_v3', 'readCcV3 返回 CCv3')
+    const viewAlias = await store.readCardView(NAME)
+    check(viewAlias?.['opening'] === view?.['opening'], 'readCardView 是 readCard 的别名')
 
     // ---- 未知键：写一次不该丢
     await store.writeCard(NAME, { ...read, data: { ...read.data, extensions: { ...read.data.extensions, other: { keep: 1 } } } })
-    const again = await store.readCard(NAME)
+    const again = await store.readCcV3(NAME)
     check(again?.data.extensions['other']?.['keep'] === 1, '写盘不丢别人的 extensions')
 
     // ---- V14：损坏文件
     const corruptTarget = store.cardPath(NAME)
     await writeFile(corruptTarget, '{ 这不是 JSON', 'utf8')
-    const broken = await store.readCard(NAME)
+    const broken = await store.readCcV3(NAME)
     check(broken === undefined, '损坏文件 → readCard 返回 undefined')
     const backups = (await readdir(join(sandbox, 'characters', NAME))).filter(f => f.startsWith('card.json.corrupt-'))
     check(backups.length === 1, `损坏文件被改名备份（${backups.join(',')}）`)
@@ -537,6 +567,117 @@ async function exists(path) {
     return true
   } catch {
     return false
+  }
+}
+
+// ================================================================ REST 全链路 V21
+
+section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许洗数据、导入不许写盘）')
+{
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-tavern-rest-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  const { Store } = await import(lib('store.js'))
+  const { buildRoutes } = await import(lib('web.js'))
+  const store = new Store(sandbox)
+  const NAME = '接口角色'
+
+  const fakeRes = () => {
+    const out = { status: 0, body: undefined }
+    return {
+      out,
+      setHeader() { /* noop */ },
+      writeHead(status) { out.status = status },
+      end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
+    }
+  }
+  const fakeReq = (body, url = '/') => ({
+    url,
+    method: 'POST',
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined) yield Buffer.from(JSON.stringify(body))
+    },
+  })
+  const routes = buildRoutes(store, {
+    characterName: undefined,
+    snapshot: () => ({ enabled: false }),
+    relationTag: () => '',
+    invalidate: () => {},
+    refresh: async () => {},
+    activate: async () => ({ enabled: false }),
+  })
+  const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
+  try {
+    // 先落一张真实卡，再给它加世界书
+    await store.writeCard(NAME, await readPreset('虞照'))
+    const base = await store.readCcV3(NAME)
+    const withBook = normalizeCard({
+      ...base,
+      data: { ...base.data, character_book: bookOf([entry({ id: 'keep', keys: ['便利贴'], content: '别洗我' })]) },
+    })
+    await store.saveCard({ name: NAME, ccv3: withBook })
+
+    // ---- 只给 card（旧视图）：世界书与 aiwu 必须原样活着
+    const view = await store.readCard(NAME)
+    const edited = { ...view, dynamic_state: { 当前情绪: '被改过' } }
+    const res1 = fakeRes()
+    await route('/character/save').handler(fakeReq({ name: NAME, card: edited }), res1)
+    check(res1.out.status === 200 && res1.out.body?.ok === true, `只给 card 保存成功（status ${res1.out.status}）`)
+    const after = await store.readCcV3(NAME)
+    check(after?.data.character_book?.entries.length === 1, '只给 card：character_book 没被洗掉')
+    check(after?.data.character_book?.entries[0]?.content === '别洗我', '只给 card：世界书内容原样')
+    check(after?.data.extensions.aiwu.dynamicState?.mood === '被改过', '只给 card：改的字段生效')
+    check(after?.data.extensions.aiwu.voice?.pace?.includes('一次连发'), '只给 card：没改的声线原样')
+    check(typeof after?.data.description === 'string' && after.data.description.includes('身份：'), '原生字段被重新投影')
+
+    // ---- 只给 ccv3：正常落盘
+    const ccv3Only = await store.readCcV3(NAME)
+    const res2 = fakeRes()
+    await route('/character/save').handler(fakeReq({ name: NAME, ccv3: { ...ccv3Only, data: { ...ccv3Only.data, nickname: '小照' } } }), res2)
+    check(res2.out.status === 200, '只给 ccv3 保存成功')
+    check((await store.readCcV3(NAME))?.data.nickname === '小照', '只给 ccv3：值生效')
+
+    // ---- 两个都不给：明确报错，不当空卡写
+    const res3 = fakeRes()
+    await route('/character/save').handler(fakeReq({ name: NAME }), res3)
+    check(res3.out.status === 400 && String(res3.out.body?.error).includes('card'), 'card/ccv3 都缺 → 400 且说明缺什么')
+
+    // ---- 导入预览：认识野生 JSON 卡、补齐默认值、**不写盘**
+    const wild = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: '野卡', description: '从别处来的卡' } }
+    const res4 = fakeRes()
+    await route('/character/import').handler(fakeReq({
+      fileName: 'wild.json',   // 裸 JSON 卡：按内容判格式，扩展名只是提示
+      dataBase64: Buffer.from(JSON.stringify(wild), 'utf8').toString('base64'),
+    }), res4)
+    check(res4.out.status === 200 && res4.out.body?.ok === true, `导入预览成功（status ${res4.out.status}）`)
+    check(res4.out.body?.format === 'json', `按魔数判格式：${res4.out.body?.format}`)
+    check(res4.out.body?.name === '野卡', '预览返回角色名')
+    const imported = res4.out.body?.ccv3
+    check(Array.isArray(imported?.data?.tags) && Array.isArray(imported?.data?.group_only_greetings),
+      '野生卡缺 tags / group_only_greetings 也能被归一化（补默认值）')
+    check(imported?.data?.extensions?.aiwu?.schema === 1, '野生卡被补上 extensions.aiwu')
+    check((await store.readCcV3('野卡')) === undefined, '导入预览**不写盘**（确认后才 save）')
+
+    // ---- 导入非法内容：错误文案原样透出，不压成"导入失败"
+    const res5 = fakeRes()
+    await route('/character/import').handler(fakeReq({ fileName: 'x.png', dataBase64: '%%%不是base64%%%' }), res5)
+    check(res5.out.status === 400 && String(res5.out.body?.error).length > 6, `非法导入返回 400 且带原因：${String(res5.out.body?.error).slice(0, 40)}`)
+
+    // ---- 缺 dataBase64
+    const res6 = fakeRes()
+    await route('/character/import').handler(fakeReq({ fileName: 'x.png' }), res6)
+    check(res6.out.status === 400 && String(res6.out.body?.error).includes('dataBase64'), '缺 dataBase64 → 400')
+
+    // ---- GET /character 双视图
+    const res7 = fakeRes()
+    await route('/character').handler({
+      url: `/_dsh/ai-with-u/character?name=${encodeURIComponent(NAME)}`,
+      method: 'GET',
+      async *[Symbol.asyncIterator]() {},
+    }, res7)
+    check(res7.out.body?.card?.['basic']?.['身份'] !== undefined && res7.out.body?.ccv3?.spec === 'chara_card_v3',
+      'GET /character 同时给 card（旧视图）与 ccv3')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
   }
 }
 

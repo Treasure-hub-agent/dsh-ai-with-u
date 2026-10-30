@@ -33,7 +33,7 @@ import {
   nextOpening,
 } from './api'
 import { CardEditor } from './card-editor'
-import { DistillButton } from './distill'
+import { DistillEntry } from './distill'
 import { GuideView, guideFirstRun, markGuideSeen } from './guide'
 import type {
   ActiveState,
@@ -62,7 +62,7 @@ import {
   IconText,
   IconTrash,
 } from './icons'
-import { SCOPED_ATTR, installStyles } from './styles'
+import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
 import {
   blurbOf,
   entriesOf,
@@ -87,36 +87,11 @@ export interface FooterActionProps {
 type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 
 /** 面板与按钮之间的间距（px）。 */
-const GAP = 10
 /** 面板最小可用宽/高，用于贴边时的兜底夹取。 */
-const MIN_PANEL_W = 300
 
-interface PanelPos {
-  left: number
-  bottom: number
-  maxHeight: number
-}
-
-/**
- * 计算面板位置：贴着按钮右侧展开，纵向底部对齐。
- * 空间不够就翻到按钮左边，再不够就夹回视口内。
- */
-function computePosition(anchor: HTMLElement | null): PanelPos {
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-  const margin = 10
-  if (anchor === null) {
-    return { left: margin, bottom: margin, maxHeight: Math.min(720, vh - margin * 2) }
-  }
-  const rect = anchor.getBoundingClientRect()
-  const width = Math.min(452, vw - margin * 2)
-  let left = rect.right + GAP
-  if (left + width > vw - margin) left = rect.left - GAP - width
-  if (left < margin) left = Math.max(margin, Math.min(vw - width - margin, rect.right + GAP))
-  const bottom = Math.max(margin, vh - rect.bottom)
-  const maxHeight = Math.min(720, vh - bottom - margin)
-  return { left: Math.round(left), bottom: Math.round(bottom), maxHeight: Math.max(240, Math.round(maxHeight)) }
-}
+// 面板定位：居中大窗 + 遮罩（对齐 dsh-context 的 .lc-modal-card 形态）。
+// 尺寸由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H 统一给出，这里只负责把窗口摆到视口中间。
+// 早期版本是「贴着侧栏按钮弹出、算左侧/底部坐标」的小气泡，改成大窗后那套锚点计算已删除。
 
 /** 滚动锁：弹层打开时锁住 body 滚动，关掉立刻还原。 */
 function useScrollLock(active: boolean): void {
@@ -184,6 +159,7 @@ function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean 
   return (
     <span
       className={size === 'hero' ? 'awu-avatar awu-heroAvatar' : 'awu-avatar'}
+      data-size={size}
       data-hue={String(hueOf(name))}
       data-live={live ? 'true' : 'false'}
       aria-hidden="true"
@@ -193,9 +169,14 @@ function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean 
   )
 }
 
-function Skeleton(): JSX.Element {
+/**
+ * 骨架屏。`shape` 交给 CSS 决定形态（`data-shape`）：
+ *  - `detail`（默认）：详情页那种竖排行；
+ *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片。
+ */
+function Skeleton(props: { shape?: 'detail' | 'cards' }): JSX.Element {
   return (
-    <div className="awu-sk" aria-hidden="true">
+    <div className="awu-sk" data-shape={props.shape ?? 'detail'} aria-hidden="true">
       <div className="awu-skRow" />
       <div className="awu-skRow" />
       <div className="awu-skRow" />
@@ -205,7 +186,7 @@ function Skeleton(): JSX.Element {
 
 function ErrorBar(props: { message: string; onRetry?: () => void; t: Translate }): JSX.Element {
   return (
-    <div className="awu-err" role="alert">
+    <div className="awu-status awu-err" data-status="alert" role="alert">
       <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
       <span style={{ flex: 1, minWidth: 0 }}>{props.message}</span>
       {props.onRetry !== undefined && (
@@ -341,7 +322,7 @@ function CharacterTile(props: {
       type="button"
       className="awu-card"
       data-live={live ? 'true' : 'false'}
-      style={{ animationDelay: `${Math.min(index, 8) * 34}ms` }}
+      style={{ animationDelay: `${Math.min(index, 8) * CARD_STAGGER}ms` }}
       onClick={() => onOpen(item.name)}
       aria-label={t('roster.open', { name: item.name })}
       disabled={busy}
@@ -782,7 +763,7 @@ function CharacterDetailView(props: {
           {/* 编辑是中性动作：既不是主操作（启用）也不是危险操作（删除），单独一档样式 */}
           <button
             type="button"
-            className="awu-btn awu-editEntry"
+            className="awu-btn awu-editEntry" data-kind="edit"
             data-size="sm"
             onClick={onEdit}
             disabled={busy}
@@ -921,7 +902,6 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  const [pos, setPos] = useState<PanelPos>(() => computePosition(null))
   const [detailName, setDetailName] = useState('')
   const [detail, setDetail] = useState<CharacterDetail | undefined>(undefined)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -1028,21 +1008,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [reload])
 
   // -------------------------------------------------------- 定位
-  const reposition = useCallback((): void => {
-    setPos(computePosition(buttonRef.current))
-  }, [])
-
-  useEffect(() => {
-    if (!open) return undefined
-    reposition()
-    const onResize = (): void => reposition()
-    window.addEventListener('resize', onResize)
-    window.addEventListener('scroll', onResize, true)
-    return () => {
-      window.removeEventListener('resize', onResize)
-      window.removeEventListener('scroll', onResize, true)
-    }
-  }, [open, reposition])
+  // 面板已改成「居中大窗 + 遮罩」（对齐 dsh-context 的 .lc-modal-card 形态），
+  // 不再贴着侧栏按钮弹出，因此不需要按锚点算位置，也不需要监听 resize/scroll 重排。
 
   // 点外部 / Esc 收起（面板与弹层都 portal 到 body，按 composedPath 判断归属）
   useEffect(() => {
@@ -1222,10 +1189,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     return t('badge.none')
   })()
 
+  // 居中大窗，尺寸对齐 dsh-context 的**主面板**（.lc-ov-card）：
+  //   width: min(1120px, 100vw - 32px)  height: calc(100vh - 80px)
+  // 数值仍由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H（这里当上下留白用）统一给出。
+  // `bottom: auto` 必须写：旧样式里 .awu-panel 是贴底定位的，不覆盖会和 top 同时生效把窗口拉长。
   const panelStyle: CSSProperties = {
-    left: pos.left,
-    bottom: pos.bottom,
-    maxHeight: pos.maxHeight,
+    left: '50%',
+    top: `${PANEL_MAX_H / 2}px`,
+    bottom: 'auto',
+    transform: 'translateX(-50%)',
+    width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
+    height: `calc(100vh - ${PANEL_MAX_H}px)`,
+    maxHeight: 'none',
   }
 
   // 分段器：roving tabindex + 方向键 / Home / End。
@@ -1269,10 +1244,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         aria-label={wide ? t('badge.open') : `${t('badge.open')} · ${badgeName}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => {
-          if (!open) reposition()
-          setOpen(!open)
-        }}
+        onClick={() => setOpen(!open)}
       >
         <span className="awu-mark" aria-hidden="true">
           {live ? initialOf(liveName) : <IconMask size={14} />}
@@ -1296,6 +1268,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           ref={panelRef}
           className="awu-panel awu-scope"
           style={panelStyle}
+          data-busy={busy ? 'true' : 'false'}
           role="dialog"
           aria-modal="false"
           aria-label={t('panel.title')}
@@ -1349,7 +1322,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
           {/* 启用中的角色 */}
           {live ? (
-            <div className="awu-sigil">
+            <div className="awu-status awu-sigil" data-status="live">
               <Avatar name={liveName} live />
               <div className="awu-sigilBody">
                 <div className="awu-sigilName">{liveName}</div>
@@ -1388,7 +1361,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               </div>
             </div>
           ) : (
-            <div className="awu-idle">
+            <div className="awu-status awu-idle" data-status="idle">
               <span className="awu-idleDot" aria-hidden="true" />
               <span>
                 <b style={{ color: 'var(--awu-ink-dim)', fontWeight: 500 }}>{t('active.none.title')}</b>
@@ -1400,7 +1373,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
           {error !== '' && <ErrorBar message={error} onRetry={() => { void reload() }} t={t} />}
           {notice !== '' && (
-            <div className="awu-idle" style={{ marginTop: -4 }}>
+            <div className="awu-status awu-idle" data-status="info" role="status" style={{ marginTop: -4 }}>
               <span className="awu-idleDot" aria-hidden="true" style={{ background: 'var(--awu-teal)' }} />
               <span>{notice}</span>
             </div>
@@ -1454,19 +1427,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               />
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <div className="awu-toolbar">
                   <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
                     {t('roster.count', { n: roster.length })}
-                  </span>
-                  {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
-                  <span style={{ marginLeft: 'auto' }}>
-                    <DistillButton t={t} />
                   </span>
                   <button
                     type="button"
                     className="awu-btn"
                     data-size="sm"
                     data-kind="primary"
+                    style={{ marginLeft: 'auto' }}
                     onClick={() => openDialog('new')}
                   >
                     <IconPlus size={12} />
@@ -1474,7 +1444,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   </button>
                 </div>
 
-                {loading && <Skeleton />}
+                {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
+                <DistillEntry t={t} />
+
+                {loading && <Skeleton shape="cards" />}
 
                 {!loading && roster.length === 0 && (
                   <div className="awu-empty">

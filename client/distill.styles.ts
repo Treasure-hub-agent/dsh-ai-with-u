@@ -15,6 +15,34 @@
 
 export const DISTILL_CSS = `
 /* ================================================================ 蒸馏（v2） */
+
+/* ---- 角色簿顶部的蒸馏主入口（2026-10-30 视觉反馈后重做）----
+   主人反馈：「'蒸馏'按钮在面板上有些小了不明显」。所以：
+     - 尺寸 / 配色一律交给 data-kind="primary" 与宿主 token，**不写死宽高**；
+     - 面板从 452px 改成 720px 大窗、换液态玻璃视觉时，这里一个字都不用动；
+     - 只用 flex 排版，宽度随容器走（内联在工具行里=内容宽，独占一块=撑满）。
+   注意：本文件整个是一个 JS 模板串，注释里不要出现反引号。 */
+.awu-distill-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.awu-distill-entry .awu-distill-cta {
+  width: 100%;
+}
+.awu-distill-cta {
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+.awu-distill-entryHint {
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--awu-ink-mute, #8f8172);
+}
+
 .awu-distill-dialog {
   width: min(var(--awu-dialog-w, 420px), 100%);
   max-height: min(84vh, var(--awu-dialog-max-h, 660px));

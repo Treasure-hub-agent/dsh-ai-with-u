@@ -44,6 +44,8 @@ interface SectionInput {
   name: string
   order: number
   text: string | ((ctx: unknown) => string)
+  /** 必须显式 false：宿主默认会插值 `{{var}}`，遇到未知变量直接抛错。 */
+  interpolate?: boolean
 }
 
 interface AnyCtx {
@@ -104,6 +106,48 @@ function makeLogger(ctx: AnyCtx) {
  * 事件结构经读 dsh-session 源码核实：user 消息就是 `data` 本身，
  * assistant 消息在 `data.message`，两者的 text 块都是 `{type:'text', text}`。
  */
+/** 从一条消息事件里抽纯文本（`data.content` 里所有 text 块拼接）。 */
+function textOfMessage(message: unknown): string {
+  if (typeof message !== 'object' || message === null) return ''
+  const content = (message as { content?: unknown }).content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (typeof block !== 'object' || block === null) return ''
+      const b = block as { type?: string; text?: unknown }
+      return b.type === 'text' && typeof b.text === 'string' ? b.text : ''
+    })
+    .filter(s => s !== '')
+    .join(' ')
+    .trim()
+}
+
+/** 取会话日志里最近若干条 user / assistant 文本（按时间升序），给世界书做关键词素材。 */
+export function extractRecentTexts(session: SessionLike | undefined, limit = 6): string[] {
+  if (session === undefined) return []
+  let events: Array<{ type?: string; data?: unknown }> = []
+  try {
+    if (typeof session.snapshotEvents === 'function') events = session.snapshotEvents()
+    else if (Array.isArray(session.log)) events = session.log
+    else if (Array.isArray(session.events)) events = session.events
+  } catch (error) {
+    process.stderr.write(`[ai-with-u] 读取会话事件失败，世界书命中素材为空：${error instanceof Error ? error.message : String(error)}\n`)
+    return []
+  }
+  const texts: string[] = []
+  for (let i = events.length - 1; i >= 0 && texts.length < limit; i -= 1) {
+    const event = events[i]
+    if (event === undefined) continue
+    let text = ''
+    if (event.type === 'user/message') text = textOfMessage(event.data)
+    else if (event.type === 'assistant/message') {
+      text = textOfMessage((event.data as { message?: unknown } | undefined)?.message)
+    }
+    if (text !== '') texts.push(text)
+  }
+  return texts.reverse()
+}
+
 export function extractTurnTexts(session: SessionLike | undefined): { user: string; assistant: string } {
   const empty = { user: '', assistant: '' }
   if (session === undefined) return empty
@@ -117,20 +161,7 @@ export function extractTurnTexts(session: SessionLike | undefined): { user: stri
     process.stderr.write(`[ai-with-u] 读取会话事件失败，本轮摘要留空：${error instanceof Error ? error.message : String(error)}\n`)
     return empty
   }
-  const textOf = (message: unknown): string => {
-    if (typeof message !== 'object' || message === null) return ''
-    const content = (message as { content?: unknown }).content
-    if (!Array.isArray(content)) return ''
-    return content
-      .map((block) => {
-        if (typeof block !== 'object' || block === null) return ''
-        const b = block as { type?: string; text?: unknown }
-        return b.type === 'text' && typeof b.text === 'string' ? b.text : ''
-      })
-      .filter(s => s !== '')
-      .join(' ')
-      .trim()
-  }
+  const textOf = textOfMessage
   let user = ''
   let assistant = ''
   for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -254,16 +285,21 @@ export function apply(ctx: AnyCtx): () => void {
     }
   }
 
-  /** 每轮开始时刷新缓存，保证时间差读到的是磁盘上最新的 last_ts。 */
-  const refreshBeforeStep = async (agent: AgentLike | undefined): Promise<void> => {
+  /**
+   * 每轮开始时刷新缓存：既保证时间差读到磁盘上最新的 last_ts，
+   * 也把「最近几条对话原文」交给世界书做关键词匹配（`session.recent` 摘要会被截断，原文更准）。
+   */
+  const refreshBeforeStep = async (agent: AgentLike | undefined, turn: number | undefined): Promise<void> => {
     const pc = prompt
     if (pc === undefined || pc.characterName === undefined) return
     try {
-      await pc.refresh(log)
+      const session = agent?.session
+      const recentTexts = extractRecentTexts(session)
+      const turnKey = `${String(agent?.id ?? session?.id ?? 'agent')}:${String(turn ?? '?')}`
+      await pc.refresh(log, { recentTexts, turnKey })
     } catch (error) {
       log.error('轮前刷新提示词缓存失败：%s', error instanceof Error ? error.message : String(error))
     }
-    void agent
   }
 
   const registerAgentHooks = (): void => {
@@ -288,7 +324,7 @@ export function apply(ctx: AnyCtx): () => void {
     // pre-step 是 waterfall：必须调用 next() 把控制权交下去，否则这一轮就进不去了。
     // 刷新只是「尽力而为」，不 await 它的结果也能保证 next() 被调用。
     const disposePre = on('agent/pre-step', ((payload: PreStepPayload, next: () => unknown) => {
-      safe('agent/pre-step', () => refreshBeforeStep(payload?.agent))
+      safe('agent/pre-step', () => refreshBeforeStep(payload?.agent, payload?.turn))
       return next()
     }) as never)
     if (typeof disposePre === 'function') disposers.push(disposePre)

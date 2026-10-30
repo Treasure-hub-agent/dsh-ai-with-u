@@ -276,6 +276,7 @@
 |---|---|---|
 | `distill.entry` | 蒸馏 | Distill |
 | `distill.entryTitle` | 从作品蒸馏一张角色卡 | Distill a card from a story |
+| `distill.entryHint` | 从作品或设定做一张卡 | Make a card from a story or a setup |
 | `distill.title` | 蒸馏角色卡 | Distill a character card |
 | `distill.why` | 角色卡必须由模型来写；这一步会把蒸馏指令发进当前对话，流程正文在 distill/flow.md 里（不占系统提示词）。 | Cards must be written by the model. This sends the distillation prompt into the current chat; the flow itself lives in distill/flow.md (never in the system prompt). |
 | `distill.step1` | 点「发送」，指令会进当前会话并直接发出 | Click Send — the prompt goes into the current chat and is submitted |
@@ -314,7 +315,9 @@
 | `distill.dockFilled` | 指令已填入输入框，按回车发送 | Prompt filled into the input — press Enter to send |
 | `distill.dockUnavailable` | 没拿到输入框能力：去面板里点「发送」，或复制指令手动粘贴 | Composer API unavailable: use Send in the panel, or copy the prompt |
 
-> **现在就要的键（18 个）**：`entry` `entryTitle` `title` `why` `step1` `step2` `step3` `send` `noDockShort` `noDock` `sent` `filled` `busyFilled` `flowFailed` `insertFailed` `submitFailed` `copy` `copied` `copyFailed` `noProgress` `dockDraftNotEmpty` `dockFilled` `dockUnavailable`（共 23；其余是粘贴校验用的，等 CCv3 定稿再一起进 `text.ts`，先加也不报错、只是暂时用不上）。
+> **现在就要的键（24 个）**：`entry` `entryTitle` `entryHint` `title` `why` `step1` `step2` `step3` `send` `noDockShort` `noDock` `sent` `filled` `busyFilled` `flowFailed` `insertFailed` `submitFailed` `copy` `copied` `copyFailed` `noProgress` `dockDraftNotEmpty` `dockFilled` `dockUnavailable`（其余是粘贴校验用的，等 CCv3 定稿再一起进 `text.ts`，先加也不报错、只是暂时用不上）。
+>
+> `distill.entryHint` 是 2026-10-30 视觉反馈后新增的 1 个键（主入口下方那行极短说明）。**没合并也不会裸 key**：`DistillEntry` 检测到 `t()` 把 key 原样返回时，会退到已有的 `distill.entryTitle`。
 >
 > **⏸ 暂缓的键**：`pasteLabel` `pastePlaceholder` `validate` `pasteEmpty` `tooLarge` `parsed` `missingGroups` `warnings` `conflict` `conflictHint` `nameLabel` `nameRequired` `nameTaken` `nameInvalid` `openEditor` `noEditor` —— 它们跟着 34 字段校验一起挂起。
 >
@@ -720,12 +723,13 @@ export function sendDistillInstruction(): Promise<SendResult>
 > 「发送 + 复制 + 回显」，不产出卡。CCv3 格式定稿、校验接口重做时再把 `onAccept(card)` 加回来
 > （届时 `index.tsx` 才需要 §6.3b 的 `distillDraft`）。
 
-**另外四个是给 Lead 省事 / 调试用的附加件**（不用也可以）：
+**另外五个是给 Lead 省事 / 调试用的附加件**（不用也可以）：
 
 | 导出 | 用途 |
 |---|---|
-| `DistillButton({ t, label? })` | **自带弹层的按钮**：面板角色簿头部一行接完，`index.tsx` 不需要 `dialog === 'distill'` 分支 |
-| `DockEntry({ t })` | 输入框上方的可见小入口（**只填入、不发送**：用户人就在输入框旁，自己按回车最安全） |
+| `DistillButton({ t, label? })` | **自带弹层的主入口按钮**：默认尺寸 + `data-kind="primary"` + 完整文案「蒸馏角色卡」（2026-10-30 视觉反馈后从小 ghost 按钮改的）。面板角色簿头部一行接完，`index.tsx` 不需要 `dialog === 'distill'` 分支 |
+| `DistillEntry({ t, label? })` | **按钮 + 一行极短说明**的块级入口（`awu-distill-entry`，flex 竖排、宽度随容器）：主入口独占一块时用它；宽度不写死，452→720px 都不用改 |
+| `DockEntry({ t })` | 输入框上方的可见小入口 —— **当前未注册，保留备用**（主人要求撤掉底部托盘的那个按钮；`DockSink` 不能删，它是拿 `inputActions` 的唯一通道） |
 | `useComposerReady()` | `composerReady()` 的订阅版，供面板重渲染时感知 dock 到位 |
 | `composerSessionId()` | 当前 sink 绑定的会话 id（空串 = 没绑定），多会话场景做提示用 |
 

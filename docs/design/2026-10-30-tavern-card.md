@@ -22,7 +22,7 @@
 | D3 | 原生字段（`description` / `personality` / `scenario` / `mes_example` / `system_prompt` / `post_history_instructions` / `first_mes` / `alternate_greetings`）是**单向投影**：结构 → 原生；原生不反写结构 | 一个方向就够；双向同步必然打架 |
 | D4 | 旧 34 字段**全部有明确落点**，认不出的键进 `aiwu.legacy.extra`（原样 JSON） | 宁可多存一个垃圾桶，也不丢用户数据 |
 | D5 | 迁移 **读时归一（内存）+ 首次写盘落盘 + 首次写盘前备份 `card.v1.bak.json`**；不做启动批量迁移（可选项，见 §2.5） | 不产生「启动即改盘」的惊吓；旧卡永远能读 |
-| D6 | L1 仍是**一个** section（`aiwu:active-character`，order 5100，函数式求值），内部按「静态块 → 易变块」重排 | 不新增注册段；把易变内容后置以保住 prompt 前缀缓存 |
+| D6 | 拆成 **4 个 section**：`aiwu:baseline`(5000) · `aiwu:active-character`(5100，只放稳定内容) · `aiwu:lore`(10300) · `aiwu:clock`(10350) | 宿主缓存失效范围按系统提示内部顺序算，易变段垫底才不连累别人（§3.8） |
 | D7 | `system_prompt` / `post_history_instructions` 在 DSH 里**没有对应通道** → 降级为 L1 内两段**明确标注**的文本块（「角色自带指令」「收尾提醒」） | 不改宿主系统提示词，只能"追加",不能"替换" |
 | D8 | `mes_example` **默认开**，但受 1200 字符预算与 `<START>` 分块约束 | 示例对话是声线最强的锚；迁移卡没有就为空，不编造 |
 | D9 | 长度**不设硬上限**，只给 4 档软警告（阈值见 §5.1） | 主人明确要「不设上限」；警告是可忽略的建议 |
@@ -116,8 +116,8 @@
     "group_only_greetings": [],
     "creation_date": 1793558400,                     // 秒级 Unix（CCv3 口径）
     "modification_date": 1793558400,
-    "source": [],                                    // CCv3 的 source 是 string[]；旧卡的 "custom" 不塞这里（§1.6）
-    "assets": [],                                    // 本轮不做 PNG/CHARX，留空
+    // 注：实测 migrateLegacyCard 不产 source / assets —— 空字段不写（spec 里都是可选）。
+    // CCv3 的 source 是 string[]；旧卡的 "custom" 塞在 aiwu.legacy.source（§1.6）
 
     // ---------- 世界书 ----------
     "character_book": { /* 可选；结构见 §4.2，本轮只透传不解析 PNG */ },
@@ -129,9 +129,10 @@
         "updated_at": "2026-10-30T20:40:00+08:00",
 
         "basic": {
-          "age": "26"
-          // 姓名/身份/背景 已在 data.name / data.description；这里不重复存，
-          // 例外：姓名与 data.name 不一致时存 realName（迁移告警，§2.4）
+          "age": "26",
+          "identity": "两个月前搬进你合租房的室友",       // ← description 第 1 段的来源（结构权威）
+          "background": "话多、爱笑、把家里弄得热闹……",    // ← description 第 2 段的来源
+          // 姓名不在这里：它等于 data.name（不一致时才存 realName，迁移告警，§2.4）
           // "realName": "虞照"
         },
 
@@ -279,11 +280,90 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
   "spec_version": "3.0",
   "data": {
     "name": "虞照",
-    "nickname": "",
-    "description": "身份：两个月前搬进你合租房的室友。\n\n背景：话多、爱笑、把家里弄得热闹；每天出门前给你留一张便利贴，写的都是今天晚上吃什么，和一句「记得吃早饭」。",
-    "personality": "关键词：外向、话痨、自来熟、情绪写在脸上\n内在矛盾：什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么\n对待亲近之人：主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话",
-    "scenario": "来处：他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲\n落差：他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接\n如今的日子：白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴\n你与他的旧：搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说",
+    "description": "身份：两个月前搬进你合租房的室友\n\n背景：话多、爱笑、把家里弄得热闹；每天出门前给你留一张便利贴，写的都是今天晚上吃什么，和一句「记得吃早饭」",
+    "tags": [],
+    "creator": "ai-with-u",
+    "character_version": "1.0",
     "mes_example": "",
+    "extensions": {
+      "aiwu": {
+        "schema": 1,
+        "basic": {
+          "age": "26",
+          "identity": "两个月前搬进你合租房的室友",
+          "background": "话多、爱笑、把家里弄得热闹；每天出门前给你留一张便利贴，写的都是今天晚上吃什么，和一句「记得吃早饭」"
+        },
+        "voice": {
+          "pace": "快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么",
+          "catchphrases": [
+            "诶诶诶",
+            "我跟你说",
+            "真的假的！",
+            "是不是很棒"
+          ],
+          "selfRef": "我",
+          "callsUser": "直接喊你名字（偶尔叫「室友大人」逗你）",
+          "emotes": [
+            "兴奋「好耶！」",
+            "被戳到时「……啊？」"
+          ],
+          "forbidden": "不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话",
+          "gestures": [
+            "（便利贴贴在你门上）",
+            "（把两袋菜往你怀里一塞）"
+          ]
+        },
+        "personality": {
+          "keywords": [
+            "外向",
+            "话痨",
+            "自来熟",
+            "情绪写在脸上"
+          ],
+          "contradiction": "什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么",
+          "towardClose": "主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话"
+        },
+        "relationship": {
+          "startPoint": "合租室友，他搬进来两个月",
+          "charCallsUser": "你的名字；逗你时叫「室友大人」",
+          "userCallsChar": "虞照 / 小照"
+        },
+        "world": {
+          "origin": "他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲",
+          "gap": "他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接",
+          "nowadays": "白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴",
+          "sharedPast": "搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说"
+        },
+        "memoryAnchors": [
+          "便利贴有一整叠，颜色按事情分：黄色是吃什么，蓝色是提醒，粉色是他说不出口的话",
+          "他手机一响就先看是谁；是家里打来的，他会走到阳台再说话",
+          "他做噩梦醒来会自己去厨房煮面，锅铲碰锅的声音很响"
+        ],
+        "dynamicState": {
+          "mood": "亢奋，刚抢到东西的好心情",
+          "recent": "他这周接了个急活，白天改稿晚上打鼓，两天没怎么睡",
+          "doing": "在超市打折区给你发消息，手里拎着两袋菜"
+        },
+        "interactionPref": {
+          "length": "短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句",
+          "emoji": "自然用，开心时多（不刻意堆）",
+          "comfortZone": "吃的、他的鼓、外卖、你的一天",
+          "taboo": "不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气"
+        },
+        "userPersona": {
+          "who": "他一屋两室的合租室友，房子是你先租下的",
+          "relation": "两个月，从陌生人处成了「会互相留饭」的关系",
+          "sharedHistory": "上个月你发烧，他翘了活在家煮了两天粥，把厨房弄得一团糟"
+        },
+        "legacy": {
+          "from": "aiwu-v1",
+          "originalName": "虞照",
+          "source": "custom",
+          "at": "2026-10-30T20:40:00+08:00"
+        },
+        "updated_at": "2026-10-30T20:40:00+08:00"
+      }
+    },
     "system_prompt": "【声线基因（最高优先级，决定每一句的措辞）】\n对话节奏：快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么\n爱用句式：诶诶诶／我跟你说／真的假的！／是不是很棒\n自称：我\n对用户的称呼：直接喊你名字（偶尔叫「室友大人」逗你）\n情绪口头禅：兴奋「好耶！」／被戳到时「……啊？」\n非语言小动作：（便利贴贴在你门上）／（把两袋菜往你怀里一塞）\n【互动偏好】\n回复长度倾向：短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句\n表情使用：自然用，开心时多（不刻意堆）\n话题舒适区：吃的、他的鼓、外卖、你的一天",
     "post_history_instructions": "【收尾提醒】\n禁忌词：不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话\n雷区：不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气",
     "first_mes": "虞照，26 岁，两个月前搬进你合租房的室友。话多、爱笑，把家里弄得热闹：每天出门前给你留一张便利贴，写的都是今天晚上吃什么，末了加一句「记得吃早饭」。他不聊家里的事，手机一响就先看是谁。\n\n（晚上八点，你还在公司。手机连着震了四下）\n\n（第四下的时候他直接打电话过来了）\n\n诶诶诶！你几点回来啊\n\n我买了排骨！！超市打折，我是不是很会过日子\n\n……好吧其实是我想吃你上次做的那个",
@@ -292,15 +372,12 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
       "（他把三袋外卖堆在门口）我点了三家的\n\n你挑一个，剩下两个我吃，真的\n\n……真的啦！",
       "我把鼓搬回来了\n\n……不是大鼓，就一套电鼓！很小！\n\n你不许说不行——"
     ],
+    "personality": "关键词：外向、话痨、自来熟、情绪写在脸上\n内在矛盾：什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么\n对待亲近之人：主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话",
+    "scenario": "来处：他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲\n落差：他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接\n如今的日子：白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴\n你与他的旧：搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说",
     "creator_notes": "",
-    "creator": "ai-with-u",
-    "character_version": "1.0",
-    "tags": [],
     "group_only_greetings": [],
-    "creation_date": 1793558400,
-    "modification_date": 1793558400,
-    "source": [],
-    "assets": [],
+    "creation_date": 1793364000,
+    "modification_date": 1793364000,
     "character_book": {
       "name": "虞照的世界书",
       "description": "只有被提到时才注入的细节",
@@ -310,108 +387,51 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
       "extensions": {},
       "entries": [
         {
-          "id": "yuzhao-sticky-notes",
-          "name": "便利贴的颜色规则",
-          "keys": ["便利贴", "留条", "纸条"],
-          "secondary_keys": ["颜色"],
+          "keys": [
+            "便利贴",
+            "留条",
+            "纸条"
+          ],
           "content": "便利贴有一整叠，颜色按事情分：黄色是今天晚上吃什么，蓝色是提醒（记得吃早饭、带伞），粉色是他想说但没说出口的话。他从不撕掉旧的，门后那块墙越叠越厚。",
+          "extensions": {},
           "enabled": true,
           "insertion_order": 10,
-          "priority": 8,
           "use_regex": false,
-          "constant": false,
-          "case_sensitive": false,
+          "id": "yuzhao-sticky-notes",
+          "name": "便利贴的颜色规则",
+          "secondary_keys": [
+            "颜色"
+          ],
+          "priority": 8,
           "selective": true,
+          "case_sensitive": false,
+          "constant": false,
           "position": "after_char",
-          "comment": "用户提到便利贴/纸条时才注入颜色规则",
-          "extensions": {}
+          "comment": "用户提到便利贴/纸条时才注入颜色规则"
         },
         {
-          "id": "yuzhao-drum-band",
-          "name": "打鼓与那支乐队",
-          "keys": ["打鼓", "鼓", "乐队", "排练"],
-          "secondary_keys": [],
+          "keys": [
+            "打鼓",
+            "鼓",
+            "乐队",
+            "排练"
+          ],
           "content": "@@position after_char\n@@depth 2\n他在城西的排练室按小时租时段，每周二、四晚上去。乐队另外三个人都是他从网上认识的，只有他知道那个排练室其实是他刷卡付的整月租金——他不许人提这件事。",
+          "extensions": {},
           "enabled": true,
           "insertion_order": 20,
-          "priority": 5,
           "use_regex": false,
-          "constant": false,
-          "case_sensitive": false,
+          "id": "yuzhao-drum-band",
+          "name": "打鼓与那支乐队",
+          "secondary_keys": [],
+          "priority": 5,
           "selective": false,
+          "case_sensitive": false,
+          "constant": false,
           "position": "after_char",
-          "comment": "content 前两行是装饰器示例：渲染时剥掉，只用来覆盖本条的位置与扫描深度",
-          "extensions": {}
+          "comment": "content 前两行是装饰器示例：渲染时剥掉，只用来覆盖本条的位置与扫描深度"
         }
       ]
-    },
-    "extensions": {
-      "aiwu": {
-        "schema": 1,
-        "updated_at": "2026-10-30T20:40:00+08:00",
-        "basic": { "age": "26" },
-        "personality": {
-          "keywords": ["外向", "话痨", "自来熟", "情绪写在脸上"],
-          "contradiction": "什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么",
-          "towardClose": "主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话"
-        },
-        "voice": {
-          "pace": "快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么",
-          "catchphrases": ["诶诶诶", "我跟你说", "真的假的！", "是不是很棒"],
-          "selfRef": "我",
-          "callsUser": "直接喊你名字（偶尔叫「室友大人」逗你）",
-          "emotes": ["兴奋「好耶！」", "被戳到时「……啊？」"],
-          "forbidden": "不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话",
-          "gestures": ["（便利贴贴在你门上）", "（把两袋菜往你怀里一塞）"]
-        },
-        "world": {
-          "origin": "他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲",
-          "gap": "他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接",
-          "nowadays": "白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴",
-          "sharedPast": "搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说"
-        },
-        "relationship": {
-          "startPoint": "合租室友，他搬进来两个月",
-          "charCallsUser": "你的名字；逗你时叫「室友大人」",
-          "userCallsChar": "虞照 / 小照"
-        },
-        "userPersona": {
-          "who": "他一屋两室的合租室友，房子是你先租下的",
-          "relation": "两个月，从陌生人处成了「会互相留饭」的关系",
-          "sharedHistory": "上个月你发烧，他翘了活在家煮了两天粥，把厨房弄得一团糟",
-          "displayName": ""
-        },
-        "dynamicState": {
-          "mood": "亢奋，刚抢到东西的好心情",
-          "recent": "他这周接了个急活，白天改稿晚上打鼓，两天没怎么睡",
-          "doing": "在超市打折区给你发消息，手里拎着两袋菜",
-          "updated_at": "2026-10-30T20:40:00+08:00"
-        },
-        "memoryAnchors": [
-          "便利贴有一整叠，颜色按事情分：黄色是吃什么，蓝色是提醒，粉色是他说不出口的话",
-          "他手机一响就先看是谁；是家里打来的，他会走到阳台再说话",
-          "他做噩梦醒来会自己去厨房煮面，锅铲碰锅的声音很响"
-        ],
-        "interactionPref": {
-          "length": "短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句",
-          "emoji": "自然用，开心时多（不刻意堆）",
-          "comfortZone": "吃的、他的鼓、外卖、你的一天",
-          "taboo": "不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气"
-        },
-        "prompt": {
-          "includeMesExamples": true,
-          "includeSystemPrompt": true,
-          "lengthWarnings": true,
-          "lore": { "enabled": true, "scanDepth": null, "budgetChars": null, "recursive": null }
-        },
-        "legacy": {
-          "from": "aiwu-v1",
-          "at": "2026-10-30T20:40:00+08:00",
-          "originalName": "虞照",
-          "source": "custom",
-          "extra": {}
-        }
-      }
     }
   }
 }
@@ -426,7 +446,7 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
 | 3 | `mes_example` 是空串 | 迁移卡没有示例对话，**不编造**（§3.4） |
 | 4 | `character_book.entries[1].content` 前两行是 `@@` 装饰器 | 演示"未知/已知装饰器都从正文剥掉"（§3.5）；渲染时只剩正文 |
 | 5 | `aiwu.world.*` 与 `scenario` 内容重复 | **刻意**：结构供编辑器逐字段改，投影供外部前端读；写盘时由结构重算，不会出现两份不一致 |
-| 6 | `aiwu.legacy.source = "custom"` 而 `data.source = []` | 见 §1.6 |
+| 6 | 旧卡的 `source: "custom"` 落在 `aiwu.legacy.source`，`data.source` **不写**（空的可选字段不落盘） | 见 §1.6 |
 
 ---
 
@@ -452,8 +472,8 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
 |---|---|---|---|
 | 1 | `basic.姓名` | `data.name` | 与旧 `name` 相同 → 无操作；不同 → `data.name` 取旧 `name`（目录名不变），姓名存 `awiu.basic.realName` 并告警 |
 | 2 | `basic.年龄` | `awiu.basic.age` | 原生无位 |
-| 3 | `basic.身份` | `description` 第 1 段（`身份：`）+ 结构留 `awiu.basic` 不重复 | 投影 |
-| 4 | `basic.一句话背景` | `description` 第 2 段（`背景：`） | 投影 |
+| 3 | `basic.身份` | `awiu.basic.identity` + `description` 第 1 段（`身份：`） | 结构权威 + 投影（round-trip 靠 awiu，不靠解析 prose） |
+| 4 | `basic.一句话背景` | `awiu.basic.background` + `description` 第 2 段（`背景：`） | 同上 |
 | 5 | `voice.对话节奏` | `awiu.voice.pace` + `system_prompt`「声线基因」块 | 投影 |
 | 6 | `voice.爱用句式` | `awiu.voice.catchphrases` + `system_prompt` | 数组；投影时用 `／` 连接 |
 | 7 | `voice.自称` | `awiu.voice.selfRef` + `system_prompt` | |
@@ -615,8 +635,8 @@ Copy-Item "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.v1.bak.json" `
 | 10 | `▎动态状态（此刻的进行时）` | `aiwu.dynamicState.*` | 当下心情/近况 | **是**（面板可改） | 省 |
 | 11 | `▎互动偏好` | `aiwu.interactionPref.*` | 手感与边界 | 否 | 省 |
 | 12 | `▎示例对话` | `data.mes_example`（宏展开） | 声线样板 | 否 | 空则省（默认开，§3.4） |
-| 13 | **世界书命中条目** | `data.character_book` | 按需知识 | **是** | 未命中省（§4） |
-| 14 | `## 距上次互动` + 当前时间 | `session.last_ts` / `activatedAt` | 时间差档位 | **是（每分钟）** | 走 fallback |
+| —（独立段 `aiwu:lore`，order 10300） | **世界书命中条目** | `data.character_book` | 按需知识 | **是** | 未命中返回 `'`，段消失（§4） |
+| —（独立段 `aiwu:clock`，order 10350） | `## 距上次互动` + 当前时间 | `session.last_ts` / `activatedAt` | 时间差档位 | **是（每分钟）** | 走 fallback |
 | 15 | 会话摘要 | `session.recent/topic/mood` | 接续 | **是（每轮）** | 省 |
 | 16 | 最近日记 | `diary.md` 最近 3 天 | 记忆 | **是（每次写日记）** | 省 |
 | 17 | `## 交互模式` | `_active.json.mode` | 文本/动作口径 | 否 | 有默认 |
@@ -804,7 +824,7 @@ export function selectLoreEntries(
 | W5 | `use_regex` | 支持 / 不支持（按字面量处理） | 零依赖下 `new RegExp` 可用，但用户写坏正则会抛 | 支持，但 `try/catch` 包住，失败按字面量匹配并记 `diag` |
 | W6 | 预算单位 | `token_budget`（token） / 字符预算 / 双轨 | 无 tokenizer；酒馆卡里写的是 token | **字符预算为主**，`token_budget` 按 `×1.5`（中文保守）换算成字符上界，取两者更小 |
 | W7 | 预算默认值 | 800 / 1500 / 2500 字符 | 每轮常驻成本；L1 静态块已经 ~3000 字符 | 1500 字符 |
-| W8 | 命中后放哪个 section | ①L1 内（第 13 位）②独立 section `aiwu:lore` | 可观察性 / 前缀缓存 / 未来能否单独开关 | **独立 section**（D10），但等调研确认社区做法 |
+| W8 | 命中后放哪个 section | ①L1 内（第 13 位）②独立 section `aiwu:lore` | 可观察性 / 前缀缓存 / 未来能否单独开关 | **独立 section**（D10）为最终形态；**实现暂用 L1 内联第 13 位**（`renderL1` 的 `extras.loreText`）——两者对调用方契约相同，调研定稿后拆 section 不用改接口 |
 | W9 | `before_char` / `after_char` 落点 | before → L1 开头之前 / after → 静态块之后 | 语义近似度；`before_char` 会顶掉"身份标题"的锚定效果 | `after_char` → 静态块之后（第 13 位）；`before_char` → 身份标题之前，加小标题区分 |
 | W10 | 递归扫描 | 做 / 不做 | 酒馆 `recursive_scanning` 的收益主要在"一条命中带出另一条" | **v1 不做**（复杂 + 易失控），写进文档"不支持" |
 | W11 | 匹配素材 | `session.recent` / 本轮用户原文 / `topic` / `mood` | 摘要 120 字截断会丢关键词 | `recent` + `topic` + **本轮用户原文**（pre-step 从会话事件取最后一条 user），三者拼接 |
@@ -890,29 +910,44 @@ export function selectLoreEntries(
 
 ## 6. 风险与回归
 
-### 6.1 每轮 token 成本估算
+### 6.1 每轮 token 成本估算（**已实测，设计稿里的 2.1× 预估作废**）
 
-口径：中文 **1 token ≈ 1.5 字符**（保守，即高估成本）；英文按 4 字符/token（本插件内容基本全中文）。
+口径：中文 **1 token ≈ 1.5 字符**（保守，即高估成本）。
 
-| 组成 | v0.1 现状 | v0.2.0（标准档） | 备注 |
-|---|---|---|---|
-| L0 常驻底线 | 684 字符 ≈ 460 token | 同左 | **不变** |
-| L1 静态人设（第 1–12 段） | ~1200 字 ≈ 800 token | ~2900 字 ≈ 1950 token | 主要是双写结构 + 声线细化 |
-| ↳ 其中 `mes_example` | 0 | ~800 字 ≈ 530 token | 上限 1200 字 |
-| 世界书命中 | 0 | ~800 字 ≈ 530 token | 受 1500 字预算约束 |
-| 时间差 + 会话 + 日记 | ~900 字 ≈ 600 token | 同左 | 不变 |
-| 交互模式 + 关系口径 | ~450 字 ≈ 300 token | 同左 | 不变 |
-| **合计 / 轮** | **~2100 token** | **~4300 token**（≈2.1×） | 未命中世界书时 ~3800 |
+**实测（`migrateLegacyCard` + `renderL1` 跑三张预置卡，落地后复现）**
+
+| 卡 | 旧卡文件 | CCv3 文件 | v0.1 `renderCharacterCard` | v0.2 `renderL1`（含收尾提醒） |
+|---|---|---|---|---|
+| 虞照 | 2021 B | 2871 B（+42%） | 1107 字 | **1142 字** |
+| 裴既明 | 1897 B | 2674 B（+41%） | 1016 字 | **1050 字** |
+| 谢砚舟 | 1880 B | 2662 B（+42%） | 1015 字 | **1049 字** |
+
+> 结论先行：**迁移让文件变大 40%，但 L1 反而略小（−0.6%）**。
+> 原因很简单——原生投影与结构化是"同一份内容的两种写法"，L1 每段只选一个来源渲染（`raw` ?? 结构 ?? 原生），
+> 不会双份。所以"改格式"本身**不增加每轮成本**；成本只来自**新填进去的内容**（`mes_example` 与世界书）。
+
+**每轮成本（启用态，含 L0）**
+
+| 组成 | 实测/估算 | 说明 |
+|---|---|---|
+| L0 常驻底线 | 684 字 ≈ 456 token | 不变 |
+| L1 静态块 + 收尾提醒 | 1050~1142 字 ≈ 700~760 token | 实测，随卡内容走；软警告阈值 3000 字 |
+| ↳ `mes_example` | 0（迁移卡）/ ≤1200 字 ≈ ≤800 token | 迁移卡**没有就不编**；外部/蒸馏卡才有 |
+| 时间差 + 会话 + 日记 | ~800 字 ≈ 530 token | 不变 |
+| 交互模式 + 关系口径 | ~290 字 ≈ 190 token | 不变 |
+| 世界书命中 | 0 / ≤1500 字 ≈ ≤1000 token | 默认预算 1500 字（⏳待调研定稿） |
+| **合计 / 轮** | **~1900 token**（迁移卡、无命中）→ **~3300 token**（外部卡 + 示例 + 命中） | v0.1 实测同口径约 **1850 token** |
 
 累计成本（100 轮会话，全部当输入重算）：
 
-- v0.1：约 **21 万** token
-- v0.2.0：约 **43 万** token（世界书常命中时）
+- 迁移卡（无世界书命中）：约 **19 万** token ≈ v0.1 持平
+- 外部卡 + `mes_example` + 世界书常命中：约 **33 万** token（+75%，这部分是**用户新增的内容**，不是格式税）
 
 **降本旋钮（按效果排序）**
 
-1. `mes_example` 关掉 → −530 token/轮
-2. 世界书预算降到 800 字 → −200 token/轮（按需内容变少，但命中率降）
+1. `mes_example` 关掉 → −800 token/轮（外部卡才有效）
+2. 世界书预算降到 800 字 → −500 token/轮（命中内容变少）
+3. 拆卡（把 `description` 的长内容移进世界书）→ 静态块变小，只有命中才付费
 3. 拆卡（把 `description` 的长内容移进世界书）→ 静态块变小，只有命中才付费
 
 > 这几个旋钮都已在 `aiwu.prompt` 里留了开关，面板后续接上即可。
@@ -1113,7 +1148,7 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | `src/index.ts` | 仅钩子接线：`pre-step` 把 `recentTexts` + `turnKey` 传给 `prompt.refresh` | ~20 行 | 我 |
 | `presets/*/card.json`（×3） | **不改**（保持旧格式，当迁移回归样本，Lead P0-2） | 0 行 | 我 |
 | `scripts/verify-tavern.mjs` | **新建**：V1–V19 断言 | ~450 行 | 我 |
-| `src/web.ts` | **过渡期双视图**（§6.5 / Q1）：`/character` 加 `ccv3`、`/characters` 加 `ccv3`、`/character/save` 双入口 | ~20 行 | **我**（Lead 已把 `web.ts` 交给我，distill-designer 不再动它） |
+| `src/web.ts` | **C7 三键 + 导入接口**：`/character` 与 `/characters` 带 `card`+`ccv3`；`/character/save` 收 `{name,card?,ccv3?}`；新增 `POST /character/import`（16 MB 上限，解析→归一→预览，不落盘）；`readBody(req, limit)` 默认仍 4 MB | ~70 行 | **我** |
 | `client/**` | 编辑器读 `ccv3`/`fields`、世界书编辑 UI、长度警告 UI | — | ui-designer |
 | `distill/flow.md` + 契约 | 蒸馏输出改成 CCv3 JSON（见 §8.1） | — | distill-designer |
 
