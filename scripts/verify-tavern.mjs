@@ -47,8 +47,9 @@ const {
   LORE_DEFAULTS, MES_EXAMPLE_BUDGET,
 } = T
 
+// 迁移回归夹具：v0.1 的 34 字段旧卡（原 presets，已移出产品预置，见 scripts/fixtures/legacy-cards）
 const PRESETS = ['虞照', '裴既明', '谢砚舟']
-const readPreset = async (name) => JSON.parse(await readFile(join(root, 'presets', name, 'card.json'), 'utf8'))
+const readPreset = async (name) => JSON.parse(await readFile(join(root, 'scripts', 'fixtures', 'legacy-cards', name, 'card.json'), 'utf8'))
 
 /** 旧 34 字段（真相来源：client/card-schema.ts 的 GROUPS）。 */
 const LEGACY_FIELDS = {
@@ -466,7 +467,7 @@ section('V18 · 设计文档 §1.7 的 golden 样例即期望输出（文档即�
     const expected = scrub(golden)
     check(!('character_book' in actual), '（前置）迁移本身不生成 character_book')
     delete expected.data.character_book
-    check(eq(actual, expected), '文档样例 === migrateLegacyCard(presets/虞照)',
+    check(eq(actual, expected), '文档样例 === migrateLegacyCard(fixtures/legacy-cards/虞照)',
       eq(actual, expected) ? undefined : firstDiff(actual, expected))
   }
 }

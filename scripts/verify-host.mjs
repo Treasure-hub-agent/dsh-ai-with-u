@@ -11,7 +11,7 @@
  *
  * 运行：node scripts/verify-host.mjs
  */
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -19,6 +19,17 @@ import { pathToFileURL } from 'node:url'
 const rootRaw = new URL('..', import.meta.url).pathname
 const root = process.platform === 'win32' ? rootRaw.replace(/^\/([A-Za-z]:)/, '$1') : rootRaw
 const lib = (name) => pathToFileURL(join(root, 'lib', name)).href
+
+/**
+ * 用哪张卡做启用验证：**从预置卡里取第一张**，不写死名字。
+ *
+ * 2026-10-30 踩过：预置卡从三张测试卡（虞照/裴既明/谢砚舟）换成蒸馏的 IP 卡之后，
+ * 这里写死的 虞照 直接 400，连带后面 5 条断言全红——而失败信息看起来像「L0 坏了」，
+ * 实际只是夹具名字过期。夹具依赖产品数据的名字，是这次换卡的连带风险。
+ */
+const ACTIVE_NAME = (await readdir(join(root, 'presets'), { withFileTypes: true }))
+  .filter(entry => entry.isDirectory())
+  .map(entry => entry.name)[0]
 
 let failed = 0
 let passed = 0
@@ -197,8 +208,8 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
   fail('没有注册 /activate 或 /deactivate 路由')
 } else {
   const resOn = fakeRes()
-  await routeOf('/activate').handler(fakeReq('POST', { name: '虞照' }), resOn)
-  check(resOn.out.status === 200 && resOn.out.body?.ok === true, `POST /activate → ${resOn.out.status}`)
+  await routeOf('/activate').handler(fakeReq('POST', { name: ACTIVE_NAME }), resOn)
+  check(resOn.out.status === 200 && resOn.out.body?.ok === true, `POST /activate ${ACTIVE_NAME} → ${resOn.out.status}`)
   const renderedOn = sp.render()
   check(renderedOn.includes('角色扮演底线'), '启用后 L0 底线出现')
   check(renderedOn.includes('你现在的身份'), '启用后 L1 角色段出现')

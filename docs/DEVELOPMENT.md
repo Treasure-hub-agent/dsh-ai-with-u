@@ -357,7 +357,7 @@ dsh-ai-with-u/
 ├── package.json          # dsh.bundle.patch + dsh.client 声明
 ├── cordis.patch.yml      # 插件行
 ├── tsconfig.json
-├── presets/              # 3 张预置角色卡（首次启用幂等种入）
+├── presets/              # 3 张范例角色卡（蒸馏产出的 IP 卡，CCv3；首次安装幂等种入）
 ├── src/                  # 宿主侧（Node）
 │   ├── index.ts          # 生命周期、服务等待、插拔联动、会话钩子
 │   ├── prompt.ts         # L0/L1 分层注入、时间差档位
@@ -426,7 +426,11 @@ dsh-ai-with-u/
    `card` 是旧视图（编辑面，给了就重投影原生）、`ccv3` 是原始对象（世界书从这里走）；
    `extensions.aiwu` 没被覆盖的键、`character_book`、别人的 `extensions.*` **一律原样保留**。
    写入口只有 `fromLegacyView`（结构 → 卡），不做"原生反解析回结构"（导入时那次 `deriveFromNative` 例外）。
-4. **`presets/*/card.json` 故意保持旧格式**：全新安装时真的跑一遍迁移逻辑 = 迁移代码天天在跑回归。
+4. **`presets/*/card.json` 现在是 CCv3**（蒸馏产出的范例卡）。**旧 34 字段卡的迁移回归改用 `scripts/fixtures/legacy-cards/`**：
+   之前一段时间 presets 故意保持旧格式，让每次全新安装都真跑一遍迁移；2026-10-30 换范例卡后，
+   迁移样本移到 fixtures（`verify-tavern` 的 PRESETS 从那里读），产品预置与测试夹具就此分离。
+   ⚠️ 换预置卡时记得同步检查夹具：`verify-host` 曾把 `虞照` 写死在启用断言里，换卡后 5 条断言全红，
+   而报错看起来像「L0 坏了」——已经改成从 `presets/` 取第一张，不再写死名字。
 
 **四个提示词段位（v0.2.0 起；`src/prompt.ts`）**
 
