@@ -1136,7 +1136,7 @@ node scripts/verify-tavern.mjs
 # 期望最后一行：全部通过（N 项），exit code 0
 ```
 
-至少断言（纯函数 + 临时目录 + 路由 handler，不碰真实存档）：**171 项**
+至少断言（纯函数 + 临时目录 + 路由 handler，不碰真实存档）：**186 项**
 
 | # | 断言 | 方法 |
 |---|---|---|
@@ -1164,6 +1164,7 @@ node scripts/verify-tavern.mjs
 | V21 | REST 三键保存 + 导入预览（C7 全链路） | 只给 `card` → `character_book`/`extensions.aiwu` 原样；只给 `ccv3` → 生效；都给 → 以 ccv3 为底；都不给 → 400；导入预览不写盘；野生卡缺 `tags` 也能归一 |
 | V22 | 世界书注入规范（报告 §4.3 定稿） | `selectiveLogic` 四值、中文整词边界（不用 `\W`）、`probability` 稳定哈希同轮固定、`enabled`/`disable` 双语义、`maxEntries=12`、首条超预算仍注入、默认 4/12/6000、`scanDepth` 之外不命中 |
 | V23 | 宿主插值必须关闭（P0-5 的防回归） | `verify-host` 里断言：任何 `aiwu:*` 段 `interpolate !== false` 就红；`aiwu:lore` order = 10300、`aiwu:clock` > lore |
+| V24 | 四段装配（集成） | `PromptController` 真启用一张旧格式卡：L1 有身份+声线、世界书段空；加世界观书 + 刷新素材 → 世界书段有内容且**不在 L1 里**；同 turnKey 重复刷新走复用（不重复记日志）；deactivate 后三段全空、L0 不动 |
 
 ### 7.3 重启 DSH 后的 REST 探活
 
@@ -1226,7 +1227,7 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | `src/store.ts` | `readCard` 读时归一；`writeCard` 接受 CCv3 / 旧视图并做投影 + 备份；`ensureIndex`/`seedPresets`/`listCharacters` 改读 `data.name`；按角色串行队列；`readJson` 损坏备份；`forget`/`rotateOpening`/`relationState` 改路径 | ~250 行改动 | 我 |
 | `src/index.ts` | 仅钩子接线：`pre-step` 把 `recentTexts` + `turnKey` 传给 `prompt.refresh` | ~20 行 | 我 |
 | `presets/*/card.json`（×3） | **不改**（保持旧格式，当迁移回归样本，Lead P0-2） | 0 行 | 我 |
-| `scripts/verify-tavern.mjs` | **新建**：V1–V22 断言（**171 项**，已串进 `npm run build`） | ~700 行 | 我 |
+| `scripts/verify-tavern.mjs` | **新建**：V1–V24 断言（**186 项**，已串进 `npm run build`） | ~700 行 | 我 |
 | `src/web.ts` | **C7 三键 + 导入接口**：`/character` 与 `/characters` 带 `card`+`ccv3`；`/character/save` 收 `{name,card?,ccv3?}`；新增 `POST /character/import`（16 MB 上限，解析→归一→预览，不落盘）；`readBody(req, limit)` 默认仍 4 MB | ~70 行 | **我** |
 | `client/**` | 编辑器读 `ccv3`/`fields`、世界书编辑 UI、长度警告 UI | — | ui-designer |
 | `distill/flow.md` + 契约 | 蒸馏输出改成 CCv3 JSON（见 §8.1） | — | distill-designer |
