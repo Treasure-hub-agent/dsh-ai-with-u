@@ -13,6 +13,18 @@
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { Store } from './store.js'
+import { normalizeCharacterName } from './store.js'
+import {
+  CARD_SPEC,
+  CARD_SPEC_VERSION,
+  countFilledFields,
+  lengthWarnings,
+  normalizeCard,
+  toLegacyView,
+  type CharacterCardV3,
+  type LegacyCardView,
+} from './tavern.js'
 
 /** 流程文件名（放在包根的 `distill/` 下，随 `package.json` 的 files 发布）。 */
 export const DISTILL_FLOW_FILE = 'flow.md'
@@ -68,8 +80,8 @@ export function buildDistillInstruction(flowPath: string): string {
     '要求：',
     '1. 读完先只回一句「流程已读，请给我作品名或正文」，不要提前开讲。',
     '2. 按文件里的阶段推进，一次只问一个问题。',
-    '3. 最终只输出一个 json 代码块，键名与结构逐字照文件里的输出格式，不要自己发明字段。',
-    '4. 不要调用任何 awu_* 工具；蒸馏不依赖它们，最后也不要替我保存卡片。',
+    '3. 该存卡的时候直接调用 awu_card_save({ name, data }) 存进插件，不要把卡贴给我、不要输出 JSON 代码块。',
+    '4. 重名先问我要不要覆盖；其它 awu_* 工具不要动。',
     '',
     '作品：（在这里贴正文；只给作品名也可以，但请先提醒我可能有记忆偏差）',
   ].join('\n')
@@ -88,3 +100,244 @@ export async function distillFlowInfo(): Promise<DistillFlowInfo> {
   const instruction = buildDistillInstruction(flow.path)
   return { path: flow.path, instruction, chars: instruction.length, flowChars: flow.chars }
 }
+
+// ============================================================================ v3：全自动蒸馏（临时武装 + awu_card_save）
+
+/**
+ * 武装有效期：2 小时。
+ * 够长到"用户点开始蒸馏、读完作品、聊几轮补充细节、最后出卡"；够短到"忘了取消也不会长期开门"。
+ */
+export const DISTILL_ARM_TTL_MS = 2 * 60 * 60 * 1000
+
+/** 武装需要对工具服务做的事（由 `index.ts` 提供：注册/卸下 `awu_card_save`）。 */
+export interface DistillArmHooks {
+  /** 挂载 `awu_card_save`；工具服务未就绪时返回 false（**武装必须失败**，不能装作成功）。 */
+  mount(): boolean
+  unmount(): void
+}
+
+export interface DistillArmSnapshot {
+  armed: boolean
+  /** 到期时刻（本地时区 ISO）；未武装时不出现。 */
+  expiresAt?: string
+  /** 最近一次通过 `awu_card_save` 落盘的结果（面板用来显示"新卡已保存"）。 */
+  lastSaved?: { name: string; at: string }
+}
+
+function isoNow(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const offsetMinutes = -date.getTimezoneOffset()
+  const sign = offsetMinutes >= 0 ? '+' : '-'
+  const abs = Math.abs(offsetMinutes)
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    + `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+}
+
+/**
+ * 蒸馏武装（**内存态，绝不落盘**）。
+ *
+ * 语义：
+ *   - `arm()`：挂 `awu_card_save` + 记 TTL；工具服务不可用则抛错（不假武装）。
+ *   - 成功保存一次 → 自动 `disarm()`（主人要求：这份"能写卡的权力"只开一次门）。
+ *   - `snapshot().armed` 在 TTL 到期的瞬间自动变成 false 并**顺手卸下工具**——
+ *     所以"到点了但工具还挂着"这种窗口不存在。
+ *   - 重启即失效：没有任何状态写到磁盘上（避免模型在任何会话里突然能写卡）。
+ */
+export class DistillArm {
+  private expiresAtMs: number | undefined
+  private mounted = false
+  private saved: { name: string; at: string } | undefined
+
+  constructor(
+    private readonly hooks: DistillArmHooks,
+    /** 可注入时钟（自检用）：默认 `Date.now`。 */
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  get armed(): boolean {
+    if (this.expiresAtMs === undefined) return false
+    if (this.now() >= this.expiresAtMs) {
+      // TTL 到期：先卸工具再清状态，绝不把"已过期但还挂着工具"的状态露出去
+      this.disarm()
+      return false
+    }
+    return true
+  }
+
+  /** 武装（重复调用等于续期）。工具挂不上就抛错——不允许"看起来武装了但模型没有工具"。 */
+  arm(ttlMs: number = DISTILL_ARM_TTL_MS): DistillArmSnapshot {
+    if (!this.mounted) {
+      const ok = this.hooks.mount()
+      if (!ok) throw new Error('宿主未提供工具服务，无法武装 awu_card_save（蒸馏工具挂不上去）')
+      this.mounted = true
+    }
+    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? Math.max(1000, Math.floor(ttlMs)) : DISTILL_ARM_TTL_MS
+    this.expiresAtMs = this.now() + ttl
+    return this.snapshot()
+  }
+
+  /** 手动收：卸工具 + 清 TTL（保存完成后也走这里）。 */
+  disarm(): void {
+    this.expiresAtMs = undefined
+    if (!this.mounted) return
+    this.mounted = false
+    try {
+      this.hooks.unmount()
+    } catch {
+      // 卸载失败不能让调用方崩：记一次日志的成本比让"取消蒸馏"报错低
+      this.mounted = false
+    }
+  }
+
+  /** 给工具用：保存成功一次 → 记一笔 + 自动收权。 */
+  markSaved(name: string): void {
+    this.saved = { name, at: isoNow(new Date(this.now())) }
+    this.disarm()
+  }
+
+  snapshot(): DistillArmSnapshot {
+    const armed = this.armed
+    const snap: DistillArmSnapshot = { armed }
+    if (armed && this.expiresAtMs !== undefined) snap.expiresAt = isoNow(new Date(this.expiresAtMs))
+    if (this.saved !== undefined) snap.lastSaved = { ...this.saved }
+    return snap
+  }
+}
+
+// ---------------------------------------------------------------- 模型落卡（唯一写入口）
+
+export interface SaveCardRequest {
+  name?: unknown
+  data?: unknown
+  overwrite?: unknown
+}
+
+export interface SaveCardSuccess {
+  ok: true
+  name: string
+  action: 'created' | 'updated'
+  stats: { filled: number; total: number }
+  warnings: string[]
+}
+
+export interface SaveCardFailure {
+  ok: false
+  code: 'invalid-name' | 'invalid-data' | 'name-conflict'
+  error: string
+  /** 重名时给模型看的已有卡摘要（让它在"改名 / 覆盖"之间做决定）。 */
+  existing?: {
+    name: string
+    filled: number
+    identity: string
+    background: string
+    opening: string
+  }
+}
+
+export type SaveCardOutcome = SaveCardSuccess | SaveCardFailure
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function clip(text: unknown, max: number): string {
+  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`
+}
+
+/** 已有卡摘要（给"重名"错误体用；只给最少够判断的信息，不把整张卡吐给模型）。 */
+function summarizeExistingCard(view: LegacyCardView): NonNullable<SaveCardFailure['existing']> {
+  const basic = isRecord(view.basic) ? view.basic : {}
+  return {
+    name: String(view.name ?? ''),
+    filled: countFilledFields(view).filled,
+    identity: clip(basic['身份'], 40),
+    background: clip(basic['一句话背景'], 80),
+    opening: clip(view.opening, 60),
+  }
+}
+
+/**
+ * 模型落卡的**唯一通道**（`awu_card_save` 的实现体）。
+ *
+ * 不抛错：所有失败都返回 `{ ok:false, code, error }`，让模型自己读到原因并纠正
+ * （工具抛错在 DSH 里会变成一条笼统的失败，模型看不到"重名了、已有卡长这样"这种关键信息）。
+ *
+ * 校验顺序（写盘前全部过一遍）：
+ *   1. 名字：`normalizeCharacterName`（路径分隔符 / Windows 非法字符 / 保留设备名 / 长度）；
+ *   2. `data` 必须是对象，且至少有一项实质内容（description / personality / scenario / first_mes / mes_example）；
+ *   3. 重名：已存在且没带 `overwrite: true` → 拒绝并给摘要（**不写盘**）；
+ *   4. `normalizeCard` 补默认值 → `saveCard` 落 CCv3 + 更新索引。
+ */
+export async function saveCardFromModel(store: Store, input: SaveCardRequest): Promise<SaveCardOutcome> {
+  let name: string
+  try {
+    name = normalizeCharacterName(typeof input.name === 'string' ? input.name : '')
+  } catch (error) {
+    return { ok: false, code: 'invalid-name', error: error instanceof Error ? error.message : String(error) }
+  }
+
+  const data = input.data
+  if (!isRecord(data)) {
+    return { ok: false, code: 'invalid-data', error: 'data 必须是对象（CCv3 的 data 部分：description / personality / first_mes / character_book …）' }
+  }
+  const substantive = ['description', 'personality', 'scenario', 'first_mes', 'mes_example']
+    .some(key => String(data[key] ?? '').trim() !== '')
+  if (!substantive) {
+    return {
+      ok: false,
+      code: 'invalid-data',
+      error: 'data 里没有任何实质内容：description / personality / scenario / first_mes / mes_example 至少要有一样',
+    }
+  }
+
+  const existing = await store.readCardView(name)
+  if (existing !== undefined && input.overwrite !== true) {
+    return {
+      ok: false,
+      code: 'name-conflict',
+      error: `已有同名角色「${name}」，本次没有写盘。先问用户：改名，还是覆盖？要覆盖就带 overwrite: true 再调用一次。`,
+      existing: summarizeExistingCard(existing),
+    }
+  }
+
+  const card = normalizeCard(
+    { spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data: { ...data, name } },
+    { fallbackName: name, from: 'distill', now: new Date() },
+  )
+  const saved = await store.saveCard({ name, ccv3: card })
+  const view = toLegacyView(saved.card)
+  const warnings: string[] = lengthWarnings(saved.card).map(w => w.message)
+  const voice = isRecord(view.voice) ? view.voice : {}
+  const anchors = isRecord(view.memory_anchor) ? view.memory_anchor['要点'] : undefined
+  if (String(view.opening ?? '').trim() === '' && !(Array.isArray(view.openings) && view.openings.length > 0)) {
+    warnings.push('没有开场白（first_mes / alternate_greetings 都为空），第一次对话会从空白开始。')
+  }
+  if (Object.keys(voice).length === 0) {
+    warnings.push('声线字段全空——「声线基因」是决定"像不像他"的灵魂字段，建议补到 extensions.aiwu.voice。')
+  }
+  if (!Array.isArray(anchors) || anchors.length === 0) {
+    warnings.push('没有记忆锚点（extensions.aiwu.memoryAnchors），角色会缺少可复用的具体细节。')
+  }
+
+  return {
+    ok: true,
+    name: saved.name,
+    action: existing === undefined ? 'created' : 'updated',
+    stats: countFilledFields(view),
+    warnings,
+  }
+}
+
+/** 一张最小可用卡（自检与"我先占个坑"用；正常蒸馏不该走到这里）。 */
+export function minimalCardData(name: string): Record<string, unknown> {
+  return {
+    name,
+    description: `身份：${name}`,
+    first_mes: `（${name} 抬起头看了你一眼）`,
+  }
+}
+
+/** 便于测试：显式引用一下类型，避免 tsc 认为导入未使用。 */
+export type { CharacterCardV3 }

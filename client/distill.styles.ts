@@ -43,6 +43,26 @@ export const DISTILL_CSS = `
   color: var(--awu-ink-mute, #8f8172);
 }
 
+/* ---- 第二步的状态条（已发送 / 只填入 / 失败）----
+   v3 全自动之后弹层只剩两步：确认 → 已发送，所以这一步的反馈要够清楚，
+   但又不能抢主按钮。用 surface + tone 表达，不写死色值。 */
+.awu-distill-status {
+  margin: 2px 0 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--awu-line, rgba(244, 208, 160, .11));
+  border-radius: var(--awu-r-sm, 8px);
+  background: var(--awu-surface-2, rgba(255, 226, 190, .035));
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--awu-ink-dim, #bdae9d);
+}
+.awu-distill-status[data-tone="ok"] {
+  border-color: var(--awu-line-strong, rgba(244, 208, 160, .22));
+  color: var(--awu-teal, #86c9bd);
+}
+.awu-distill-status[data-tone="warn"] { color: var(--awu-gold, #e9bd72); }
+.awu-distill-status[data-tone="danger"] { color: var(--awu-danger, #e2796b); }
+
 .awu-distill-dialog {
   width: min(var(--awu-dialog-w, 420px), 100%);
   max-height: min(84vh, var(--awu-dialog-max-h, 660px));

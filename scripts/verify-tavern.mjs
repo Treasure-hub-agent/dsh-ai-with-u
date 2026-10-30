@@ -514,6 +514,24 @@ section('附 · 装饰器解析 / 长度统计 / 关系档位')
   check(MES_EXAMPLE_BUDGET === 1200, 'mes_example 预算是 1200 字')
 }
 
+// ================================================================ 34 字段镜像 V25
+
+section('V25 · 宿主侧 34 字段镜像与 client/card-schema.ts 的 GROUPS 逐字一致')
+{
+  const schemaPath = join(root, 'client', 'card-schema.ts')
+  let schemaText = ''
+  try { schemaText = await readFile(schemaPath, 'utf8') } catch { /* 下面统一报错 */ }
+  const groupStart = schemaText.indexOf('export const GROUPS')
+  const groupEnd = schemaText.indexOf('Draft', groupStart)
+  const region = groupStart >= 0 ? schemaText.slice(groupStart, groupEnd > groupStart ? groupEnd : undefined) : ''
+  const keys = [...region.matchAll(/\bkey:\s*'([^']+)'/gu)].map(m => m[1])
+  const mirrored = Object.values(T.LEGACY_FIELD_SPEC).flat()
+  check(keys.length === 34, `card-schema.ts 的 GROUPS 里抽到 ${keys.length} 个字段（期望 34）`)
+  check(eq(keys, mirrored), `宿主镜像与 client 逐字一致（${mirrored.length} 项）`,
+    eq(keys, mirrored) ? undefined : `client=${JSON.stringify(keys)} 宿主=${JSON.stringify(mirrored)}`)
+  check(T.countFilledFields(migrated['虞照'].card).total === 34, 'countFilledFields 的 total 恒为 34')
+}
+
 // ================================================================ 写盘：V14 / V15（沙箱）
 
 section('V14 / V15 · 存储层：损坏文件不丢卡 / 并发写盘不丢更新')

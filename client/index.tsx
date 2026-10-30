@@ -999,6 +999,33 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     void loadDetail(viewName)
   }, [viewName, loadDetail])
 
+  /**
+   * 静默刷新：只更新列表与总览，不动 loading / error / notice。
+   *
+   * 用途：蒸馏改成「AI 全程自己建卡并落盘」之后，新卡是在会话里产生的，
+   * 面板不会自己知道。开着面板时轮询一次，用户就不用点刷新了。
+   * 失败**不打扰用户**（下一轮再试），但要在 console 留痕，方便排查接口挂了。
+   */
+  const reloadQuietly = useCallback(async (): Promise<void> => {
+    try {
+      const [chars, ov] = await Promise.all([fetchCharacters(), fetchOverview().catch(() => undefined)])
+      if (!aliveRef.current) return
+      setList(chars)
+      if (ov !== undefined) {
+        setOverview(ov)
+        setActive(ov.active ?? { enabled: false })
+      }
+    } catch (error) {
+      console.warn('[ai-with-u] 面板静默刷新失败（下轮重试）：', error)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const timer = window.setInterval(() => { void reloadQuietly() }, 5000)
+    return () => window.clearInterval(timer)
+  }, [open, reloadQuietly])
+
   const run = useCallback(async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
     setNotice('')

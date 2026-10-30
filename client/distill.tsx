@@ -1,20 +1,21 @@
 /**
- * AI WITH U · 从作品蒸馏角色卡（v2：消息通道）
+ * AI WITH U · 从作品蒸馏角色卡（v3：全自动落盘）
  *
  * 为什么是「发一条消息」而不是「加一个工具」：面板拿不到模型，只能把话递进会话；
  * 流程正文放随包发布的 `distill/flow.md`，指令里只给绝对路径 —— 正文永远不进 system prompt。
  *
- * 本文件当前只做**发送通道**（2026-10-30 22:00 起）：
+ * v3（2026-10-30 22:1x，主人原话：「应该是 AI 直接完成到底直到卡落地保存，并且插件中可以直接读取到
+ * 新卡，没必要让用户自己粘贴回来，那样太麻烦」）：
+ *  - 流程变成 **arm → 发指令 → AI 自己跑完并调 `awu_card_save` 落盘**；
+ *  - 弹层只剩两步：**确认** → **已发送**；粘贴框 / 校验视图 / `parseDistillCard` 接线全部删掉；
+ *  - 面板靠轮询 `/characters` 看到新卡（Lead 侧实现），本文件不阻塞弹层、也不写盘。
+ *
+ * 三个组件：
  *  - `DockSink`   —— 挂在 `conversation.composer.dock` 的**无头**贡献：把 `inputActions` /
  *    `sessionId` / `useInput` 快照存进模块级 sink，供侧栏面板取用（`sidebar.footer.action`
  *    这个席位拿不到 `inputActions`，必须借会话作用域插槽转一手）。
- *  - `DockEntry`  —— 同一位置的**可见**小入口（可选注册），只填入不发。
- *  - `DistillDialog` —— 面板侧确认弹层：发送指令 / 复制兜底 / 如实回显状态。
- *
- * ⏸ **卡片回填已挂起**：主人把卡片格式改成酒馆卡 CCv3（`spec: chara_card_v3` + `character_book`），
- * 原来的「粘贴 JSON → 34 字段校验 → 进 CardEditor」等 tavern 格式定稿后按新契约重做
- * （存档：`docs/design/2026-10-30-distill-entry.md` §5.2b / §5.7 / §8）。
- * 因此本文件现在没有任何 `parseDistillCard` 依赖，也不写盘。
+ *  - `DockEntry`  —— 同一位置的可见小入口（**当前未注册，保留备用**）。
+ *  - `DistillDialog` / `DistillButton` / `DistillEntry` —— 面板侧的两步入场。
  *
  * 发送契约（2026-10-14 / 10-17 对已安装 desktop 0.2.0-rc.2 实测，来源：本机 dsh-story 头部注释）：
  *  - `InputActions = { captureInsertion(), insertText(text, span) → boolean, setDraft(text), …, submit() }`；
@@ -29,8 +30,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { JSX } from 'react'
 
-import { errorText, fetchDistillFlow } from './api'
-import type { DistillFlowInfo } from './api'
+import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
 import { IconClose, IconQuill } from './icons'
 import type { Translate } from './text'
 
@@ -160,7 +160,7 @@ export function composerSessionId(): string {
  * - 失败一律把 `instruction` 原样带回来，面板负责显示 + 复制兜底。
  *
  * ⚠️ 相对约定的两处扩展（不影响只读 `ok` / `mode` 的调用方）：失败原因多了 `flow-failed`
- * （读不到 flow.md），成功/失败都多了 `note` / `error`。
+ * （没拿到指令，且 `/distill/flow` 兜底也失败），成功/失败都多了 `note` / `error`。
  */
 export type SendResult =
   | { ok: true; mode: 'sent' | 'filled'; instruction: string; note?: 'busy' | 'no-submit' }
@@ -178,16 +178,22 @@ function draftIsEmpty(): boolean {
 }
 
 /**
- * 把蒸馏指令发进当前会话：读 flow → `insertText` → （可用则）`submit`。
+ * 把蒸馏指令发进当前会话：`insertText` → （可用则）`submit`。
+ *
+ * v3 起指令由调用方传入（`POST /distill/arm` 的返回值）——**arm 必须先做**，因为 AI 的落盘工具
+ * 只在那个窗口内可用。传空时退回 `GET /distill/flow`（老路径，只给 `DockEntry` 这种「只想填一条
+ * 指令试试」的场景用，不参与正式流程）。
  *
  * 每一步都防御式：任何一步不成立都返回可操作的结果，绝不抛给面板、绝不假装发成功。
  */
-export async function sendDistillInstruction(): Promise<SendResult> {
-  let instruction: string
-  try {
-    instruction = (await fetchDistillFlow()).instruction
-  } catch (error) {
-    return { ok: false, reason: 'flow-failed', instruction: '', error: errorText(error) }
+export async function sendDistillInstruction(instructionInput?: string): Promise<SendResult> {
+  let instruction = typeof instructionInput === 'string' ? instructionInput.trim() : ''
+  if (instruction === '') {
+    try {
+      instruction = (await fetchDistillFlow()).instruction
+    } catch (error) {
+      return { ok: false, reason: 'flow-failed', instruction: '', error: errorText(error) }
+    }
   }
 
   const insertText = actionFn('insertText')
@@ -350,33 +356,58 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
   const { t, onClose, onDone } = props
   const ready = useComposerReady()
 
-  const [phase, setPhase] = useState<'idle' | 'sending'>('idle')
-  const [flow, setFlow] = useState<DistillFlowInfo | undefined>(undefined)
-  const [flowError, setFlowError] = useState('')
+  /** 两步：确认 → 已发送。没有第三步，也不再接收任何粘贴内容。 */
+  const [step, setStep] = useState<'confirm' | 'result'>('confirm')
+  const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | undefined>(undefined)
   const [manual, setManual] = useState('')
+  const [savedNote, setSavedNote] = useState('')
+  /** 指令是否真的发出去了 —— 决定关弹层时该 onDone() 还是 disarm()。 */
+  const sentRef = useRef(false)
 
   useBodyScrollLock(true)
 
+  // 开门先看一眼窗口状态：上一次刚存过卡就给一句上下文，别让用户以为要重来
   useEffect(() => {
     let alive = true
-    void fetchDistillFlow()
-      .then(info => { if (alive) setFlow(info) })
-      .catch((error: unknown) => { if (alive) setFlowError(errorText(error)) })
+    void fetchDistillState()
+      .then(state => {
+        if (!alive) return
+        const name = state.lastSaved?.name ?? ''
+        if (name !== '') setSavedNote(t('distill.lastSaved', { name }))
+      })
+      .catch((error: unknown) => {
+        // 状态接口只做锦上添花：读不到不影响主流程，但要留痕（禁止空 catch）
+        console.error('[ai-with-u] 读 /distill/state 失败（不影响蒸馏）', error)
+      })
     return () => { alive = false }
-  }, [])
+  }, [t])
 
-  // Esc 关闭：正在发送时不关，避免用户以为发出去了其实还在跑
+  /**
+   * 关闭：**没发出去就 disarm**，把这次窗口收掉（否则上一条 arm 会一直挂着）；
+   * 发出去了才 onDone()，让外层刷新/收尾。
+   */
+  const close = useCallback((): void => {
+    if (!sentRef.current) {
+      void disarmDistill().catch((error: unknown) => {
+        console.error('[ai-with-u] 取消蒸馏时 disarm 失败（不影响使用）', error)
+      })
+    } else {
+      onDone()
+    }
+    onClose()
+  }, [onClose, onDone])
+
+  // Esc 关闭：正在 arm/send 时不关，避免用户以为发出去了其实还在跑
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      if (phase !== 'idle') return
+      if (event.key !== 'Escape' || busy) return
       event.stopPropagation()
-      onClose()
+      close()
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [phase, onClose])
+  }, [busy, close])
 
   const reasonText = (reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed'): string => {
     if (reason === 'no-dock') return t('distill.noDock')
@@ -385,45 +416,59 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
     return t('distill.submitFailed')
   }
 
-  const onSend = (): void => {
-    if (phase !== 'idle') return
-    setPhase('sending')
+  /**
+   * 「开始蒸馏」= arm（开窗口拿指令）→ 发送通道 → 停在第二步如实回显。
+   *
+   * 顺序不能反：AI 的落盘工具只在 arm 出来的窗口内可用，先发指令再 arm 会让它存不了卡。
+   */
+  const onStart = (): void => {
+    if (busy) return
+    setBusy(true)
     setNote(undefined)
-    void sendDistillInstruction()
-      .then(next => {
-        setManual(next.instruction)
-        if (!next.ok) {
-          setNote({ tone: 'err', text: reasonText(next.reason) })
-          return
-        }
-        if (next.mode === 'sent') {
-          setNote({ tone: 'ok', text: t('distill.sent') })
-          onDone()
-        } else if (next.note === 'busy') {
-          setNote({ tone: 'warn', text: t('distill.busyFilled') })
-        } else {
-          setNote({ tone: 'warn', text: t('distill.filled') })
-        }
-      })
-      .finally(() => setPhase('idle'))
+    setManual('')
+    void (async () => {
+      let instruction = ''
+      try {
+        instruction = (await armDistill()).instruction
+      } catch (error) {
+        setStep('result')
+        setNote({ tone: 'err', text: t('distill.armFailed', { reason: errorText(error) }) })
+        return
+      }
+      const sent = await sendDistillInstruction(instruction)
+      setManual(sent.instruction)
+      setStep('result')
+      if (!sent.ok) {
+        setNote({ tone: 'err', text: reasonText(sent.reason) })
+        return
+      }
+      sentRef.current = true
+      if (sent.mode === 'sent') setNote({ tone: 'ok', text: t('distill.sent') })
+      else if (sent.note === 'busy') setNote({ tone: 'warn', text: t('distill.busyFilled') })
+      else setNote({ tone: 'warn', text: t('distill.filled') })
+    })().catch((error: unknown) => {
+      setStep('result')
+      setNote({ tone: 'err', text: errorText(error) })
+    }).finally(() => setBusy(false))
   }
 
   const onCopy = (): void => {
-    const text = manual !== '' ? manual : (flow?.instruction ?? '')
-    if (text === '') return
-    void copyText(text).then(ok => {
-      setManual(text)
-      setNote(ok
-        ? { tone: 'ok', text: t('distill.copied') }
-        : { tone: 'warn', text: t('distill.copyFailed') })
+    if (manual === '') return
+    void copyText(manual).then(ok => {
+      setNote({
+        tone: ok ? 'ok' : 'warn',
+        text: ok ? t('distill.copied') : t('distill.copyFailed'),
+      })
     })
   }
+
+  const failed = note !== undefined && note.tone === 'err'
 
   return createPortal(
     <div
       className="awu-scrim"
       role="presentation"
-      onMouseDown={event => { if (event.target === event.currentTarget && phase === 'idle') onClose() }}
+      onMouseDown={event => { if (event.target === event.currentTarget && !busy) close() }}
     >
       <div className="awu-dialog awu-distill-dialog" role="dialog" aria-modal="true" aria-label={t('distill.title')}>
         <div className="awu-dialogHead">
@@ -434,68 +479,91 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
             className="awu-iconBtn awu-distill-close"
             aria-label={t('common.close')}
             title={t('common.close')}
-            onClick={onClose}
+            onClick={close}
+            disabled={busy}
           >
             <IconClose size={14} />
           </button>
         </div>
 
         <div className="awu-dialogBody">
-          <div className="awu-distill-why">{t('distill.why')}</div>
+          {step === 'confirm' ? (
+            <>
+              <div className="awu-distill-why">{t('distill.why')}</div>
 
-          <ol className="awu-distill-steps">
-            <li><span className="awu-distill-num">1</span><span>{t('distill.step1')}</span></li>
-            <li><span className="awu-distill-num">2</span><span>{t('distill.step2')}</span></li>
-            <li><span className="awu-distill-num">3</span><span>{t('distill.step3')}</span></li>
-          </ol>
+              <ol className="awu-distill-steps">
+                <li><span className="awu-distill-num">1</span><span>{t('distill.step1')}</span></li>
+                <li><span className="awu-distill-num">2</span><span>{t('distill.step2')}</span></li>
+                <li><span className="awu-distill-num">3</span><span>{t('distill.step3')}</span></li>
+              </ol>
 
-          {flowError !== '' && <div className="awu-distill-warn" data-tone="danger">{flowError}</div>}
+              {savedNote !== '' && <div className="awu-distill-warn" data-tone="ok">{savedNote}</div>}
+              {!ready && <div className="awu-distill-warn" data-tone="warn">{t('distill.noDock')}</div>}
 
-          <div className="awu-distill-sendRow">
-            <button
-              type="button"
-              className="awu-btn"
-              data-kind="primary"
-              data-size="sm"
-              onClick={onSend}
-              disabled={phase !== 'idle' || flow === undefined || !ready}
-              title={ready ? t('distill.send') : t('distill.noDock')}
-            >
-              <IconQuill size={12} />
-              {ready ? t('distill.send') : t('distill.noDockShort')}
-            </button>
-            <button type="button" className="awu-btn" data-size="sm" onClick={onCopy} disabled={phase !== 'idle'}>
-              {t('distill.copy')}
-            </button>
-          </div>
+              <div className="awu-distill-hint">{t('distill.savedHint')}</div>
+            </>
+          ) : (
+            <>
+              {note !== undefined && (
+                <div
+                  className="awu-distill-status"
+                  data-tone={note.tone === 'err' ? 'danger' : note.tone === 'warn' ? 'warn' : 'ok'}
+                >
+                  {note.text}
+                </div>
+              )}
 
-          {note !== undefined && (
-            <div
-              className="awu-distill-warn"
-              data-tone={note.tone === 'err' ? 'danger' : note.tone === 'warn' ? 'warn' : 'ok'}
-            >
-              {note.text}
-            </div>
+              {!failed && <div className="awu-distill-hint">{t('distill.savedHint')}</div>}
+
+              {failed && manual !== '' && (
+                <>
+                  <label className="awu-label" htmlFor="awu-distill-manual">{t('distill.copy')}</label>
+                  <textarea
+                    id="awu-distill-manual"
+                    className="awu-distill-paste"
+                    style={{ minHeight: 72 }}
+                    readOnly
+                    value={manual}
+                    onFocus={event => event.currentTarget.select()}
+                  />
+                </>
+              )}
+
+              <div className="awu-distill-hint">{t('distill.noProgress')}</div>
+            </>
           )}
-
-          {manual !== '' && (
-            <textarea
-              className="awu-distill-paste"
-              style={{ minHeight: 64 }}
-              readOnly
-              value={manual}
-              onFocus={event => event.currentTarget.select()}
-              aria-label={t('distill.copy')}
-            />
-          )}
-
-          <div className="awu-distill-hint">{t('distill.noProgress')}</div>
         </div>
 
         <div className="awu-dialogFoot">
-          <button type="button" className="awu-btn" data-size="sm" onClick={onClose} disabled={phase !== 'idle'}>
-            {t('common.close')}
-          </button>
+          {step === 'confirm' ? (
+            <>
+              <button type="button" className="awu-btn" onClick={close} disabled={busy}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="awu-btn"
+                data-kind="primary"
+                onClick={onStart}
+                disabled={busy || !ready}
+                title={ready ? t('distill.start') : t('distill.noDock')}
+              >
+                <IconQuill size={13} />
+                {busy ? t('common.busy') : ready ? t('distill.start') : t('distill.noDockShort')}
+              </button>
+            </>
+          ) : (
+            <>
+              {failed && manual !== '' && (
+                <button type="button" className="awu-btn" onClick={onCopy}>
+                  {t('distill.copy')}
+                </button>
+              )}
+              <button type="button" className="awu-btn" data-kind="primary" onClick={close}>
+                {t('distill.done')}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>,

@@ -14,6 +14,8 @@
 import type { Store } from './store.js'
 import { localDiaryDate, RELATION_BANDS } from './store.js'
 import type { PromptController } from './prompt.js'
+import type { DistillArm } from './distill.js'
+import { saveCardFromModel } from './distill.js'
 
 /** 工具需要的最小执行上下文。 */
 export interface ToolExec { signal?: AbortSignal }
@@ -232,4 +234,80 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
       },
     },
   ]
+}
+
+// ---------------------------------------------------------------- 蒸馏：落卡工具（临时武装）
+
+/**
+ * `awu_card_save` —— **模型唯一能落卡的通道**，只在「蒸馏武装」期间挂载。
+ *
+ * 为什么单独一个工厂而不是塞进 {@link createTools}：
+ *   1. 常驻工具只在启用角色时挂（`createTools` 的前提），而蒸馏**不需要启用任何角色**；
+ *   2. 这份"能写卡的权力"必须是**临时**的：`POST /distill/arm` 挂上，成功保存一次后自动卸下，
+ *      TTL（2 小时）到期也自动卸下。常驻 = 模型在任何会话里都能写卡，那是事故面。
+ *
+ * 参数 schema 里数组元素一律用 `items`（本文件里 `awu_diary_write` / `awu_opening_next`
+ * 的 `item` 是历史错法，属于 host.md P0-3，未在本轮改动范围内一并修）。
+ */
+export function createCardSaveTool(store: Store, arm: DistillArm): ToolDef {
+  return {
+    name: 'awu_card_save',
+    description: [
+      '把蒸馏出来的角色卡直接保存到插件里（落盘 CCv3 + 更新索引），保存后角色簿立刻能看到这张卡。',
+      '**只在蒸馏武装期间可用**：用户点了「蒸馏角色卡」后这个工具才会出现，保存成功一次就自动失效；',
+      '平时（非蒸馏）不要去找它，也不要试图用它改已有角色——只有在蒸馏流程的最后一阶段调用它。',
+      '`data` 是 CCv3 的 data 部分；拿不到证据的字段留空，绝不编造。',
+      '若返回 code=name-conflict：已有同名卡，先问用户「改名还是覆盖」，只有用户明确要覆盖时才带 overwrite: true 重试。',
+    ].join(''),
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: '角色名（同时是目录名与索引键）。不能含路径分隔符或 Windows 非法字符（: * ? " < > |），不能是 CON/NUL 这类保留名。',
+      },
+      data: {
+        type: 'object',
+        additionalProperties: true,
+        required: true,
+        description: 'CCv3 的 data 部分：description / personality / scenario / first_mes / alternate_greetings / mes_example / system_prompt / post_history_instructions / character_book / extensions / tags 等。至少要有 description、personality、scenario、first_mes、mes_example 之一。',
+      },
+      overwrite: {
+        type: 'boolean',
+        description: '同名卡已存在时是否覆盖。默认 false（此时返回 name-conflict 与已有卡摘要，不写盘）。',
+      },
+    },
+    output: json,
+    async execute(args) {
+      if (!arm.armed) {
+        return {
+          ok: false,
+          code: 'not-armed',
+          error: 'awu_card_save 只在蒸馏武装期间可用（当前不在武装期，或已保存过一次）。请让用户重新点「蒸馏角色卡」。',
+        }
+      }
+      try {
+        const outcome = await saveCardFromModel(store, {
+          name: args['name'],
+          data: args['data'],
+          overwrite: args['overwrite'] === true,
+        })
+        if (outcome.ok) {
+          // 保存成功 = 这份写卡权力用完即焚（主人要求：不常驻）
+          arm.markSaved(outcome.name)
+          return {
+            ...outcome,
+            hint: '卡已保存，面板角色簿里已经能看到。这份保存能力已自动失效；要再建一张，请让用户重新点「蒸馏角色卡」。',
+          }
+        }
+        return outcome
+      } catch (error) {
+        // 意外异常也结构化返回，避免模型只看到一条笼统的工具失败
+        return {
+          ok: false,
+          code: 'internal',
+          error: `保存失败：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    },
+  }
 }

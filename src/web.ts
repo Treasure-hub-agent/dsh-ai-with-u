@@ -14,6 +14,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store, DiaryEditInput } from './store.js'
 import type { PromptController } from './prompt.js'
+import type { DistillArm } from './distill.js'
 import { distillFlowInfo } from './distill.js'
 import { parseCardBuffer } from './import-card.js'
 import { normalizeCard, cardName, toLegacyView } from './tavern.js'
@@ -65,8 +66,17 @@ async function afterWrite(prompt: PromptController): Promise<void> {
   await prompt.refresh()
 }
 
-/** 构造全部路由。返回 method+path → handler 的映射，由 index.ts 统一注册。 */
-export function buildRoutes(store: Store, prompt: PromptController): Array<{ method: string; path: string; handler: RouteHandler }> {
+/**
+ * 构造全部路由。返回 method+path → handler 的映射，由 index.ts 统一注册。
+ *
+ * ⚠️ `webServer.register` 只吃 `{kind, path, handler}`，**`method` 字段从未生效**（host.md P0-1）。
+ * 所以改状态的接口在 handler 里自己 `requireMethod(req, 'POST')`，别指望路由表拦。
+ */
+export function buildRoutes(
+  store: Store,
+  prompt: PromptController,
+  arm?: DistillArm,
+): Array<{ method: string; path: string; handler: RouteHandler }> {
   const guard = (fn: RouteHandler): RouteHandler => async (req, res) => {
     try {
       await fn(req, res)
@@ -74,6 +84,12 @@ export function buildRoutes(store: Store, prompt: PromptController): Array<{ met
       const message = error instanceof Error ? error.message : String(error)
       send(res, 400, { ok: false, error: message })
     }
+  }
+
+  /** 写操作接口自己校验 HTTP 方法（路由表的 method 是装饰品）。 */
+  const requireMethod = (req: IncomingMessage, method: string): void => {
+    const actual = String(req.method ?? 'GET').toUpperCase()
+    if (actual !== method) throw new Error(`该接口只接受 ${method}（收到 ${actual}）`)
   }
 
   /** 解析「操作哪个角色」：请求体显式 name 优先，否则用当前启用角色。 */
@@ -384,16 +400,52 @@ export function buildRoutes(store: Store, prompt: PromptController): Array<{ met
         send(res, 200, { ok: true, ...result })
       }),
     },
-    // ------------------------------------------------------------ 蒸馏：流程文件 + 要发送的指令
+    // ------------------------------------------------------------ 蒸馏：流程文件（只读，不武装）
     {
       method: 'GET',
       path: `${ROUTE_PREFIX}/distill/flow`,
-      handler: guard(async (_req, res) => {
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'GET')
         // 指令里只有 flow.md 的绝对路径与一句要求；流程正文永不进提示词（L2 铁律）
         send(res, 200, { ok: true, ...await distillFlowInfo() })
       }),
     },
-    // 注：`POST /distill/parse`（粘贴卡片 JSON → 34 字段校验）已随「改 CCv3 格式」一起挂起，
-    // 等 tavern 格式定稿后按新契约重做，见 docs/design/2026-10-30-distill-entry.md §5.2b。
+    // ------------------------------------------------------------ 蒸馏：临时武装（挂 awu_card_save）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/distill/arm`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'POST')
+        if (arm === undefined) throw new Error('当前宿主未提供蒸馏武装能力（工具服务未就绪）')
+        const flow = await distillFlowInfo()
+        // 先读指令再武装：flow.md 缺失时不要先把工具挂上去
+        const snapshot = arm.arm()
+        send(res, 200, {
+          ok: true,
+          armed: snapshot.armed,
+          expiresAt: snapshot.expiresAt ?? '',
+          instruction: flow.instruction,
+          path: flow.path,
+          chars: flow.chars,
+        })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/distill/disarm`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'POST')
+        arm?.disarm()
+        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false }) })
+      }),
+    },
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/distill/state`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'GET')
+        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false }) })
+      }),
+    },
   ]
 }

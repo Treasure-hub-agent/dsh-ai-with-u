@@ -27,7 +27,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Store } from './store.js'
 import { PromptController } from './prompt.js'
-import { createTools } from './tools.js'
+import { createTools, createCardSaveTool } from './tools.js'
+import { DistillArm } from './distill.js'
 import { buildRoutes, ROUTE_PREFIX } from './web.js'
 
 export const name = 'ai-with-u'
@@ -184,6 +185,36 @@ export function apply(ctx: AnyCtx): () => void {
   const disposers: Array<() => void> = []
   let prompt: PromptController | undefined
 
+  // ---------------------------------------------------------------- 0. 蒸馏武装（内存态）
+  /**
+   * 「临时武装」：蒸馏期间才把 `awu_card_save` 挂上，成功保存一次 / TTL 到期 / 手动取消即卸下。
+   *
+   * 三条设计约束（主人拍板）：
+   *   1. **不落盘**：重启即失效——避免模型在任何会话里突然获得写卡能力；
+   *   2. **与角色启用无关**：蒸馏不需要先启用角色，所以这条挂载路径不经过 `createTools`；
+   *   3. **工具服务未就绪就武装失败**：不能"面板说武装了、模型却没有工具"。
+   */
+  let toolsService: AnyCtx['tools'] | undefined
+  let armToolDisposer: (() => void) | undefined
+  const distillArm = new DistillArm({
+    mount: (): boolean => {
+      if (toolsService === undefined) {
+        log.warn('蒸馏武装失败：工具服务未就绪')
+        return false
+      }
+      if (armToolDisposer !== undefined) return true
+      armToolDisposer = toolsService.register(createCardSaveTool(store, distillArm))
+      log.info('蒸馏武装：已挂载 awu_card_save（TTL 2 小时，保存一次后自动卸下）')
+      return true
+    },
+    unmount: (): void => {
+      if (armToolDisposer === undefined) return
+      armToolDisposer()
+      armToolDisposer = undefined
+      log.info('蒸馏武装：已卸下 awu_card_save')
+    },
+  })
+
   // ---------------------------------------------------------------- 1+2. 初始化
   /** 初始化完成后回调解锁，避免轮询。 */
   const ready = new Promise<PromptController>((resolve, reject) => {
@@ -210,6 +241,7 @@ export function apply(ctx: AnyCtx): () => void {
   const registerTools = (toolCtx: AnyCtx, pc: PromptController): void => {
     const tools = toolCtx.get?.('tools') as AnyCtx['tools']
     if (tools === undefined) return
+    toolsService = tools
     let toolDisposers: Array<() => void> = []
     const sync = (): void => {
       const should = pc.characterName !== undefined
@@ -224,7 +256,12 @@ export function apply(ctx: AnyCtx): () => void {
     }
     pendingSync.push(() => { sync() })
     sync()
-    disposers.push(() => { for (const d of toolDisposers.reverse()) d() })
+    disposers.push(() => {
+      // 先卸蒸馏工具再卸常驻工具，最后把服务引用清掉（避免卸载后还能 mount）
+      distillArm.disarm()
+      toolsService = undefined
+      for (const d of toolDisposers.reverse()) d()
+    })
   }
 
   const waitTools = (pc: PromptController): void => {
@@ -236,7 +273,7 @@ export function apply(ctx: AnyCtx): () => void {
   const registerRoutes = (webCtx: AnyCtx, pc: PromptController): void => {
     const web = webCtx.get?.('webServer') as AnyCtx['webServer']
     if (web === undefined) return
-    for (const route of buildRoutes(store, pc)) {
+    for (const route of buildRoutes(store, pc, distillArm)) {
       disposers.push(web.register({
         kind: 'exact',
         path: route.path,
@@ -352,6 +389,7 @@ export function apply(ctx: AnyCtx): () => void {
 
   // ---------------------------------------------------------------- 卸载
   return () => {
+    distillArm.disarm()
     prompt?.uninstall()
     for (const d of disposers.reverse()) {
       try { d() } catch (error) {

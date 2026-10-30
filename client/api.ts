@@ -27,8 +27,11 @@ export const ROUTES = {
   deleteCharacter: '/character/delete',
   saveDiary: '/diary/save',
 
-  // ---- 从作品蒸馏角色卡（v2：消息通道；卡片格式待 CCv3 定稿）----
+  // ---- 从作品蒸馏角色卡（v3：arm → 发指令 → AI 自己落盘）----
   distillFlow: '/distill/flow',
+  distillState: '/distill/state',
+  distillArm: '/distill/arm',
+  distillDisarm: '/distill/disarm',
   distillParse: '/distill/parse',
 
   // ---- 记忆与剧情维护（后端 task-1 新增）----
@@ -321,6 +324,54 @@ export interface DistillFlowInfo {
 /** 读蒸馏流程文件与要发送的指令。 */
 export function fetchDistillFlow(): Promise<DistillFlowInfo> {
   return request<DistillFlowInfo>(ROUTES.distillFlow)
+}
+
+// ---------------------------------------------------------------- 蒸馏（v3：全自动落盘）
+//
+// 主人要求「AI 直接完成到底直到卡落地保存，没必要让用户自己粘贴回来」。所以流程变成：
+//   arm（拿指令 + 开启这次蒸馏窗口）→ 把指令发进会话 → AI 自己跑完并调用 awu_card_save 落盘。
+// 面板不再接收/校验卡片，只负责「开始」与「看到新卡」（后者由面板轮询 /characters）。
+
+/** `GET /distill/state`：这次蒸馏窗口的状态。 */
+export interface DistillState {
+  ok: true
+  /** 是否已经 arm 过（AI 的保存工具只在窗口内可用） */
+  armed: boolean
+  /** 窗口到期时间（ISO）；没有窗口时为 undefined */
+  expiresAt?: string
+  /** 最近一次由 AI 保存成功的卡（用于「刚才存了一张：xxx」） */
+  lastSaved?: { name: string; at: string }
+}
+
+/** `POST /distill/arm`：开一次蒸馏窗口，并拿到要发进会话的指令。 */
+export interface DistillArmResult {
+  ok: true
+  /** 要发进当前会话的那段话（含 flow.md 绝对路径 + 要求） */
+  instruction: string
+  /** flow.md 的绝对路径（调试/展示用，可能缺） */
+  path?: string
+  /** 窗口到期时间（ISO） */
+  expiresAt?: string
+}
+
+/** 读这次蒸馏窗口的状态（打不开也不该影响主流程，调用方自己吞错）。 */
+export function fetchDistillState(): Promise<DistillState> {
+  return request<DistillState>(ROUTES.distillState)
+}
+
+/**
+ * 开一次蒸馏窗口。
+ *
+ * 宿主侧会给这次会话盖一个带过期的「允许 AI 落盘」标记——AI 的 `awu_card_save` 只在窗口内可用，
+ * 过期自动失效，所以这个函数**总是先调**，再发送指令。
+ */
+export function armDistill(): Promise<DistillArmResult> {
+  return post<DistillArmResult>(ROUTES.distillArm)
+}
+
+/** 收掉窗口（用户取消 / 关弹层但没发出去时调用）。幂等。 */
+export function disarmDistill(): Promise<unknown> {
+  return post(ROUTES.distillDisarm)
 }
 
 /**

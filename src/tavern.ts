@@ -506,20 +506,77 @@ function fillBookDefaults(book: CharacterBook): void {
  * 只填空缺，不覆盖已有内容；同时把原生原文 stash 进 `imported.raw`，
  * 这样 L1 渲染优先用原文（保真），结构只服务编辑器。
  */
-export function deriveFromNative(data: CardData, opts: NormalizeOptions = {}): void {
-  const extensions = isRecord(data.extensions) ? data.extensions : (data.extensions = {})
-  if (isRecord(extensions['aiwu'])) return // 有结构化数据就不动（零覆盖）
+/** 结构化字段名（出现任一即认为"这张卡有结构"，渲染走结构而不是原文保真）。 */
+const STRUCTURE_KEYS = [
+  'basic', 'personality', 'voice', 'world', 'relationship',
+  'userPersona', 'dynamicState', 'interactionPref',
+] as const
 
-  const aiwu = ensureAiwu(data)
-  aiwu.legacy = { from: opts.from ?? 'native', ...(opts.now !== undefined ? { at: isoLocal(opts.now) } : {}) }
-
-  const description = str(data.description).trim()
-  if (description !== '') {
-    aiwu.basic = { background: description }
+/**
+ * 从 `description` 里拆出「身份 / 背景」。
+ *
+ * 认两种写法：带标签（`身份：…` / `背景：…`，按空行分段）与不带标签（整段当背景）。
+ * 为什么需要它：模型/外部卡往往只给 `description` 而没给 `extensions.aiwu.basic`，
+ * 不拆的话编辑器里「身份」永远是空的，忘却/重名摘要也拿不到人设一句话。
+ */
+function parseIdentityBackground(description: string): { identity?: string; background?: string } {
+  const text = description.trim()
+  if (text === '') return {}
+  const paragraphs = text.split(/\n{2,}/u).map(p => p.trim()).filter(p => p !== '')
+  let identity: string | undefined
+  let background: string | undefined
+  const rest: string[] = []
+  for (const paragraph of paragraphs) {
+    const match = /^(身份|背景)[：:]\s*([\s\S]*)$/u.exec(paragraph)
+    if (match !== null) {
+      if (match[1] === '身份') { identity = (match[2] ?? '').trim(); continue }
+      if (match[1] === '背景') { background = (match[2] ?? '').trim(); continue }
+    }
+    rest.push(paragraph)
   }
-  if (str(data.personality).trim() !== '') aiwu.personality = { contradiction: str(data.personality).trim() }
-  if (str(data.scenario).trim() !== '') aiwu.world = { origin: str(data.scenario).trim() }
+  if (background === undefined && rest.length > 0) background = rest.join('\n\n')
+  return {
+    ...(identity !== undefined && identity !== '' ? { identity } : {}),
+    ...(background !== undefined && background !== '' ? { background } : {}),
+  }
+}
 
+/**
+ * 外部原生卡 → 结构化镜像（**只补缺，绝不覆盖**）。
+ *
+ * v0.2.0 修订：原来"只要有 aiwu 就整个 return"，导致模型/编辑器给的卡里
+ * `description` 有了、`awiu.basic.identity` 却永远是空（旧视图/忘却/重名摘要都读不到）。
+ * 现在改成逐字段补缺；`imported.raw` 只在"完全没有结构"的外部卡上整段 stash
+ * （有结构时渲染走结构，避免同一段内容两个来源打架）。
+ */
+export function deriveFromNative(data: CardData, opts: NormalizeOptions = {}): void {
+  const aiwu = ensureAiwu(data)
+  const hasStructure = STRUCTURE_KEYS.some(key => aiwu[key] !== undefined)
+  if (aiwu.legacy?.from === undefined) {
+    aiwu.legacy = {
+      from: opts.from ?? (hasStructure ? 'aiwu-v1' : 'native'),
+      ...(opts.now !== undefined ? { at: isoLocal(opts.now) } : {}),
+    }
+  }
+
+  // ---- 只补缺：description → basic.identity / basic.background
+  const basic = { ...(aiwu.basic ?? {}) }
+  if (isEmptyText(basic.identity) && isEmptyText(basic.background)) {
+    const parsed = parseIdentityBackground(str(data.description))
+    if (parsed.identity !== undefined && parsed.identity !== '') basic.identity = parsed.identity
+    if (parsed.background !== undefined && parsed.background !== '') basic.background = parsed.background
+    if (Object.keys(basic).length > 0) aiwu.basic = basic
+  }
+  // ---- 只补缺：personality / scenario 同理
+  if (isEmptyText(aiwu.personality?.contradiction) && str(data.personality).trim() !== '') {
+    aiwu.personality = { ...(aiwu.personality ?? {}), contradiction: str(data.personality).trim() }
+  }
+  if (isEmptyText(aiwu.world?.origin) && str(data.scenario).trim() !== '') {
+    aiwu.world = { ...(aiwu.world ?? {}), origin: str(data.scenario).trim() }
+  }
+
+  // ---- 原文保真：只给"没有结构"的外部卡
+  if (hasStructure) return
   const raw: Record<string, string> = {}
   for (const key of ['description', 'personality', 'scenario', 'mes_example', 'system_prompt', 'post_history_instructions'] as const) {
     const text = str(data[key]).trim()
@@ -1800,4 +1857,47 @@ export function lengthWarnings(card: CharacterCardV3): LengthWarning[] {
     })
   }
   return warnings
+}
+
+// ============================================================================ 34 字段契约（给 UI / 蒸馏共用的"填了几个"统计）
+
+/**
+ * 旧 34 字段契约（**唯一真相**是 `client/card-schema.ts` 的 `GROUPS`，这里是宿主侧镜像）。
+ *
+ * 为什么要镜像：宿主侧要算「这张卡填了几个字段」（`awu_card_save` 的 `stats`、面板完整度），
+ * 而 client 的 TSX 不能被宿主 import。两边一致性由 `verify-tavern` 的 V25 断言（字段名逐字比对）。
+ */
+export const LEGACY_FIELD_SPEC: Record<string, string[]> = {
+  basic: ['姓名', '年龄', '身份', '一句话背景'],
+  voice: ['对话节奏', '爱用句式', '自称', '对用户的称呼', '情绪口头禅', '禁忌词', '非语言小动作'],
+  personality: ['关键词', '内在矛盾', '对待亲近之人'],
+  relationship: ['关系起点', '角色怎么称呼用户', '用户怎么称呼角色'],
+  world: ['来处', '落差', '如今的日子', '你与他的旧'],
+  memory_anchor: ['要点'],
+  dynamic_state: ['当前情绪', '近况', '此刻在做什么'],
+  interaction_pref: ['回复长度倾向', '表情使用', '话题舒适区', '雷区'],
+  user_persona: ['你是谁', '与 TA 的关系', '共同经历'],
+  opening: ['opening', 'openings'],
+}
+
+/** 34 字段里有几个填了内容（数组按"非空"算一条）。`total` 恒为 34。 */
+export function countFilledFields(card: CharacterCardV3 | LegacyCardView): { filled: number; total: number } {
+  const view = (isV3Card(card) ? toLegacyView(card) : card) as LegacyCardView
+  let filled = 0
+  let total = 0
+  for (const [group, fields] of Object.entries(LEGACY_FIELD_SPEC)) {
+    const bucket = group === 'opening' || group === 'openings'
+      ? (view as unknown as Json)
+      : (view as unknown as Json)[group]
+    const record = isRecord(bucket) ? bucket : {}
+    for (const field of fields) {
+      total += 1
+      const value = record[field]
+      if (value === undefined || value === null) continue
+      if (typeof value === 'string') { if (value.trim() !== '') filled += 1; continue }
+      if (Array.isArray(value)) { if (value.some(item => String(item).trim() !== '')) filled += 1; continue }
+      filled += 1
+    }
+  }
+  return { filled, total }
 }

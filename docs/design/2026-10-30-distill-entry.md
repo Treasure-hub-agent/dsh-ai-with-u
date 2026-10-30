@@ -33,14 +33,34 @@
 > - `distill/flow.md` 的**阶段骨架**（5 个阶段、铁律、自检）；「字段契约」「输出格式」两节已换成 `<!-- 待 tavern 格式定稿填充 -->` 占位。
 > - L2 铁律、失败矩阵、`mergeCard` 的坑、`writeCard` 复用结论。
 
+> ## ✅ v3 已实施：全自动落盘（2026-10-30 22:15，主人最终拍板）
+>
+> 主人原话：**「应该是 AI 直接完成到底直到卡落地保存，并且插件中可以直接读取到新卡，没必要让用户自己粘贴回来，那样太麻烦」**。
+>
+> 于是**「粘回面板 → 校验 → 进编辑器」这条尾巴整条砍掉**，改成 AI 自己调工具落盘：
+>
+> ```
+> 点「开始蒸馏」→ POST /distill/arm（开窗口 + 拿指令）→ 把指令发进当前会话
+>   → AI 读 distill/flow.md → 5 个阶段追问 → 自己调 awu_card_save({name, data}) 写盘
+>   → 面板轮询 /characters 就看到了新卡（不需要用户做任何事）
+> ```
+>
+> - **弹层只剩两步**：确认 → 已发送。粘贴框 / 校验视图 / `parseDistillCard` 接线**全部删除**。
+> - `DISTILL_GROUPS` 与 V1–V13 校验**永久作废**（格式已定：CCv3 + `extensions.aiwu`），
+>   `src/distill.ts` 里换成 arm 窗口（`DISTILL_ARM_TTL_MS` / `DistillArm`）——那部分归宿主。
+> - `distill/flow.md` 最后一阶段改成「调用 `awu_card_save`」，并补了「保存与重名」「保存后说什么」。
+> - 详细设计与三处契约见 **§13**。
+>
+> 本文后面凡是写「粘回面板 / `/distill/parse` / 34 字段校验」的段落，都只作历史存档。
+
 ---
 
-## 0. 一页结论（TL;DR，**v2 已实施**）
+## 0. 一页结论（TL;DR，**v3 已实施**）
 
-| 问题 | 结论（v2） |
+| 问题 | 结论（v3） |
 |---|---|
 | 流程本体放哪 | **`distill/flow.md`**（随包发布，`package.json.files` 加 `distill`）。宿主用 `join(dirname(fileURLToPath(import.meta.url)), '..', 'distill', 'flow.md')` 定位，与 `presets/` 同款（`src/index.ts:152`）。 |
-| 怎么触发 | 面板角色簿头部一个按钮（`DistillButton`，自带弹层）+ 输入框上方的 `conversation.composer.dock` 小入口（`DockEntry`，只填入不发送）。 |
+| 怎么触发 | 面板角色簿头部一个主入口按钮（`DistillButton` / `DistillEntry`，自带两步弹层）。dock 上的可见入口**已按主人要求撤掉**（`DockEntry` 组件保留但未注册）。 |
 | 怎么把流程交给模型 | **发一条消息**：确认弹层点「发送」→ `inputActions.insertText(指令)` → 同一 tick 内 `submit()`。指令里**只有 flow.md 的绝对路径 + 4 条要求**（289 字符），正文由模型自己去读文件。 |
 | 降级链 | `submit` 缺失/抛错 → 只填入并提示「按回车发送」；`insertText` 返回 false → 显示可复制的指令并如实报错；读不到 flow.md → 明确报错且仍可复制。 |
 | L2 铁律 | 字段契约只在 `flow.md` 里出现一次。**system prompt 零增量**，那段指令也不含契约正文（指令 289 字符，只有路径 + 4 条要求）。 |
@@ -278,11 +298,15 @@
 | `distill.entryTitle` | 从作品蒸馏一张角色卡 | Distill a card from a story |
 | `distill.entryHint` | 从作品或设定做一张卡 | Make a card from a story or a setup |
 | `distill.title` | 蒸馏角色卡 | Distill a character card |
-| `distill.why` | 角色卡必须由模型来写；这一步会把蒸馏指令发进当前对话，流程正文在 distill/flow.md 里（不占系统提示词）。 | Cards must be written by the model. This sends the distillation prompt into the current chat; the flow itself lives in distill/flow.md (never in the system prompt). |
-| `distill.step1` | 点「发送」，指令会进当前会话并直接发出 | Click Send — the prompt goes into the current chat and is submitted |
-| `distill.step2` | 模型会按 flow.md 分阶段追问，最后给一个 json 代码块 | The model follows flow.md, asks by phase, then returns one json block |
-| `distill.step3` | 把那段 JSON 粘回这里，校验后进编辑器确认 | Paste that JSON back here, validate, then confirm in the editor |
-| `distill.send` | 发送到当前会话 | Send to this chat |
+| `distill.why` | AI 会在对话里跑完整套流程，自己把卡建好并保存；你只需要回答它问的问题。 | The AI runs the whole thing in the chat and saves the card itself — you just answer its questions. |
+| `distill.step1` | 点「开始蒸馏」，指令会直接发进当前对话 | Click Start — the prompt goes straight into the current chat |
+| `distill.step2` | AI 按流程分阶段问你几个问题（声线、性格、关系…） | It asks a few questions by phase (voice, personality, relationship…) |
+| `distill.step3` | 满意后它自己把卡存进插件，角色簿里立刻就能看到 | Once done it saves the card itself — it shows up in your roster right away |
+| `distill.start` | 开始蒸馏 | Start distilling |
+| `distill.done` | 好 | Done |
+| `distill.armFailed` | 没能开始这次蒸馏：{reason} | Could not start: {reason} |
+| `distill.savedHint` | 完成后新卡会自动出现在角色簿里，不用你做任何操作 | The new card appears in your roster automatically — nothing to copy |
+| `distill.lastSaved` | 刚才已保存新卡：{name} | Saved a new card just now: {name} |
 | `distill.noDockShort` | 输入框未就绪 | No chat yet |
 | `distill.noDock` | 还没有可用的会话输入框：先打开一个对话，或直接复制指令手动粘贴 | No chat composer available: open a chat, or copy the prompt and paste it yourself |
 | `distill.sent` | 已发送，去对话里继续 | Sent — continue in the chat |
@@ -315,9 +339,13 @@
 | `distill.dockFilled` | 指令已填入输入框，按回车发送 | Prompt filled into the input — press Enter to send |
 | `distill.dockUnavailable` | 没拿到输入框能力：去面板里点「发送」，或复制指令手动粘贴 | Composer API unavailable: use Send in the panel, or copy the prompt |
 
-> **现在就要的键（24 个）**：`entry` `entryTitle` `entryHint` `title` `why` `step1` `step2` `step3` `send` `noDockShort` `noDock` `sent` `filled` `busyFilled` `flowFailed` `insertFailed` `submitFailed` `copy` `copied` `copyFailed` `noProgress` `dockDraftNotEmpty` `dockFilled` `dockUnavailable`（其余是粘贴校验用的，等 CCv3 定稿再一起进 `text.ts`，先加也不报错、只是暂时用不上）。
+> **v3 现在就要的键（27 个）**：`entry` `entryTitle` `entryHint` `title` `why` `step1` `step2` `step3` `start` `done` `armFailed` `savedHint` `lastSaved` `noDockShort` `noDock` `sent` `filled` `busyFilled` `flowFailed` `insertFailed` `submitFailed` `copy` `copied` `copyFailed` `noProgress` `dockDraftNotEmpty` `dockFilled` `dockUnavailable`。
 >
-> `distill.entryHint` 是 2026-10-30 视觉反馈后新增的 1 个键（主入口下方那行极短说明）。**没合并也不会裸 key**：`DistillEntry` 检测到 `t()` 把 key 原样返回时，会退到已有的 `distill.entryTitle`。
+> **v3 删掉的键**：`distill.send`（→ `distill.start`）。**已作废、别再合**：`pasteLabel` `pastePlaceholder` `validate` `pasteEmpty` `tooLarge` `parsed` `missingGroups` `warnings` `conflict` `conflictHint` `nameLabel` `nameRequired` `nameTaken` `nameInvalid` `openEditor` `noEditor`（那套粘贴校验整条砍了）。
+>
+> `warnings` 现在是**模型侧概念**（它自己决定要不要在对话里提一句），不再有面板 UI，所以这个键也不要了。
+> `dock*` 三个键是 `DockEntry` 用的，组件当前未注册 —— 先留着不碍事，真要精简可以删。
+> `distill.entryHint` 没合并也不会裸 key：`DistillEntry` 检测到 `t()` 原样返回 key 时会退到 `distill.entryTitle`。
 >
 > **⏸ 暂缓的键**：`pasteLabel` `pastePlaceholder` `validate` `pasteEmpty` `tooLarge` `parsed` `missingGroups` `warnings` `conflict` `conflictHint` `nameLabel` `nameRequired` `nameTaken` `nameInvalid` `openEditor` `noEditor` —— 它们跟着 34 字段校验一起挂起。
 >
@@ -694,17 +722,18 @@ import { createDistillTools } from './distill.js'
 | `client/styles.ts` | **Lead** | `import { DISTILL_CSS }` + 模板串末尾 `${DISTILL_CSS}`（§6.5） | ⏳ 待 Lead |
 | `client/card-schema.ts` | 不动 | `GROUPS` 已就绪；本功能当前**完全不读**它（校验挂起后连分组中文名都不用） | — |
 
-### 6.2 `client/distill.tsx` 导出契约（v2 实际）
+### 6.2 `client/distill.tsx` 导出契约（**v3 实际**）
 
-**Lead 接线必须的四个**（形状与约定完全一致；`DistillDialog` 的 props 在挂起后**收敛成你给的三件**）：
+**Lead 接线必须的四个**（形状与约定完全一致；`DistillDialog` 的 props 是**你给的三件**）：
 
 ```ts
 export function DistillDialog(props: {
   t: Translate
   onClose: () => void
-  /** 发送成功后通知外层（外层可刷新，也可什么都不做）。当前实现：`sent` 时调用一次 */
+  /** 指令真的发出去之后、用户点「好」离开时调用一次（外层可刷新/收尾）；没发出去则改调 disarm */
   onDone: () => void
 }): JSX.Element
+// 两步：step='confirm'（说明 + 开始蒸馏）→ step='result'（已发送 / 只填入 / 失败可复制）
 
 export function DockSink(props: {
   inputActions?: unknown
@@ -716,7 +745,8 @@ export function DockSink(props: {
 
 export function composerReady(): boolean      // dock 是否已拿到可用的 insertText
 
-export function sendDistillInstruction(): Promise<SendResult>
+/** v3：指令由 `POST /distill/arm` 给（**必须先 arm**，否则 AI 的落盘工具没开）；传空才退回 /distill/flow */
+export function sendDistillInstruction(instruction?: string): Promise<SendResult>
 ```
 
 > `DistillDialog` 现在**没有** `onAccept` / `existing` 这两个可选 prop 了：粘贴校验挂起后，弹层只做
@@ -1583,9 +1613,75 @@ v2 把「长文档」从**工具返回值**换成**磁盘文件**，代价是多
 
 ---
 
+## 13. v3：全自动落盘（最终形态）
+
+### 13.1 一句话链路
+
+```
+面板「开始蒸馏」
+  → POST /distill/arm          （宿主开 2h 窗口 + 挂 awu_card_save，返回 instruction）
+  → sendDistillInstruction(instruction)   （insertText + submit，发进当前会话）
+  → AI 读 distill/flow.md → 5 个阶段追问 → 调 awu_card_save({ name, data }) 落盘
+  → 面板轮询 /characters 就能看到新卡（Lead 侧）
+```
+
+用户全程只做两件事：点一次按钮、回答问题。**没有复制粘贴，也没有卡片的中间态。**
+
+### 13.2 三处契约（以宿主实现为准，已核对 `src/web.ts`）
+
+| 接口 | 响应 | 客户端用法 |
+|---|---|---|
+| `POST /distill/arm` | `{ ok, armed, expiresAt, instruction, path, chars }` | `armDistill()` → 拿 `instruction` 传给 `sendDistillInstruction` |
+| `POST /distill/disarm` | `{ ok, armed }` | 关弹层但**没发出去**时收窗口（幂等） |
+| `GET /distill/state` | `{ ok, armed, expiresAt?, lastSaved?: { name, at } }` | 弹层打开时读一次：有 `lastSaved` 就提示「刚才已保存新卡：xxx」 |
+
+- 宿主侧对这三条都做了 `requireMethod`（`web.ts:417/438/446`），GET/POST 写错会直接 400 —— 客户端签名已对齐（arm/disarm = POST，state = GET）。
+- arm 与 disarm 都是**尽力而为**：arm 失败要如实显示原因（`distill.armFailed`），disarm 失败只打 console（不影响用户）。
+
+### 13.3 关闭弹层的两种收尾（这条最容易漏）
+
+```ts
+const sentRef = useRef(false)      // 只有 insertText+submit 成功后才置 true
+const close = () => {
+  if (!sentRef.current) void disarmDistill().catch(log)   // 没发出去 → 收窗口，别留一条挂着的 arm
+  else onDone()                                            // 发出去了 → 让外层刷新/收尾
+  onClose()
+}
+```
+
+理由：arm 出来的窗口是「允许 AI 落盘」的凭据，用户点了取消却还开着窗口，等于放任后面任何一次对话都能落盘。
+
+### 13.4 flow.md 的三处改动（v3）
+
+| 节 | 改了什么 |
+|---|---|
+| 「五、保存与重名」 | `awu_card_save({name,data})` → 成功就收尾；**重名先问用户**「改名还是覆盖」，确认覆盖才带 `overwrite: true` 重试；其它失败如实报错，不许假装存成功 |
+| 「六、保存后说什么」 | 一句话：卡名 + 一句人设摘要 + **明确说「面板里已经能看到」**；禁止再说「把 JSON 粘回面板」 |
+| 「四、怎么填 data」+ 附录 | 只填两块：`data.extensions.aiwu.*`（结构权威，插件据此生成 `description`/`personality`/`scenario`/`system_prompt`/`post_history_instructions`）+ `data.first_mes` / `alternate_greetings`（原生位，必须自己写）。34 项 → `aiwu` 键的对照表在附录 |
+
+### 13.5 需要宿主侧同步的一处文案（我没权限改）
+
+`src/distill.ts` 的 `buildDistillInstruction()` 里第 3、4 条还是 v2 的话：
+
+```
+'3. 最终只输出一个 json 代码块，键名与结构逐字照文件里的输出格式，不要自己发明字段。',
+'4. 不要调用任何 awu_* 工具；蒸馏不依赖它们，最后也不要替我保存卡片。',
+```
+
+这与 v3 直接冲突（flow.md 现在要求**调用 `awu_card_save`**）。建议改成：
+
+```ts
+'3. 该存卡的时候直接调用 awu_card_save({ name, data }) 存进插件，不要把卡贴给我、不要输出 JSON 代码块。',
+'4. 重名先问我要不要覆盖；其它 awu_* 工具不要动。',
+```
+
+`src/distill.ts` 现在归宿主侧（arm 实现也在里面），所以这条只提不改。
+
+---
+
 ## 附录 A：~~`DISTILL_GUIDE_TEXT` 全文~~（❌ v1 存档）
 
-> **v2 已经把这份文本搬进了 `distill/flow.md`**（4 237 字符，多了「交回面板」一节与更直白的阶段写法）。
+> **v2 已经把这份文本搬进了 `distill/flow.md`**（v3 又改成了「自己调 `awu_card_save` 落盘」的版本）。
 > `src/distill.ts` 里**没有** `DISTILL_GUIDE_TEXT` 常量，也不该有——流程是文件，不是常量的副本。
 > 下面这份只留作「当初是怎么把 L2 文档写成模型能照做的东西」的样本，**改动请改 `distill/flow.md`**。
 
@@ -1746,3 +1842,97 @@ export const DISTILL_FIELD_TOTAL = 34
 
 校验自检：`DISTILL_GROUPS.reduce((n, g) => n + g.fields.length, 0) === 34`，且
 `DISTILL_GROUPS.filter(g => g.fields.some(f => f.kind === 'list')).length === 6` 组里恰好 6 个 list 字段。
+
+---
+
+## v3（2026-10-30 22:xx）：全自动落卡 —— 临时武装 + `awu_card_save`
+
+> 本节由 tavern-architect（宿主侧）追加，**不改上面任何历史内容**。
+> 起因：主人否掉了「AI 出 JSON → 用户粘回面板」的交接方式。要求是「AI 一路做完并**直接把卡落盘**，插件里立刻能看到」。
+
+### 1. 形态：只有两个动作
+
+```
+面板点「蒸馏角色卡」
+  → POST /distill/arm  （挂工具 + 拿指令 + TTL 2h）
+  → sendDistillInstruction(instruction)
+模型按 flow.md 走完五阶段
+  → awu_card_save({ name, data })   ← 唯一落卡通道
+  → 工具返回 { ok, name, action, stats, warnings } 并**自动卸下自己**
+面板（轮询 /characters）立刻看到新卡
+```
+
+没有「粘贴 JSON」，没有「二次确认对话框」。用户在面板上要做的只有点一次按钮。
+
+### 2. 三条接口（宿主侧已实现）
+
+| 方法 | 路径 | 返回 |
+|---|---|---|
+| POST | `/distill/arm` | `{ ok, armed, expiresAt, instruction, path, chars }` |
+| POST | `/distill/disarm` | `{ ok, armed }` |
+| GET | `/distill/state` | `{ ok, armed, expiresAt?, lastSaved?: { name, at } }` |
+| GET | `/distill/flow` | 只读，返回路径与指令，**不武装**（保留） |
+
+三条新路由都在 handler 里**自己校验 HTTP 方法**（`requireMethod`）——路由表的 `method` 字段从未生效（host.md P0-1）。
+
+### 3. 武装语义（为什么不是常驻工具）
+
+| 问题 | 决定 | 原因 |
+|---|---|---|
+| 工具什么时候在 | 只有 `arm()` 之后，且必须在**启用角色之外**也能挂 | 蒸馏不需要先启用角色；常驻工具那条路径（`createTools`）要求已启用角色 |
+| 什么时候消失 | ① 保存成功一次（`markSaved`）② TTL 2h 到期（读状态时顺手卸）③ 手动 `disarm` ④ 宿主重启 | 「能写卡的权力」只开一次门 |
+| 是否落盘 | **不落盘** | 重启即失效。否则模型在任何会话里都可能突然写卡 |
+| 工具服务未就绪 | `arm()` **抛错**，不假装武装 | 面板说"武装了"而模型没有工具，是最难排查的一种故障 |
+| 面板关闭 | 不等于 disarm | 用户可能只是切了个 tab；只有明确取消/TTL 才收 |
+
+### 4. `awu_card_save` 契约
+
+```jsonc
+// 入参
+{ "name": "角色名", "data": { /* CCv3 的 data 部分 */ }, "overwrite": false }
+
+// 成功
+{ "ok": true, "name": "角色名", "action": "created" | "updated",
+  "stats": { "filled": 9, "total": 34 }, "warnings": ["…"] ,
+  "hint": "卡已保存，面板角色簿里已经能看到。这份保存能力已自动失效…" }
+
+// 三类失败（都**不写盘**，结构化返回而不是抛错，模型才能自己纠正）
+{ "ok": false, "code": "invalid-name",  "error": "角色名不能包含路径分隔符：a/b" }
+{ "ok": false, "code": "invalid-data",  "error": "data 里没有任何实质内容：description / … 至少要有一样" }
+{ "ok": false, "code": "name-conflict", "error": "已有同名角色「X」…要覆盖就带 overwrite: true",
+  "existing": { "name": "X", "filled": 12, "identity": "…", "background": "…", "opening": "…" } }
+{ "ok": false, "code": "not-armed",     "error": "awu_card_save 只在蒸馏武装期间可用…" }
+```
+
+**校验（写盘前全部过一遍，不可绕过）**
+
+1. 名字：`normalizeCharacterName`（路径分隔符 / `: * ? " < > |` / 控制字符 / 结尾空格或点 / Windows 保留名 `CON`·`NUL`·`COM1`… / 64 字符上限）；
+2. `data` 必须是对象，且 `description` / `personality` / `scenario` / `first_mes` / `mes_example` 至少一项非空；
+3. 重名：已存在且没带 `overwrite:true` → 拒绝并给已有卡摘要（**盘上字节不变**）；
+4. `normalizeCard` 补默认值 → `store.saveCard` 落 CCv3 + 更新索引（`_index.json`）。
+
+**为什么不抛错**：DSH 里工具抛错会变成一条笼统的失败，模型看不到「重名了、已有卡长这样」这种关键信息，
+就没法自己决定「改名还是覆盖」。
+
+### 5. `stats.filled` 的口径
+
+34 字段（`client/card-schema.ts` 的 `GROUPS`）里有几个非空，`total` 恒 34。
+宿主侧镜像在 `src/tavern.ts` 的 `LEGACY_FIELD_SPEC`，由 `verify-tavern` 的 V25 **逐字比对 client**，防止两边漂移。
+
+### 6. 自检（`scripts/verify-distill.mjs`，81 项，已串进 `npm run build`）
+
+未武装被拒 / arm 后工具可见与 schema 形状 / save 落盘是 CCv3 + 索引更新 + 自动 disarm / 二次调用被拒 /
+重名冲突不写盘且给摘要 / overwrite 生效 / 13 种非法名字全部不写盘 / TTL 到期自动卸下 /
+三条路由 + 方法校验 / 非法 data / 端到端 `readCardView` 能读到。
+
+`scripts/verify-host.mjs` 另有一条**真接线**断言：通过真实 cordis 上下文调 `POST /distill/arm`，
+断言 `awu_card_save` 真的出现在工具服务里，`disarm` 后消失（25 项）。
+
+### 7. 与 v1/v2 的差异
+
+| | v1（工具常驻 + 六 Phase） | v2（发指令 → 用户粘 JSON 回来） | v3（本次） |
+|---|---|---|---|
+| 蒸馏入口 | 常驻工具 | 面板按钮 → 发指令 | 面板按钮 → 武装 + 发指令 |
+| 落卡 | 模型调 `awu_character_save`（常驻） | 用户粘贴 → 面板校验 → 保存 | **模型调 `awu_card_save`（临时武装，保存即失效）** |
+| 用户操作次数 | 多（要盯进度） | 3 步（按钮 → 等 → 粘贴） | **1 步（按钮）** |
+| 风险面 | 模型任何会话都能写卡 | 粘贴内容不可信 | 写权限只开 2 小时、只用一次 |

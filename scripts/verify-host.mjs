@@ -70,6 +70,19 @@ class FakeWebServer extends Service {
   }
 }
 
+class FakeTools extends Service {
+  constructor(ctx) {
+    super(ctx, 'tools')
+  }
+  register(tool) {
+    registered.tools.push(tool.name)
+    return () => {
+      const i = registered.tools.indexOf(tool.name)
+      if (i >= 0) registered.tools.splice(i, 1)
+    }
+  }
+}
+
 const logs = []
 const app = new Context()
 app.on('internal/warn', (...args) => logs.push(['warn', ...args]))
@@ -100,6 +113,7 @@ if (applyError !== undefined) {
 
 // 等服务就绪 + 初始化（seedPresets + prompt.restore 都是异步）
 await app.registry.plugin(FakeWebServer, {})
+await app.registry.plugin(FakeTools, {})
 try { await pluginFiber } catch (error) { applyError = applyError ?? error }
 await new Promise(r => setTimeout(r, 900))
 
@@ -147,6 +161,36 @@ check(!injectErrors.some(e => e.includes('pending')),
 // fiber 状态一览（注册表键是插件函数本身，取可读名字即可）
 const info = [...app.registry.values()].map((rt) => `${rt.name ?? '(匿名插件)'}:${rt.fiber?.state}`)
 console.log(`      注册表：${info.join(' | ')}`)
+
+// ---------------------------------------------------------------- 蒸馏临时武装（验证 index.ts 的接线）
+const fakeRes = () => {
+  const out = { status: 0, body: undefined }
+  return {
+    out,
+    setHeader() {},
+    writeHead(status) { out.status = status },
+    end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
+  }
+}
+const fakeReq = (method) => ({ method, url: '/', async *[Symbol.asyncIterator]() {} })
+const routeOf = (suffix) => registered.routes.find(r => r.path.endsWith(suffix))
+
+if (routeOf('/distill/arm') === undefined) {
+  fail('没有注册 /distill/arm 路由')
+} else {
+  const before = registered.tools.length
+  const res1 = fakeRes()
+  await routeOf('/distill/arm').handler(fakeReq('POST'), res1)
+  check(res1.out.status === 200 && res1.out.body?.ok === true, `POST /distill/arm → ${res1.out.status}`)
+  check(registered.tools.includes('awu_card_save'), 'arm 之后 awu_card_save 真的挂到了工具服务上')
+  check(registered.tools.length === before + 1, `工具数 ${before} → ${registered.tools.length}`)
+
+  const res2 = fakeRes()
+  await routeOf('/distill/disarm').handler(fakeReq('POST'), res2)
+  check(res2.out.body?.armed === false, 'disarm 接口报告已解除')
+  check(!registered.tools.includes('awu_card_save'), 'disarm 之后工具被卸下')
+  check(registered.tools.length === before, `工具数回到 ${before}`)
+}
 
 // ---------------------------------------------------------------- 卸载
 // 说明：cordis 的 Fiber 卸载是两层——fiber 自身的 effect 卸载由 parent fiber 驱动，

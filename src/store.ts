@@ -71,14 +71,57 @@ export interface ActiveState {
   mode?: 'text' | 'text+action'
 }
 
-/** 折叠路径中可能残留的 / 与 \，统一成当前平台分隔符。 */
-function normalizeName(name: string): string {
+/** Windows 保留设备名（大小写不敏感，带扩展名同样保留）。 */
+const WINDOWS_RESERVED = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+])
+
+/** 角色名长度上限：留足余量给 `characters/<名>/card.v1.bak.json` 这类长路径。 */
+export const NAME_MAX_CHARS = 64
+
+/**
+ * 角色名校验与规范化（**唯一入口**：目录名、索引键、`awu_card_save` 都走它）。
+ *
+ * v0.2.0 收紧（原文只拦 `/ \ . ..`）：
+ *   - Windows 非法字符 `: * ? " < > |` 与控制字符；
+ *   - 结尾的空格/点（NTFS 会静默裁掉，导致"名字看着一样但目录不同"）；
+ *   - Windows 保留设备名（`CON` / `NUL` / `COM1` …，建目录会失败或建到意外位置）；
+ *   - 超长名字（`NAME_MAX_CHARS`）。
+ *
+ * 只做"能不能安全当目录名"的判断，不做任何语义猜测。
+ */
+export function normalizeCharacterName(name: string): string {
   const trimmed = String(name ?? '').trim()
   if (trimmed === '') throw new Error('角色名不能为空')
-  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed === '.' || trimmed === '..') {
+  if (trimmed === '.' || trimmed === '..') throw new Error(`角色名不能是 ${trimmed}`)
+  if (trimmed.includes('/') || trimmed.includes('\\')) {
     throw new Error(`角色名不能包含路径分隔符：${trimmed}`)
   }
+  if (/[:*?"<>|]/u.test(trimmed)) {
+    throw new Error(`角色名不能包含 Windows 非法字符 : * ? " < > |：${trimmed}`)
+  }
+  // eslint-disable-next-line no-control-regex -- 故意的：控制字符必须拦
+  if (/[\u0000-\u001f\u007f]/u.test(trimmed)) {
+    throw new Error(`角色名不能包含控制字符：${JSON.stringify(trimmed)}`)
+  }
+  if (/[. ]$/u.test(trimmed)) {
+    throw new Error(`角色名结尾不能是空格或点（Windows 会静默裁掉）：${trimmed}`)
+  }
+  const base = trimmed.split('.')[0]?.toUpperCase() ?? ''
+  if (WINDOWS_RESERVED.has(base)) {
+    throw new Error(`「${trimmed}」是 Windows 保留设备名，不能用作角色名`)
+  }
+  if ([...trimmed].length > NAME_MAX_CHARS) {
+    throw new Error(`角色名太长（上限 ${NAME_MAX_CHARS} 个字符）：${trimmed.slice(0, 20)}…`)
+  }
   return trimmed
+}
+
+/** 内部别名：所有路径拼装都走同一份校验。 */
+function normalizeName(name: string): string {
+  return normalizeCharacterName(name)
 }
 
 function isRecord(value: unknown): value is Json {
