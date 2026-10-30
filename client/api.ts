@@ -161,6 +161,13 @@ export interface CharacterDetail {
   ok: true
   name: string
   card: Card
+  /**
+   * 完整 CCv3 对象（{spec, spec_version, data}）。过渡期后端可能给，也可能只给旧视图。
+   * 世界书 / 导出预览 / 未知键都从这里读，结构编辑仍走 card（旧 34 字段视图）。
+   */
+  ccv3?: Card
+  /** 结构视图（与 card 同义；后端若单独给字段就用它）。 */
+  fields?: Card
   diary: DiaryEntry[]
   session: { turn_count?: number; last_ts?: string; [key: string]: unknown }
   /** 后端增强字段（老版本可能没有）：关系锚定与开场三态 */
@@ -274,8 +281,15 @@ export function setInteractionMode(mode: 'text' | 'text+action'): Promise<{ acti
 }
 
 /** 新建 / 覆盖角色卡。 */
-export function saveCharacter(name: string, card: Card): Promise<{ name: string }> {
-  return post<{ name: string }>(ROUTES.saveCharacter, { name, card })
+/**
+ * 保存角色卡。
+ *
+ * 三键并存（架构稿 C7）：card 是结构视图（编辑面），ccv3 是完整对象（世界书 / 未知键）。
+ * 只发 card 时后端走纯结构合并（romLegacyView）；带 ccv3 时以它为底再合并。
+ * 不传 ccv3 就不塞这个键，避免用空对象覆盖掉后端的完整数据。
+ */
+export function saveCharacter(name: string, card: Card, ccv3?: Card): Promise<{ name: string }> {
+  return post<{ name: string }>(ROUTES.saveCharacter, ccv3 === undefined ? { name, card } : { name, card, ccv3 })
 }
 
 /** 删除角色。withMemory=true 时连同日记一并删除。 */

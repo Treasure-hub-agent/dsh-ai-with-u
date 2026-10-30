@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>AI WITH U · 面板预览沙盒</title>
+<style>
+  /* 一张有层次的虚拟壁纸：玻璃材质需要背景有东西可透，纯色看不出效果 */
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(1100px 700px at 12% 8%, #ffd9a8 0%, transparent 60%),
+      radial-gradient(900px 700px at 88% 18%, #b9d8ff 0%, transparent 62%),
+      radial-gradient(1000px 800px at 70% 92%, #ffc2d6 0%, transparent 60%),
+      linear-gradient(160deg, #f3efe9 0%, #e6e2f2 45%, #dfe9f3 100%);
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+  }
+  /* 一些色块，用来观察玻璃的模糊与折射是否真的在工作 */
+  .deco { position: fixed; border-radius: 50%; filter: blur(2px); opacity: .55; }
+  .d1 { width: 320px; height: 320px; left: 6%; top: 12%; background: #ff9d76; }
+  .d2 { width: 260px; height: 260px; right: 8%; top: 8%; background: #7fb2ff; }
+  .d3 { width: 380px; height: 380px; right: 18%; bottom: 6%; background: #ff9ec4; }
+  .d4 { width: 220px; height: 220px; left: 26%; bottom: 10%; background: #7fd8c1; }
+  .grid {
+    position: fixed; inset: 0; opacity: .18;
+    background-image: linear-gradient(#00000022 1px, transparent 1px), linear-gradient(90deg, #00000022 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  #root { position: relative; z-index: 2; }
+</style>
+</head>
+<body>
+  <div class="deco d1"></div>
+  <div class="deco d2"></div>
+  <div class="deco d3"></div>
+  <div class="deco d4"></div>
+  <div class="grid"></div>
+  <div id="root"></div>
+  <script src="./bundle.js"></script>
+</body>
+</html>

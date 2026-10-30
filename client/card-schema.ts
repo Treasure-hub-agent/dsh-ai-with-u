@@ -316,3 +316,208 @@ export function filledCount(card: Card | undefined): { filled: number; total: nu
   }
   return { filled, total }
 }
+
+// ---------------------------------------------------------------- 细化元数据（v2 · 只加不改）
+
+/**
+ * 字段的「级别」——只用于 UI 上的徽记与排序提示，**不参与完整度打分**。
+ *
+ * 为什么不参与：CCv3 的必填性由**投影结果**决定（`description` / `first_mes` 非空才算能用），
+ * 34 个结构字段里没有"必填"概念——`voice.自称` 空着卡照样跑。
+ * 所以完整度仍由 `filledCount` 报"资料填了几项"，"能不能导出"由 `exportIssues` 体检（见下）。
+ */
+export type FieldLevel = 'required' | 'recommended' | 'optional'
+
+/** 这条字段最终怎么进上下文（决定预算条如何归类）。 */
+export type FieldBudget = 'l1' | 'turn0' | 'never'
+
+/** 会投影到哪一段 CCv3 原生字段；`null` = 不投影（只进 L1 或只做结构化保留）。 */
+export type ProjectionPath =
+  | 'description'
+  | 'personality'
+  | 'scenario'
+  | 'system_prompt'
+  | 'post_history_instructions'
+  | 'first_mes'
+  | 'alternate_greetings'
+  | null
+
+export interface FieldMeta {
+  projectsTo: ProjectionPath
+  level: FieldLevel
+  budget: FieldBudget
+  /** 低于这个字数给"建议补全"提示（不算未填） */
+  minChars?: number
+}
+
+/**
+ * 34 个字段的元数据表（键 = `组id.字段名`，字段名与 `GROUPS` 逐字一致，含半角空格）。
+ *
+ * 投影关系照抄架构稿 §2.2 的映射表；`voice.禁忌词` 与 `interaction_pref.雷区` 走
+ * `post_history_instructions`（"历史之后"的语义位），其余声线/互动偏好进 `system_prompt`。
+ */
+const FIELD_META: Record<string, FieldMeta> = {
+  'basic.姓名': { projectsTo: null, level: 'required', budget: 'l1' },
+  'basic.年龄': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'basic.身份': { projectsTo: 'description', level: 'required', budget: 'l1', minChars: 8 },
+  'basic.一句话背景': { projectsTo: 'description', level: 'required', budget: 'l1', minChars: 20 },
+
+  'voice.对话节奏': { projectsTo: 'system_prompt', level: 'recommended', budget: 'l1', minChars: 10 },
+  'voice.爱用句式': { projectsTo: 'system_prompt', level: 'recommended', budget: 'l1' },
+  'voice.自称': { projectsTo: 'system_prompt', level: 'recommended', budget: 'l1' },
+  'voice.对用户的称呼': { projectsTo: 'system_prompt', level: 'recommended', budget: 'l1' },
+  'voice.情绪口头禅': { projectsTo: 'system_prompt', level: 'optional', budget: 'l1' },
+  'voice.禁忌词': { projectsTo: 'post_history_instructions', level: 'recommended', budget: 'l1' },
+  'voice.非语言小动作': { projectsTo: 'system_prompt', level: 'optional', budget: 'l1' },
+
+  'personality.关键词': { projectsTo: 'personality', level: 'recommended', budget: 'l1' },
+  'personality.内在矛盾': { projectsTo: 'personality', level: 'recommended', budget: 'l1', minChars: 10 },
+  'personality.对待亲近之人': { projectsTo: 'personality', level: 'optional', budget: 'l1' },
+
+  'relationship.关系起点': { projectsTo: null, level: 'recommended', budget: 'l1', minChars: 6 },
+  'relationship.角色怎么称呼用户': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'relationship.用户怎么称呼角色': { projectsTo: null, level: 'optional', budget: 'l1' },
+
+  'world.来处': { projectsTo: 'scenario', level: 'recommended', budget: 'l1' },
+  'world.落差': { projectsTo: 'scenario', level: 'optional', budget: 'l1' },
+  'world.如今的日子': { projectsTo: 'scenario', level: 'optional', budget: 'l1' },
+  'world.你与他的旧': { projectsTo: 'scenario', level: 'optional', budget: 'l1' },
+
+  'memory_anchor.要点': { projectsTo: null, level: 'optional', budget: 'l1' },
+
+  'dynamic_state.当前情绪': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'dynamic_state.近况': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'dynamic_state.此刻在做什么': { projectsTo: null, level: 'optional', budget: 'l1' },
+
+  'interaction_pref.回复长度倾向': { projectsTo: 'system_prompt', level: 'recommended', budget: 'l1' },
+  'interaction_pref.表情使用': { projectsTo: 'system_prompt', level: 'optional', budget: 'l1' },
+  'interaction_pref.话题舒适区': { projectsTo: 'system_prompt', level: 'optional', budget: 'l1' },
+  'interaction_pref.雷区': { projectsTo: 'post_history_instructions', level: 'recommended', budget: 'l1' },
+
+  'user_persona.你是谁': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'user_persona.与 TA 的关系': { projectsTo: null, level: 'optional', budget: 'l1' },
+  'user_persona.共同经历': { projectsTo: null, level: 'optional', budget: 'l1' },
+
+  'opening.opening': { projectsTo: 'first_mes', level: 'required', budget: 'turn0', minChars: 20 },
+  'opening.openings': { projectsTo: 'alternate_greetings', level: 'optional', budget: 'turn0' },
+}
+
+/** 取某个字段的元数据；表里没有就返回中庸值（未来加字段不会炸）。 */
+export function fieldMeta(groupId: string, key: string): FieldMeta {
+  return FIELD_META[`${groupId}.${key}`] ?? { projectsTo: null, level: 'recommended', budget: 'l1' }
+}
+
+/**
+ * 旧 10 组的 id → 中文标题。
+ *
+ * 给 `distill.tsx` 这类"按旧分组 id 显示"的调用方兜底：`GROUPS` 的字段没变，
+ * 但一旦有人只改 id 就会静默丢标题，留一张显式映射比猜安全。
+ */
+export const LEGACY_GROUP_TITLES: Record<string, string> = {
+  basic: '基本信息',
+  voice: '声线基因',
+  personality: '性格核心',
+  relationship: '关系定位',
+  world: '故事背景',
+  memory_anchor: '记忆锚点',
+  dynamic_state: '动态状态',
+  interaction_pref: '互动偏好',
+  user_persona: '你的身份',
+  opening: '开场白',
+}
+
+/** 与架构稿 §5.1 对齐的长度阈值（客户端只提示，不阻断）。 */
+export const LENGTH_LIMITS = {
+  /** `description` 投影后 */
+  descriptionChars: 1200,
+  /** L1 静态块（1–12 段合计） */
+  l1Chars: 3000,
+} as const
+
+export type ExportIssueLevel = 'bad' | 'warn' | 'info'
+
+export interface ExportIssue {
+  code:
+    | 'empty-description'
+    | 'empty-first-mes'
+    | 'description-too-long'
+    | 'l1-too-long'
+    | 'legacy-extra'
+    | 'unmapped-native'
+  level: ExportIssueLevel
+  /** 相关字段（用于"跳到该字段"），可选 */
+  groupId?: string
+  key?: string
+  /** 已格式化的补充数字（字数等） */
+  detail?: string
+}
+
+function textAt(bucket: Record<string, unknown> | undefined, key: string): string {
+  const value = bucket?.[key]
+  if (typeof value === 'string') return value.trim()
+  if (Array.isArray(value)) return value.map(item => String(item)).join('、').trim()
+  return ''
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+/** 按码点数字数（emoji 不算两字）。 */
+function chars(text: string): number {
+  return [...text].length
+}
+
+/**
+ * 导出体检：判断"这张卡导出到酒馆能不能用"。
+ *
+ * - 有完整 CCv3 对象时，直接看投影结果（`data.description` 等）；
+ * - 只有旧视图时，按结构字段推断（`基础.身份` + `基础.一句话背景` 是否都空）。
+ * - **不阻断保存**：返回给 UI 做 pill 与提示即可。
+ */
+export function exportIssues(card: Card | undefined, ccv3?: Card): ExportIssue[] {
+  const issues: ExportIssue[] = []
+  const data = asObject(ccv3?.['data'])
+  const extensions = asObject(data['extensions'])
+  const aiwu = asObject(extensions['aiwu'])
+  const legacy = asObject(aiwu['legacy'])
+  const imported = asObject(aiwu['imported'])
+  const lengthInfo = asObject(aiwu['length'])
+
+  const basic = asObject(card?.['basic'])
+  const openingBucket = card ?? {}
+
+  // description：优先看投影，其次看结构
+  const projectedDescription = typeof data['description'] === 'string' ? data['description'].trim() : ''
+  const structureDescription = `${textAt(basic, '身份')}${textAt(basic, '一句话背景')}`
+  const description = projectedDescription !== '' ? projectedDescription : structureDescription
+  if (description === '') {
+    issues.push({ code: 'empty-description', level: 'bad', groupId: 'basic', key: '一句话背景' })
+  } else if (chars(description) > LENGTH_LIMITS.descriptionChars) {
+    issues.push({ code: 'description-too-long', level: 'warn', groupId: 'basic', key: '一句话背景', detail: String(chars(description)) })
+  }
+
+  // first_mes：优先看投影，其次看 opening
+  const projectedFirst = typeof data['first_mes'] === 'string' ? data['first_mes'].trim() : ''
+  const structureFirst = textAt(openingBucket, 'opening')
+  if (projectedFirst === '' && structureFirst === '') {
+    issues.push({ code: 'empty-first-mes', level: 'bad', groupId: 'opening', key: 'opening' })
+  }
+
+  // L1 预算：优先用后端现算的值（架构稿 §8.2），拿不到就不猜
+  const l1Chars = typeof lengthInfo['l1Chars'] === 'number' ? lengthInfo['l1Chars'] : undefined
+  if (l1Chars !== undefined && l1Chars > LENGTH_LIMITS.l1Chars) {
+    issues.push({ code: 'l1-too-long', level: 'warn', detail: String(l1Chars) })
+  }
+
+  if (Object.keys(asObject(legacy['extra'])).length > 0) {
+    issues.push({ code: 'legacy-extra', level: 'info', detail: String(Object.keys(asObject(legacy['extra'])).length) })
+  }
+
+  const rawKeys = Object.keys(asObject(imported['raw']))
+  if (rawKeys.length > 0) {
+    issues.push({ code: 'unmapped-native', level: 'info', detail: String(rawKeys.length) })
+  }
+
+  return issues
+}

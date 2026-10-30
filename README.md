@@ -14,7 +14,7 @@
 
 | | 原 skill | 本插件 |
 |---|---|---|
-| 提示词 | `SKILL.md` 13 060 字节，**每轮全量注入** | L0 常驻 684 字符 + L1 角色 ~1200 字符 |
+| 提示词 | `SKILL.md` 13 060 字节，**每轮全量注入** | L0 常驻 684 字符 + L1 角色 ≈1.1K 字符 + 世界书命中（典型 ≈0.2K） |
 | 文件读写 | 模型自己做 | 插件代码保证 |
 | 角色管理 | 对话里说指令 | **可视化面板** |
 | 时机控制 | 一直生效 | **可插拔** |
@@ -36,8 +36,17 @@
 | 级别 | 何时 | 内容 |
 |---|---|---|
 | **L0 常驻** | 总是 | 零系统痕迹铁律 + 优先级声明（~684 字符）|
-| **L1 角色** | 启用时 | 七字段角色卡（声线优先）+ 时间差档位 + 最近日记 |
+| **L1 角色** | 启用时 | 酒馆卡 CCv3 渲染（声线优先）+ 时间差档位 + 最近日记（实测 ≈1.05–1.15K 字符）|
+| **世界书** | 命中时 | `character_book` 条目按关键词命中注入；常量条每轮都在，其余未命中零成本（典型 ≈0.2K 字符）|
 | **L2 长流程** | 工具按需 | 蒸馏/建卡向导等长文档，不进系统提示词 |
+
+### 📖 世界书按需注入
+
+- **常规人设常驻**（`description` / `personality` / `scenario`），详细设定放世界书
+- 命中才注入：关键词（含 `use_regex`）、`constant` 常驻、`selective` + 次级关键词
+- 默认预算 **12 条 / 6000 字符**——实测常态根本用不满（典型只注入 168 字符，约 L1 的 11%），它的作用是防爆炸而不是常态成本
+- 同一轮多次组装复用结果，**不重复注入、不跨轮累积**
+- 易变内容排在系统提示**最后一段**，把缓存失效率降到最小
 
 ### ⚖️ 与 AGENTS.md 共存，不冲突
 
@@ -145,9 +154,11 @@ New-Item -ItemType Junction `
 
 **开箱自带 3 张预置角色卡**，首次启用时幂等种入（`characters/` 已存在则跳过，绝不复活你删掉的卡）。
 
-### 兼容原 skill 数据
+### 兼容旧卡与酒馆卡
 
-数据格式完全一致，把原 skill 的 `~/.ai-with-u/characters/` 直接拷进 `~/.dsh/ai-with-u/characters/` 即可。
+- **旧 34 字段卡**：直接放进 `characters/<名>/card.json` 即可，插件**读时自动归一**成酒馆卡 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`（回滚就是拷回来）
+- **酒馆卡导入**：支持 `.png`（`tEXt` 的 `ccv3` / `chara` chunk）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 会自动升到 V3）
+- ⚠️ 已有角色时**纯拷目录**不会自动进索引（未做一键导入），可以用面板的导入入口
 
 ---
 
@@ -160,7 +171,8 @@ New-Item -ItemType Junction `
 ├── _index.json                # 角色索引
 ├── _active.json               # 当前启用状态
 └── characters/<角色名>/
-    ├── card.json              # 七字段角色卡
+    ├── card.json              # 酒馆卡 CCv3（旧 34 字段卡读时自动归一）
+    ├── card.v1.bak.json       # 迁移前的原件（回滚用，只在首次落盘后出现）
     ├── diary.md               # 日记（按天分组）
     └── session.json           # 会话状态
 ```
@@ -184,11 +196,14 @@ New-Item -ItemType Junction `
 | `awu_relation` | 查询关系档位依据 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（16 条，`/_dsh/ai-with-u/`）
+### REST 接口（18 条，`/_dsh/ai-with-u/`）
 
-`overview` `characters` `character` `character/save` `character/delete`
+`overview` `characters` `character` `character/save` `character/delete` `character/import`
 `activate` `deactivate` `mode` `diary/save` `forget` `diary/edit`
-`session/reset` `relation` `opening/next` `opening/state` `session/commit`
+`session/reset` `relation` `opening/next` `opening/state` `session/commit` `distill/flow`
+
+> `/character` 与 `/characters` 同时返回 `card`（旧 34 字段视图，编辑器用它）与 `ccv3`（完整酒馆卡）；
+> `/character/save` 收 `{ name, card?, ccv3? }` —— 只给 `card` 时保留既有世界书与 `extensions`，只给 `ccv3` 时反推结构。
 
 ---
 
@@ -196,10 +211,12 @@ New-Item -ItemType Junction `
 
 ```bash
 npm install
-npm run build            # tsc(宿主) + tsc(前端类型) + 前端打包 + 三套自检
+npm run build            # tsc(宿主) + tsc(前端类型) + 打包 + 五套自检
 npm run verify           # 产物自检（导出形状 / inject 形式 / 产物新鲜度）
-npm run verify:session   # 会话与指令自检（92 项）
-npm run verify:host      # 真实 cordis 宿主验证（14 项）
+npm run verify:tavern    # 酒馆卡格式 / 迁移幂等 / 世界书命中与预算（186 项）
+npm run verify:import    # PNG / CHARX / JSON 导入解析（47 项）
+npm run verify:session   # 会话与指令自检（94 项）
+npm run verify:host      # 真实 cordis 宿主验证（19 项）
 npm run typecheck:client # 只查浏览器侧类型（tsconfig.client.json，noEmit）
 ```
 

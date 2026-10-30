@@ -488,6 +488,22 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   background-clip: padding-box;
 }
 
+/* 左栏头部：蒸馏 CTA → 分段器 → 计数行 的唯一 gutter 容器。
+   成因（2026-10-30 主人截图）：这些块原先直接挂在 .awu-rail 下，而 rail 自身没有 padding，
+   于是「共 3 位」贴着面板左沿被切、CTA 左右顶死边框，只有下面的卡片列表缩进了 32px。
+   现在由容器统一给左右 gutter，子块自己的 margin 归零（否则双份内边距），纵向节奏交给 gap。
+   ⚠️ 这段注释里不能出现反引号 —— CSS 整个是 JS 模板串，反引号会把它从中间截断，
+   后面的文字变成 JS 表达式（实测导致 rail is not defined，整个插件模块加载失败、侧栏入口消失）。 */
+.awu-railHead {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-6);
+  padding: var(--awu-gap-5) var(--awu-gutter) var(--awu-gap-4);
+}
+
+.awu-railHead > * { margin: 0; }
+
 /* 唯一断点：<900 收成单栏（详情页占满、列表退回全宽） */
 @media (max-width: 900px) {
   .awu-workspace { display: block; overflow-y: auto; }

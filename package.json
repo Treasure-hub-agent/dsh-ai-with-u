@@ -1,6 +1,6 @@
 {
   "name": "dsh-ai-with-u",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI WITH U · 角色扮演管理器 —— 选卡即插即用人设注入、日记记忆与可视化角色管理（DSH 插件版）",
   "license": "MIT",
   "author": "Treasure-hub-agent",
@@ -56,7 +56,7 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify-bundle.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json",

@@ -93,6 +93,13 @@ type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 // 尺寸由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H 统一给出，这里只负责把窗口摆到视口中间。
 // 早期版本是「贴着侧栏按钮弹出、算左侧/底部坐标」的小气泡，改成大窗后那套锚点计算已删除。
 
+/** 保存信封守卫：编辑器新形态 `{ card, ccv3 }` 与旧的裸结构卡区分开。 */
+function isSaveEnvelope(value: unknown): value is { card: Card; ccv3?: Card } {
+  if (typeof value !== 'object' || value === null) return false
+  const card = (value as { card?: unknown }).card
+  return typeof card === 'object' && card !== null
+}
+
 /** 滚动锁：弹层打开时锁住 body 滚动，关掉立刻还原。 */
 function useScrollLock(active: boolean): void {
   useEffect(() => {
@@ -1122,14 +1129,28 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    * 自定义键）。保存成功后**重新 GET 一次**再关闭编辑器——只有回读到的值对得上，
    * 才算真的落盘了；否则界面显示「已保存」但磁盘没变，是最难查的那类 bug。
    */
-  const onSaveCard = (next: Card): void => {
+  /**
+   * 保存角色卡。
+   *
+   * 兼容两种调用形态（编辑器随 CCv3 改造逐步切换，两边都不用等）：
+   *  - `onSaveCard(card)`            —— 旧形态，只提交 34 字段结构
+   *  - `onSaveCard({ card, ccv3 })`  —— 新形态，结构 + 完整 CCv3（世界书改动必须走这个，
+   *                                     否则只发结构会把 `data.character_book` 落下）
+   * 后端契约是 `{ name, card?, ccv3? }`：只给 card 时保留既有世界书与 extensions。
+   */
+  const onSaveCard = (next: Card | { card: Card; ccv3?: Card }): void => {
     const targetName = detailName
     if (targetName === '') return
+    // 形态判定：带 `card` 键的是新信封，否则就是裸的结构卡
+    const envelope = next as { card?: Card; ccv3?: Card }
+    const payload = isSaveEnvelope(next)
+      ? { card: envelope.card as Card, ccv3: envelope.ccv3 }
+      : { card: next as Card, ccv3: undefined }
     setBusy(true)
     setEditError('')
     void (async () => {
       try {
-        await saveCharacter(targetName, next)
+        await saveCharacter(targetName, payload.card, payload.ccv3)
         // 回读校验：以后端实际落盘的内容为准
         const fresh = await fetchCharacter(targetName)
         if (!aliveRef.current) return
@@ -1392,43 +1413,51 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           */}
           <div className="awu-workspace">
             <aside className="awu-rail">
-              <div className="awu-toolbar">
-                <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
-                  {t('roster.count', { n: roster.length })}
-                </span>
-                <button
-                  type="button"
-                  className="awu-btn"
-                  data-size="sm"
-                  data-kind="primary"
-                  style={{ marginLeft: 'auto' }}
-                  onClick={() => openDialog('new')}
-                >
-                  <IconPlus size={12} />
-                  {t('roster.new')}
-                </button>
-              </div>
+              {/*
+                左栏头部（自带内边距的容器）：蒸馏 CTA → 分段器 → 计数与「新建角色卡」。
+                这些块必须包在有 gutter 的容器里 —— `.awu-rail` 自身没有 padding，
+                直接放子元素会贴着边框（实测「共 3 位」被面板左沿切掉）。
+                「新建角色卡」按主人口味放在分段器下方、列表顶部。
+              */}
+              <div className="awu-railHead">
+                {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
+                <DistillEntry t={t} />
 
-              {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
-              <DistillEntry t={t} />
+                <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
+                  {TAB_IDS.map(item => (
+                    <button
+                      key={item.id}
+                      id={item.node}
+                      type="button"
+                      role="tab"
+                      className="awu-tab"
+                      data-on={tab === item.id ? 'true' : 'false'}
+                      aria-selected={tab === item.id}
+                      aria-controls="awu-tabpanel"
+                      tabIndex={tab === item.id ? 0 : -1}
+                      onClick={() => setTab(item.id)}
+                    >
+                      {t(`panel.tab.${item.id}`)}
+                    </button>
+                  ))}
+                </div>
 
-              <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
-                {TAB_IDS.map(item => (
+                <div className="awu-toolbar">
+                  <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
+                    {t('roster.count', { n: roster.length })}
+                  </span>
                   <button
-                    key={item.id}
-                    id={item.node}
                     type="button"
-                    role="tab"
-                    className="awu-tab"
-                    data-on={tab === item.id ? 'true' : 'false'}
-                    aria-selected={tab === item.id}
-                    aria-controls="awu-tabpanel"
-                    tabIndex={tab === item.id ? 0 : -1}
-                    onClick={() => setTab(item.id)}
+                    className="awu-btn"
+                    data-size="sm"
+                    data-kind="primary"
+                    style={{ marginLeft: 'auto' }}
+                    onClick={() => openDialog('new')}
                   >
-                    {t(`panel.tab.${item.id}`)}
+                    <IconPlus size={12} />
+                    {t('roster.new')}
                   </button>
-                ))}
+                </div>
               </div>
 
               <div className="awu-pane">
