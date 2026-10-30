@@ -231,6 +231,19 @@ export interface AiwuExtension {
   memoryAnchors?: string[]
   interactionPref?: AiwuInteractionPref
   prompt?: AiwuPromptConfig
+  /**
+   * 蒸馏留下的「可审计痕迹」（纯存档，对话渲染不读）。
+   *
+   * `evidence.items[]` 每条记「这个值从哪来、可信度如何」：
+   * `{ field, value, grade: 'verbatim' | 'artifact' | 'impression', source? }`；
+   * `coverage` 是按维度统计的条数（哪些维度查得足、哪些只有印象）。
+   */
+  evidence?: Record<string, unknown>
+  /**
+   * 跨来源设定冲突：`{ field, a, b, verdict, resolved }`。
+   * `resolved: false` 表示还没裁决——蒸馏流程要求这类冲突必须汇报给用户，不许静默丢弃。
+   */
+  conflicts?: Array<Record<string, unknown>>
   legacy?: AiwuLegacy
   imported?: AiwuImported
   [key: string]: unknown
