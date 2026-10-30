@@ -272,6 +272,51 @@ ellipsis 没有裁切上下文。
 
 ---
 
+### 🟡 坑 11：CSS 模板串里写反引号，会把样式表从中间截断（2026-10-30）
+
+`client/styles.ts` 的 CSS 整个是一个 JS 模板串。有人在注释里写了一句
+「类名一律 \`.awu-distill-*\`，不碰别人的 \`.awu-*\`」——反引号直接把模板串提前闭合，
+后面几百行 CSS 被当成 JS 解析。
+
+**报错长这样**，而且位置和真凶**不在同一处**：
+
+```
+client/distill.styles.ts(16,28): error TS2362: The left-hand side of an arithmetic operation must be ...
+client/distill.styles.ts(113,28): error TS2304: Cannot find name 'parse'.
+```
+
+`TS2304` 指向的是注释里出现的 `/distill/parse` 路径片段——因为那段注释已经不在字符串里了。
+
+**规矩**：CSS 模板串（含功能模块的 `*.styles.ts`）**一律不写反引号**。需要强调就用「」或 `*`。
+这条同样适用于新手容易踩的 `${...}`：模板串里的 `${` 会被当插值求值，写 CSS 时别出现。
+
+---
+
+### 🟡 坑 12：portal 到 `document.body` 的元素拿不到 scoped token（2026-10-30）
+
+`--awu-*` 定义在 `.awu-scope` / `.awu-layer` 上，但**弹层是 `createPortal` 到 `document.body` 的**，
+在作用域之外 → 弹层里所有 `var(--awu-*)` 都是无效声明，背景、圆角、z-index、入场动画集体退化。
+
+修法是把 portal 目标也纳入变量层：
+
+```css
+/* 深色（默认）与浅色两块的选择器必须逐字同步，漏一边就会出现「浅色宿主下弹层暗底亮字」 */
+.awu-scope,
+.awu-layer,
+.awu-scrim,
+.awu-dialog { ... }
+
+html:not([data-ds-dark-theme]) .awu-scope,
+html:not([data-ds-dark-theme]) .awu-layer,
+html:not([data-ds-dark-theme]) .awu-scrim,
+html:not([data-ds-dark-theme]) .awu-dialog { ... }
+```
+
+**教训**：用 scoped CSS 变量 + portal 时，「变量定义在哪」和「元素渲染在哪」必须对一遍。
+我们第一次只补了深色块，浅色块漏了 —— 症状比原 bug 更难看（暗底亮字）。
+
+---
+
 ## 四、当前架构
 
 ```

@@ -56,11 +56,12 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "verify": "node scripts/verify.mjs",
+    "verify:import": "node scripts/verify-import.mjs",
     "verify:session": "node scripts/verify-session.mjs",
     "verify:host": "node scripts/verify-host.mjs"
   }

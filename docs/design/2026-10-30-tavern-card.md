@@ -266,6 +266,168 @@ extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / 
 | `openings` 的轮换游标靠"数组顺序"持久化（`rotateOpening` 把用过的移到末尾） | **保持这个语义**，映射到 `alternate_greetings` 的数组顺序 | 零新增字段；酒馆前端也不解释顺序，互不干扰 |
 | `{{char}}` 用 `nickname` 优先 | `nickname` 留空 → 等于 `name`；迁移时**不**把 `basic.姓名` 塞进 nickname | 别把"真名"当"昵称"，否则 `{{char}}` 全变成真名 |
 
+### 1.7 完整样例：预置卡「虞照」迁移后的 CCv3 全文
+
+> **这是可复制粘贴的合法 JSON**（无注释），也是 `migrateLegacyCard(presets/虞照/card.json)` 的**期望输出**——
+> `scripts/verify-tavern.mjs` 会拿它做 golden 断言（V18）。
+> 三条线都可以直接拿这段当契约：编辑器照它渲染、蒸馏照它产出、指南照它写文案。
+> 相比原卡，除了格式包装外**只多了两件事**：`character_book` 的两条世界书条目、`extensions.aiwu` 的结构化镜像。
+
+```json
+{
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "虞照",
+    "nickname": "",
+    "description": "身份：两个月前搬进你合租房的室友。\n\n背景：话多、爱笑、把家里弄得热闹；每天出门前给你留一张便利贴，写的都是今天晚上吃什么，和一句「记得吃早饭」。",
+    "personality": "关键词：外向、话痨、自来熟、情绪写在脸上\n内在矛盾：什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么\n对待亲近之人：主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话",
+    "scenario": "来处：他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲\n落差：他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接\n如今的日子：白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴\n你与他的旧：搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说",
+    "mes_example": "",
+    "system_prompt": "【声线基因（最高优先级，决定每一句的措辞）】\n对话节奏：快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么\n爱用句式：诶诶诶／我跟你说／真的假的！／是不是很棒\n自称：我\n对用户的称呼：直接喊你名字（偶尔叫「室友大人」逗你）\n情绪口头禅：兴奋「好耶！」／被戳到时「……啊？」\n非语言小动作：（便利贴贴在你门上）／（把两袋菜往你怀里一塞）\n【互动偏好】\n回复长度倾向：短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句\n表情使用：自然用，开心时多（不刻意堆）\n话题舒适区：吃的、他的鼓、外卖、你的一天",
+    "post_history_instructions": "【收尾提醒】\n禁忌词：不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话\n雷区：不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气",
+    "first_mes": "虞照，26 岁，两个月前搬进你合租房的室友。话多、爱笑，把家里弄得热闹：每天出门前给你留一张便利贴，写的都是今天晚上吃什么，末了加一句「记得吃早饭」。他不聊家里的事，手机一响就先看是谁。\n\n（晚上八点，你还在公司。手机连着震了四下）\n\n（第四下的时候他直接打电话过来了）\n\n诶诶诶！你几点回来啊\n\n我买了排骨！！超市打折，我是不是很会过日子\n\n……好吧其实是我想吃你上次做的那个",
+    "alternate_greetings": [
+      "（便利贴贴在你显示器边上：今天降温，外套在沙发上。）\n\n诶你怎么又不看微信！\n\n我喊你三遍了！",
+      "（他把三袋外卖堆在门口）我点了三家的\n\n你挑一个，剩下两个我吃，真的\n\n……真的啦！",
+      "我把鼓搬回来了\n\n……不是大鼓，就一套电鼓！很小！\n\n你不许说不行——"
+    ],
+    "creator_notes": "",
+    "creator": "ai-with-u",
+    "character_version": "1.0",
+    "tags": [],
+    "group_only_greetings": [],
+    "creation_date": 1793558400,
+    "modification_date": 1793558400,
+    "source": [],
+    "assets": [],
+    "character_book": {
+      "name": "虞照的世界书",
+      "description": "只有被提到时才注入的细节",
+      "scan_depth": null,
+      "token_budget": null,
+      "recursive_scanning": false,
+      "extensions": {},
+      "entries": [
+        {
+          "id": "yuzhao-sticky-notes",
+          "name": "便利贴的颜色规则",
+          "keys": ["便利贴", "留条", "纸条"],
+          "secondary_keys": ["颜色"],
+          "content": "便利贴有一整叠，颜色按事情分：黄色是今天晚上吃什么，蓝色是提醒（记得吃早饭、带伞），粉色是他想说但没说出口的话。他从不撕掉旧的，门后那块墙越叠越厚。",
+          "enabled": true,
+          "insertion_order": 10,
+          "priority": 8,
+          "use_regex": false,
+          "constant": false,
+          "case_sensitive": false,
+          "selective": true,
+          "position": "after_char",
+          "comment": "用户提到便利贴/纸条时才注入颜色规则",
+          "extensions": {}
+        },
+        {
+          "id": "yuzhao-drum-band",
+          "name": "打鼓与那支乐队",
+          "keys": ["打鼓", "鼓", "乐队", "排练"],
+          "secondary_keys": [],
+          "content": "@@position after_char\n@@depth 2\n他在城西的排练室按小时租时段，每周二、四晚上去。乐队另外三个人都是他从网上认识的，只有他知道那个排练室其实是他刷卡付的整月租金——他不许人提这件事。",
+          "enabled": true,
+          "insertion_order": 20,
+          "priority": 5,
+          "use_regex": false,
+          "constant": false,
+          "case_sensitive": false,
+          "selective": false,
+          "position": "after_char",
+          "comment": "content 前两行是装饰器示例：渲染时剥掉，只用来覆盖本条的位置与扫描深度",
+          "extensions": {}
+        }
+      ]
+    },
+    "extensions": {
+      "aiwu": {
+        "schema": 1,
+        "updated_at": "2026-10-30T20:40:00+08:00",
+        "basic": { "age": "26" },
+        "personality": {
+          "keywords": ["外向", "话痨", "自来熟", "情绪写在脸上"],
+          "contradiction": "什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么",
+          "towardClose": "主动到有点缠人：你随口说想吃的东西第二天就会出现，你不回消息他就直接打电话"
+        },
+        "voice": {
+          "pace": "快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么",
+          "catchphrases": ["诶诶诶", "我跟你说", "真的假的！", "是不是很棒"],
+          "selfRef": "我",
+          "callsUser": "直接喊你名字（偶尔叫「室友大人」逗你）",
+          "emotes": ["兴奋「好耶！」", "被戳到时「……啊？」"],
+          "forbidden": "不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话",
+          "gestures": ["（便利贴贴在你门上）", "（把两袋菜往你怀里一塞）"]
+        },
+        "world": {
+          "origin": "他家里条件不差，从小被安排好了每一步：读什么专业、进谁家公司、和谁家结亲",
+          "gap": "他把那份安排放着没接，自己搬出来租了最小的一间，白天接设计外包，晚上打鼓；家里打电话来他就去阳台接",
+          "nowadays": "白天睡到十点，晚上在外面待到很晚；冰箱永远被他塞满，你的那份早饭会贴上便利贴",
+          "sharedPast": "搬进来那天他带了一整箱啤酒，说「当交房租的见面礼」；那晚你们聊到三点，他一句家里的事都没说"
+        },
+        "relationship": {
+          "startPoint": "合租室友，他搬进来两个月",
+          "charCallsUser": "你的名字；逗你时叫「室友大人」",
+          "userCallsChar": "虞照 / 小照"
+        },
+        "userPersona": {
+          "who": "他一屋两室的合租室友，房子是你先租下的",
+          "relation": "两个月，从陌生人处成了「会互相留饭」的关系",
+          "sharedHistory": "上个月你发烧，他翘了活在家煮了两天粥，把厨房弄得一团糟",
+          "displayName": ""
+        },
+        "dynamicState": {
+          "mood": "亢奋，刚抢到东西的好心情",
+          "recent": "他这周接了个急活，白天改稿晚上打鼓，两天没怎么睡",
+          "doing": "在超市打折区给你发消息，手里拎着两袋菜",
+          "updated_at": "2026-10-30T20:40:00+08:00"
+        },
+        "memoryAnchors": [
+          "便利贴有一整叠，颜色按事情分：黄色是吃什么，蓝色是提醒，粉色是他说不出口的话",
+          "他手机一响就先看是谁；是家里打来的，他会走到阳台再说话",
+          "他做噩梦醒来会自己去厨房煮面，锅铲碰锅的声音很响"
+        ],
+        "interactionPref": {
+          "length": "短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句",
+          "emoji": "自然用，开心时多（不刻意堆）",
+          "comfortZone": "吃的、他的鼓、外卖、你的一天",
+          "taboo": "不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气"
+        },
+        "prompt": {
+          "includeMesExamples": true,
+          "includeSystemPrompt": true,
+          "lengthWarnings": true,
+          "lore": { "enabled": true, "scanDepth": null, "budgetChars": null, "recursive": null }
+        },
+        "legacy": {
+          "from": "aiwu-v1",
+          "at": "2026-10-30T20:40:00+08:00",
+          "originalName": "虞照",
+          "source": "custom",
+          "extra": {}
+        }
+      }
+    }
+  }
+}
+```
+
+**对照原卡，读这份样例时注意 6 个点**
+
+| # | 注意 | 为什么 |
+|---|---|---|
+| 1 | `description` / `personality` / `scenario` / `system_prompt` / `post_history_instructions` 都是**投影**，内容与原卡逐字对应（只加了 `身份：` `来处：` 这类行首标签） | 外部前端读原生字段就能用；我们自己的结构化数据在 `aiwu` |
+| 2 | `first_mes` / `alternate_greetings` 是**逐字搬运**，没加任何标签 | 开场白是台词，加前缀就毁了 |
+| 3 | `mes_example` 是空串 | 迁移卡没有示例对话，**不编造**（§3.4） |
+| 4 | `character_book.entries[1].content` 前两行是 `@@` 装饰器 | 演示"未知/已知装饰器都从正文剥掉"（§3.5）；渲染时只剩正文 |
+| 5 | `aiwu.world.*` 与 `scenario` 内容重复 | **刻意**：结构供编辑器逐字段改，投影供外部前端读；写盘时由结构重算，不会出现两份不一致 |
+| 6 | `aiwu.legacy.source = "custom"` 而 `data.source = []` | 见 §1.6 |
+
 ---
 
 ## 2. 旧格式迁移（34 字段 → CCv3）
@@ -375,7 +537,8 @@ Copy-Item "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.v1.bak.json" `
 | **读时归一**（`readCard` 内部 `normalizeCard`，内存里永远是 V3） | ✅ **做** | 旧卡永远能读；不会"某天插件升级后看见卡片消失" |
 | **首次写盘时落盘 V3**（改一个字保存、换开场、`awu_forget` 命中卡字段） | ✅ **做** | 自然收敛，无惊喜 |
 | **启动时批量迁移所有卡** | ❌ **不做（可选项，待拍板）** | 好处是"盘上一夜之间统一"；坏处是启动即改用户文件、且失败回滚要人手动。个人倾向：**不做**，需要时给个面板按钮（未来） |
-| **预置卡（`presets/**`）** | ✅ 本次直接改成 CCv3 | 新装机种入的就是新格式；`seedPresets` 只在 `characters/` 不存在时跑，不影响老用户 |
+| **预置卡（`presets/**`）** | ❌ **保持旧格式不动**（Lead 决定，P0-2） | 全新安装 / 全新数据目录时真的跑一遍迁移逻辑 = **迁移代码天天在跑回归**。预置卡仍是旧格式，是活体测试样本；`verify-tavern.mjs` 直接拿三张预置卡当迁移 fixture |
+| 预置卡迁移后的**期望形态** | ✅ 已在 §1.7 给出「虞照」全文 golden 样例 | 其它两线（编辑器/蒸馏）可以直接照它写，不用等实现 |
 
 > ⚠️ 老用户的卡在第一次写之前一直是旧 JSON 在盘上——**这是特性不是 bug**：读时归一让两种格式共存，不会出现"半迁移"状态。
 
@@ -390,6 +553,40 @@ Copy-Item "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.v1.bak.json" `
 | M5 | `openings` 里有空串/非字符串 | 酒馆前端校验失败 | 迁移时 `map(String).filter(s => s.trim() !== '')` |
 | M6 | 卡片体积（4 KB → 8~10 KB，双写投影 + 结构） | 读盘次数不变，体积可接受 | 只 `listCharacters` 时全量读，已有 IO 放大问题（host.md 风险 30）不在本轮 |
 | M7 | 用户手工把 `description` 改得和结构不一致 | 下次保存被结构覆盖 | 文档写明"以编辑器为准"；`aiwu.imported.raw` 机制只服务外部卡 |
+
+### 2.7 「忘却」在 CCv3 下的规则（Lead P0-1：会静默失效，必须先定规则）
+
+**问题**：`src/store.ts:503-523` 的忘却只会遍历 `card['memory_anchor']` 与 `card['dynamic_state']` 两个旧键，
+且只处理「对象且非数组」。迁移后这两个键**不存在** → 循环体一次都不执行 → `removedCard` 为空 →
+`changed` 可能仍是 true（因为日记/会话改了）→ **界面提示成功，卡里一个字没少**。这是最恶劣的一类 bug：静默、且误导。
+
+**决定：忘却的搜索面 = 卡内一切「会被注入提示词或会被用户读到」的文本；按句删除（复用 `removeSentences`），删完重投影。**
+
+| 搜索面 | 删除粒度 | 说明 |
+|---|---|---|
+| `awiu.memoryAnchors[]` | **整条删**（命中即整条移除） | 锚点本来就一条一件事；留半条更糟 |
+| `awiu.dynamicState.{mood,recent,doing}` | 按句删 | 与现状一致 |
+| `awiu` 其余字符串叶子（`voice.*`、`personality.*`、`world.*`、`relationship.*`、`userPersona.*`、`interactionPref.*`、`basic.age`） | 按句删（数组逐项按句删，删空则移出数组） | 用户说「忘掉 X」，X 可能写在任何一段；**这些字段都会进 L1**，不删就是没忘 |
+| `character_book.entries[].content` | 按句删；若整条删空 → **移除该条目**并记入报告 | 世界书也进 L1（命中时），不删等于漏 |
+| `awiu.imported.raw.<原生字段>` | 按句删 | 保真模式下这才是渲染源，不删等于没删 |
+| `data.description / personality / scenario / system_prompt / post_history_instructions` | **不直接删**，删完上述结构后**重投影** | 双写字段直接删会和结构不一致；重投影保证自洽 |
+| `data.first_mes` / `alternate_greetings[]` | 按句删（数组项删空则移除，但**不动轮换顺序的语义**） | 开场白会被用户看到、也会被模型复用 |
+| `session.recent` / `session.topic` / `diary.md` | 沿用现有逻辑，不动 | 已是正确实现 |
+
+**三条防静默的硬要求（写进实现，写进测试）**
+
+1. **返回体必须能区分「扫过没命中」与「没扫」**：`ForgetResult` 增加
+   `card: { removed: string[], scanned: { fields: number, entries: number, rawFields: number } }`。
+   `scanned.fields === 0` 时**不允许**返回 `changed: true`（除非日记/会话确有变更），并在 `warnings[]` 里写一行
+   `「角色卡里没有可扫描的字段，可能格式未识别」`。
+2. **命中但删不掉要有声音**：任何"匹配到了但结构不支持删除"的情况（例如某字段是对象/数字）→ 进 `warnings[]`，不吞。
+3. **自检测试（`scripts/verify-tavern.mjs` V16）**：
+   造一张卡，把关键词「便利贴」同时放进 `memoryAnchors`、`description`（经投影）、`character_book` 条目、`first_mes`；
+   调 `forget('便利贴')` 后断言：① 四处都不含该词；② 重投影后的 `description` 不含该词；
+   ③ `scanned.fields > 0`；④ 反向断言不误伤（同卡里的「便利纸」「便利」等近似词不被删——按句删除不按模糊匹配）。
+
+> 规则一句话：**忘却是"全卡按句手术"，不是"两个字段的补丁"**。字段列表写死在代码里就会在下次加字段时再次静默失效，
+> 所以实现必须走"遍历 `aiwu` 整棵树的字符串叶子"而不是硬编码字段名。
 
 ---
 
@@ -755,24 +952,35 @@ export function selectLoreEntries(
 
 > 隐私说明：匹配只发生在内存里，不落盘、不进日志（日志只记 `diag.hitCount`，不记命中文本）。
 
-### 6.5 与客户端/其它线的过渡契约（**这条要 Lead 拍板**）
+### 6.5 与客户端/其它线的过渡契约（**Lead 已拍定 C7**）
 
 现状：`store.readCard()` / `listCharacters()` 返回的对象被 `web.ts` 直接塞进 REST 响应，客户端按旧 34 字段读
 （`client/card-schema.ts:215` 的 `toDraft(card)` 读 `card.basic` 等）。**一旦 store 改成返回 CCv3，活面板会立刻空白。**
 
-推荐过渡方案（v0.2.0 内保留，v0.3.0 删旧视图）：
+**定案：三键并存，只保留一个视图键 `card`（不再有 `fields`——同一份投影给两次没有意义）。**
 
 ```ts
-// GET /character 响应（新增 ccv3 / fields 两个键，card 保持旧语义不破客户端）
-{ ok: true, name, card: toLegacyView(ccv3), ccv3, fields: toLegacyView(ccv3), ... }
+// GET /character 响应：card 保持旧语义（面板不改也能活）+ 新增 ccv3
+{ ok: true, name, card: toLegacyView(ccv3), ccv3, diary, session, relation, openingState }
+// GET /characters 同理：characters: Array<{ name, card: toLegacyView, ccv3, source, lastActive, memoryCount }>
 
-// POST /character/save：两个入口
-{ name, card: <旧 34 字段视图> }   → fromLegacyView(view, 现有 ccv3) 合并写回（保留未知键）
-{ name, ccv3: <完整 CCv3> }        → normalizeCard 后直存
+// POST /character/save：三键
+{ name, card }          // 只给结构视图 → fromLegacyView(card, 现有 ccv3)：重投影原生，
+                        //                  extensions.aiwu / character_book 原样保留（C7 的缺口就靠这条堵）
+{ name, ccv3 }          // 只给 CCv3    → normalizeCard(ccv3)：结构从原生反推（deriveFromNative，只填空不覆盖）
+{ name, card, ccv3 }    // 都给          → 以 ccv3 为底，再用 card 覆盖结构字段，然后重投影
 ```
 
-代价：`web.ts` 要加 3 处投影（约 15 行）；`web.ts` **不在我的写盘范围**（integration-contract §一 归 distill-designer），
-所以这条需要在排期时指给人。**不做的后果**：面板空白、无法建卡/改卡（P0 级）。
+内部规则（一句话）：**结构是权威，原生是投影**——
+
+1. 收到 `card` → 先 `fromLegacyView(card, base)`，再 `projectNative`（原生字段会被重算，这是预期的）；
+2. `base` 优先取请求里的 `ccv3`，其次取磁盘上的现有卡；
+3. `extensions.aiwu` 里 `card` 没覆盖到的键、`character_book`、别人的 `extensions.*` —— **一律原样保留**；
+4. `fromLegacyView` 是**唯一**的写入口（决策 2：编辑面走结构，原生字段只做只读导出预览），
+   所以**不做**"原生字段反解析回结构"（导入外部卡时那次 `deriveFromNative` 例外）；
+5. 不做"手工字段锁"那类机制（决策 2）。
+
+`web.ts` 的这 ~20 行**归我**（Lead 已把 `web.ts` 交给我，distill-designer 不再动它）。
 
 > ⚠️ 顺带提醒：新增路由时**不要依赖 `buildRoutes` 的 `method` 字段**（`src/index.ts:208-214` 注册时丢弃），
 > 必须在 handler 里自己看 `req.method`。本次设计**不新增路由**，所以不受影响。
@@ -822,7 +1030,8 @@ node scripts/verify-tavern.mjs
 
 | # | 断言 | 方法 |
 |---|---|---|
-| V1 | 三张 `presets/*/card.json` 都是合法 CCv3 | `spec === 'chara_card_v3'`、`spec_version === '3.0'`、`data.name` 非空、`data.extensions.aiwu.schema === 1` |
+| V1 | 三张 `presets/*/card.json` **仍是旧格式**（P0-2 的活体回归样本），且都能 `migrateLegacyCard` 成合法 CCv3 | 先断言 `spec === undefined` 且顶层有 `basic`/`voice`；再断言迁移结果 `spec === 'chara_card_v3'`、`data.name` 非空、`aiwu.schema === 1` |
+| V1b | 三张预置卡迁移后**逐字不丢**（性格/声线/开场） | 把旧卡的每个值拍平成字符串集合，断言全部出现在迁移结果里（不看字段位置，看"内容还在不在"） |
 | V2 | 迁移幂等（字节级） | `migrateLegacyCard(migrateLegacyCard(x))` 与前者 `JSON.stringify` 相等 |
 | V3 | 34 字段零丢失 | 反射 `client/card-schema.ts` 的 `GROUPS`（脚本里内置一份同样的 34 项列表，避免 import TSX），逐项断言迁移后能在 CCv3 里找回，**且内容字符串完全相等** |
 | V4 | 未知键保留 | 塞 `{ "自定义": { "x": 1 } }` → 迁移后出现在 `awiu.legacy.extra`；塞 `data.extensions.other` → 原样在 |
@@ -837,6 +1046,10 @@ node scripts/verify-tavern.mjs
 | V13 | `toLegacyView` round-trip | `fromLegacyView(toLegacyView(card), card)` 与 `card` 的 `awiu` 结构相等 |
 | V14 | 损坏文件不丢索引 | 写坏 `card.json` → `readCard` 返回 `undefined`、`.corrupt-*` 备份存在、`ensureIndex` 后索引条目仍在 |
 | V15 | 并发写串行化 | 并发 25 次 `commitTurn` 同角色 → `turn_count` 恰等于 25（旧实现会少） |
+| V16 | **忘却不会静默失效**（P0-1，§2.7） | 关键词同时放在 `memoryAnchors` / `description`（投影）/ `character_book` 条目 / `first_mes` → `forget` 后四处都不含该词、重投影后 `description` 也不含；`scanned.fields > 0`；近似词不误伤 |
+| V17 | **L1 不双渲染**（P0-3） | `renderL1` 输出里，`description` 的正文只出现 **1 次**（旧 `renderCharacterCard` 若并存会把 `basic.一句话背景` 再吐一遍）；并断言 `prompt.ts` 的导出里不再有 `renderCharacterCard` |
+| V18 | §1.7 的 golden 样例即期望输出 | `JSON.parse(样例)` 与 `migrateLegacyCard(presets/虞照/card.json)` 深比较相等（时间戳字段白名单跳过） |
+| V19 | `web.ts` 双入口不洗数据（Q1 风险 B） | 只改一个字段走 `fromLegacyView` → `extensions.aiwu` 其余部分字节不变，`character_book` 条目数不变 |
 
 ### 7.3 重启 DSH 后的 REST 探活
 
@@ -898,9 +1111,9 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | `src/prompt.ts` | L1 改用 `renderL1`；`refreshCache` 读 CCv3；新增 `aiwu:lore` section（第二批）；修 P0-6（refresh 串行化）+ P0-7（清缓存降级） | ~150 行改动 | 我 |
 | `src/store.ts` | `readCard` 读时归一；`writeCard` 接受 CCv3 / 旧视图并做投影 + 备份；`ensureIndex`/`seedPresets`/`listCharacters` 改读 `data.name`；按角色串行队列；`readJson` 损坏备份；`forget`/`rotateOpening`/`relationState` 改路径 | ~250 行改动 | 我 |
 | `src/index.ts` | 仅钩子接线：`pre-step` 把 `recentTexts` + `turnKey` 传给 `prompt.refresh` | ~20 行 | 我 |
-| `presets/*/card.json`（×3） | 转 CCv3，内容逐字保留（性格/声线/开场一个不丢） | 3 个文件 | 我 |
-| `scripts/verify-tavern.mjs` | **新建**：V1–V15 断言 | ~400 行 | 我 |
-| `src/web.ts` | **过渡期兼容投影**（§6.5）：`/character`、`/characters`、`/character/save` 各 1 处 | ~15 行 | **不在我的写盘范围** → 请 Lead 指派（distill-designer 名下） |
+| `presets/*/card.json`（×3） | **不改**（保持旧格式，当迁移回归样本，Lead P0-2） | 0 行 | 我 |
+| `scripts/verify-tavern.mjs` | **新建**：V1–V19 断言 | ~450 行 | 我 |
+| `src/web.ts` | **过渡期双视图**（§6.5 / Q1）：`/character` 加 `ccv3`、`/characters` 加 `ccv3`、`/character/save` 双入口 | ~20 行 | **我**（Lead 已把 `web.ts` 交给我，distill-designer 不再动它） |
 | `client/**` | 编辑器读 `ccv3`/`fields`、世界书编辑 UI、长度警告 UI | — | ui-designer |
 | `distill/flow.md` + 契约 | 蒸馏输出改成 CCv3 JSON（见 §8.1） | — | distill-designer |
 
@@ -954,15 +1167,19 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 
 ---
 
-## 9. 待 Leader 拍板（3 条）
+## 9. 决策记录（原「待拍板」，Lead 已逐条拍定 2026-10-30 21:10）
 
-| # | 问题 | 我的建议 | 不定的后果 |
-|---|---|---|---|
-| **Q1** | REST 过渡契约：`card` 保持旧 34 字段视图 + 新增 `ccv3`/`fields`？还是硬切？ | **双视图过渡**（§6.5）。`web.ts` 不在我写盘范围，需要派 15 行给人 | 面板空白（P0）或客户端改动阻塞 |
-| **Q2** | 是否启动时批量迁移现有卡（落盘）？ | **不做**。读时归一 + 首次写盘落盘 + 备份，足够 | 盘上长期混两种格式；好处是没有"启动即改盘" |
-| **Q3** | 记忆锚点是否等价于世界书 `constant` 条目？ | **保持独立**（`awiu.memoryAnchors`），L1 里当 constant 块渲染 | 若并入世界书，`awu_forget`/面板都要改世界书编辑，复杂度上升 |
+| # | 问题 | 结论 |
+|---|---|---|
+| **Q1** | REST 过渡契约 | ✅ **先兼容、后切换**：`GET /character` 的 `card` 保持旧 34 字段视图（面板不改也能活）+ **新增** `ccv3`；`POST /character/save` 双入口（带 `spec === 'chara_card_v3'` 按 CCv3 落盘，否则按旧视图**以现有 CCv3 为底**合并）。`src/web.ts` **改归我**（distill-designer 已交出该文件） |
+| **Q2** | 启动时批量迁移 | ✅ **不做**。读时归一 + 首次写盘落盘 + `card.v1.bak.json` 兜底 |
+| **Q3** | 记忆锚点 vs 世界书 constant 条目 | ✅ **保持独立**（`awiu.memoryAnchors`）。Lead 补充了产品级理由：世界书是**作品设定**（可导出、别人能用），记忆锚点是**这段关系的私有产物**——混在一起会让导出的卡把私事带出门，那是隐私问题 |
+| **P0-1** | 忘却静默失效 | ✅ 规则见 §2.7（全卡按句手术 + `scanned` 计数 + V16 自检） |
+| **P0-2** | 预置卡 | ✅ **保持旧格式**，全新安装时真跑迁移 = 天天回归（§2.5） |
+| **P0-3** | 旧 `renderCharacterCard` | ✅ **删除**，不并存（附录 A） |
+| **P0-4** | store 两个 P0（无互斥 / 损坏当不存在） | ✅ 本轮一起修（§6.6） |
 
-以及在 §4.3 里列了 **13 个世界书决策点**，等调研报告到位后我一次性收口。
+**仍未定的只剩 §4.3 的 13 个世界书决策点**——等 `06-tmp\tavern-study\REPORT.md`。实现上先把它们集中成 `src/tavern.ts` 顶部的一组 `LORE_DEFAULTS` 常量，报告到位只改常量与匹配细节，不改接口。
 
 ---
 
@@ -970,7 +1187,7 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 
 | 现有位置 | 现状 | 改动 |
 |---|---|---|
-| `src/prompt.ts:93` `renderCharacterCard` | 渲染旧 9 组中文键 | **保留（过渡期给 `toLegacyView` 用）**，但 L1 改走 `tavern.renderL1` |
+| `src/prompt.ts:93` `renderCharacterCard` | 渲染旧 9 组中文键 | **删除**（Lead P0-3）：L1 只走 `tavern.renderL1`。留着就是两套渲染并联、token 翻倍。`toLegacyView` 是数据视图（给 `web.ts`/客户端读），与渲染无关 |
 | `src/prompt.ts:336` `refreshCache` | `this.cache = {}` 先清空（P0-7） | 构造新对象整体替换 |
 | `src/prompt.ts:301` `refresh` | 串行化坏了（P0-6） | 改成 promise 链 + token 校验 |
 | `src/prompt.ts:382` `renderActiveSection` | 拼卡片/时间差/会话/日记/模式/关系 | 拼 `renderL1(...)` + extras（顺序见 §3.2） |
@@ -995,3 +1212,25 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | 常驻人设 | 「常规人设（每轮常驻）」 | 「基础人设」「核心提示词」 |
 | 按需注入 | 「按需注入的设定」 | 「动态 RAG」 |
 | 插件扩展区 | 「`extensions.aiwu`（插件私有字段）」 | 「自定义字段」 |
+
+## 附录 C：旧键名 → 中文显示名（`LEGACY_GROUP_TITLES` 用，**别删**）
+
+ui-designer 的建议已采纳：`client/distill.tsx:31` 还依赖 `GROUPS`，迁移展示、旧卡预览、"这张卡是从旧格式迁来的"
+都需要这套显示名。所以 `client/card-schema.ts` 保留一份 `LEGACY_GROUP_TITLES`，宿主侧 `src/tavern.ts` 也导出同名表
+（`toLegacyView` 生成的视图键名与之一一对应），两边**不许各自发明**。
+
+| 旧键 | 显示名（分组） | 字段显示名 |
+|---|---|---|
+| `basic` | 基本信息 | 姓名 / 年龄 / 身份 / 一句话背景 |
+| `voice` | 声线基因 | 对话节奏 / 爱用句式 / 自称 / 对用户的称呼 / 情绪口头禅 / 禁忌词 / 非语言小动作 |
+| `personality` | 性格核心 | 关键词 / 内在矛盾 / 对待亲近之人 |
+| `relationship` | 关系定位 | 关系起点 / 角色怎么称呼用户 / 用户怎么称呼角色 |
+| `world` | 故事背景 | 来处 / 落差 / 如今的日子 / 你与他的旧 |
+| `memory_anchor` | 记忆锚点 | 要点 |
+| `dynamic_state` | 动态状态 | 当前情绪 / 近况 / 此刻在做什么 |
+| `interaction_pref` | 互动偏好 | 回复长度倾向 / 表情使用 / 话题舒适区 / 雷区 |
+| `user_persona` | 你的身份 | 你是谁 / 与 TA 的关系 / 共同经历 |
+| `opening` / `openings` | 开场白 | 开场白 / 备选开场 |
+
+> 三条线共用这张表；`toLegacyView` 必须**逐字**用这些键名，否则编辑器读不到。
+> 新增字段时：先改 `GROUPS`，再改这张表，再改 `toLegacyView`/`fromLegacyView`——三处齐了才算加完（对齐 integration-contract §六-5 的老约定）。

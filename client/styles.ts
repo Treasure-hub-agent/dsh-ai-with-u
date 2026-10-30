@@ -39,7 +39,7 @@ const CSS = `
 /* 弹层是 createPortal 到 document.body 的，挂在 .awu-scope / .awu-layer 之外，
    所以 scrim / dialog 自身也必须进这张变量清单，否则 var(--awu-*) 全是无效声明
    （背景、圆角、z-index、入场动画会集体退化）。
-   注意：下面浅色块的 `.awu-*` 类名清单必须与本段**逐字一致**，两边同步增删。 */
+   注意：下面浅色块的 awu-* 类名清单必须与本段**逐字一致**，两边同步增删。 */
 .awu-scope,
 .awu-layer,
 .awu-scrim,
