@@ -27,6 +27,11 @@
   }
   #root { position: relative; z-index: 2; }
 </style>
+<script>
+  /* 深色态自检：地址带 #dark 时给 html 打上宿主的深色标记（插件样式只认这个属性）。
+     加这一行是为了能在沙盒里同时验收深浅两态，不需要去改活着的 DSH 主题。 */
+  if (location.hash === '#dark' || location.search.indexOf('dark') >= 0) document.documentElement.setAttribute('data-ds-dark-theme', '');
+</script>
 </head>
 <body>
   <div class="deco d1"></div>

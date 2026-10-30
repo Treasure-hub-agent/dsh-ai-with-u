@@ -53,21 +53,33 @@ const CSS = `
 .awu-scrim,
 .awu-dialog {
   /* ---- 材质：三层玻璃 ----
-     layer-1 = 面板底（最厚），layer-2 = 卡片/分组，layer-3 = 浮起元素（输入框、分段器底）。 */
-  --awu-glass-1: rgba(28, 28, 30, .72);
-  --awu-glass-2: rgba(58, 58, 60, .42);
-  --awu-glass-3: rgba(120, 120, 128, .22);
+     layer-1 = 面板底（最厚），layer-2 = 卡片/分组，layer-3 = 浮起元素（输入框、分段器底）。
+     2026-10-30 主人第二次反馈「没啥液态玻璃感觉、偏白偏实」：面板底从 .72 降到 .58，
+     卡片反而比底更实（.34 → 更亮），靠「底更透、层更实」拉开深度；sheen 是顶部高光强度，
+     edge 是玻璃边缘的 1px 亮边 —— 这两样是玻璃在平背景上也认得出的关键。 */
+  --awu-glass-1: rgba(20, 20, 24, .66);
+  --awu-glass-2: rgba(72, 72, 82, .44);
+  /* 卡面 hover 档：只提亮一档（把灰蓝往白推），不叠加灰罩 */
+  --awu-glass-2-hi: rgba(98, 98, 112, .52);
+  --awu-glass-3: rgba(120, 120, 128, .20);
+  --awu-shadow-card: 0 1px 2px rgba(0, 0, 0, .18);
+  --awu-shadow-card-hi: 0 14px 34px rgba(0, 0, 0, .42);
+  --awu-sheen: rgba(255, 255, 255, .13);
+  --awu-glass-edge: rgba(255, 255, 255, .20);
   /* 大面积（面板底）用轻 blur；强 blur 只留给小面积元素（卡片/按钮/弹层内容），否则 1120×900 会掉帧 */
-  --awu-blur-panel: blur(16px) saturate(160%);
+  --awu-blur-panel: blur(20px) saturate(150%);
   --awu-blur: blur(30px) saturate(180%);
   --awu-specular: inset 0 1px 0 rgba(255, 255, 255, .20);
-  --awu-scrim-bg: rgba(0, 0, 0, .34);
+  --awu-scrim-bg: rgba(0, 0, 0, .36);
+  /* 降级用：prefers-reduced-transparency 时把玻璃换成实心底，必须有这一档，
+     否则「关了透明」还是半透明（旧实现直接写 --awu-surface，就是那个 bug）。 */
+  --awu-surface-opaque: #1e1e21;
 
   /* ---- 墨色 4 级（实测比值见设计文档 §2；faint 只作线条，禁止用于文字） ---- */
   --awu-ink: #f2f2f7;                          /* 12.49:1 */
-  --awu-ink-dim: rgba(235, 235, 245, .75);     /*  7.31:1 正文 */
-  --awu-ink-mute: rgba(235, 235, 245, .60);    /*  5.29:1 小字下限 */
-  --awu-ink-faint: rgba(235, 235, 245, .28);   /*  2.26:1 仅线条/装饰 */
+  --awu-ink-dim: rgba(235, 235, 245, .82);     /* 正文：玻璃更透以后提一档，抵掉背景串色 */
+  --awu-ink-mute: rgba(235, 235, 245, .68);    /* 小字下限 */
+  --awu-ink-faint: rgba(235, 235, 245, .30);   /* 仅线条/装饰 */
 
   /* ---- 线 / 面（surface-* 是 glass-* 的语义别名，外部模块按老名字引用） ---- */
   --awu-line: rgba(255, 255, 255, .10);
@@ -102,18 +114,25 @@ const CSS = `
   --awu-rose: #e58a78;                         /*  5.47:1 */
   --awu-pink: #f2b8c6;                         /*  8.26:1 */
 
-  /* ---- 字体：无衬线为主；衬线只给「角色名 + 日记正文」 ---- */
-  --awu-sans: -apple-system, "SF Pro Text", "SF Pro Display", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-  --awu-serif: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif SC", "Georgia", serif;
+  /* ---- 字体：正文与控件统一走无衬线黑体（2026-10-30 主人：用黑体会好很多）。
+     黑体优先级按「系统里真装了的」排：macOS PingFang → Windows 微软雅黑 UI/雅黑 →
+     Linux/通用 Noto Sans SC。衬线只留给「角色名 + 日记正文」两处辨识度。 */
+  --awu-sans: -apple-system, "SF Pro Text", "SF Pro Display", "PingFang SC", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "Segoe UI", sans-serif;
+  /* 衬线补上 Windows 的宋体：旧栈里 Georgia 是拉丁衬线，中文会掉回系统默认，
+     结果「角色名用宋体」这条设计在 Windows 上根本没生效。 */
+  --awu-serif: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif SC", "SimSun", serif;
   --awu-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", monospace;
 
-  /* ---- 字号 9 档（1120 大窗：比 452 时代整体上浮 1px；中文下限 12px） ---- */
-  --awu-fs-micro: 10px;
-  --awu-fs-caption: 11px;
-  --awu-fs-label: 12px;
-  --awu-fs-body: 13px;
-  --awu-fs-body-lg: 14px;
-  --awu-fs-control: 15px;
+  /* ---- 字号 9 档（1120 大窗；中文正文下限 12→13px）----
+     2026-10-30 主人第二次反馈「字体辨认困难」：11/12/13 三档整体上抬 1px，
+     全部落在整数像素上（避免 0.5px 造成的发虚）。 */
+  --awu-fs-micro: 11px;
+  --awu-fs-caption: 12px;
+  --awu-fs-label: 13px;
+  --awu-fs-body: 14px;
+  --awu-fs-body-lg: 15px;
+  --awu-fs-control: 16px;
   --awu-fs-title: 18px;
   --awu-fs-headline: 22px;
   --awu-fs-display: 26px;
@@ -193,17 +212,24 @@ html:not([data-ds-dark-theme]) .awu-scope,
 html:not([data-ds-dark-theme]) .awu-layer,
 html:not([data-ds-dark-theme]) .awu-scrim,
 html:not([data-ds-dark-theme]) .awu-dialog {
-  --awu-glass-1: rgba(255, 255, 255, .72);
-  --awu-glass-2: rgba(255, 255, 255, .62);
-  --awu-glass-3: rgba(120, 120, 128, .14);
-  --awu-blur-panel: blur(16px) saturate(170%);
-  --awu-specular: inset 0 1px 0 rgba(255, 255, 255, .92);
-  --awu-scrim-bg: rgba(0, 0, 0, .20);
+  --awu-glass-1: rgba(255, 255, 255, .54);
+  --awu-glass-2: rgba(255, 255, 255, .68);
+  /* 卡面 hover 档：比静息更白（卡浮起来 = 挡住更多背景） */
+  --awu-glass-2-hi: rgba(255, 255, 255, .86);
+  --awu-glass-3: rgba(120, 120, 128, .13);
+  --awu-shadow-card: 0 1px 2px rgba(30, 30, 40, .05);
+  --awu-shadow-card-hi: 0 14px 32px rgba(30, 30, 40, .16), 0 2px 6px rgba(30, 30, 40, .08);
+  --awu-sheen: rgba(255, 255, 255, .46);
+  --awu-glass-edge: rgba(255, 255, 255, .78);
+  --awu-blur-panel: blur(18px) saturate(185%) brightness(1.03);
+  --awu-specular: inset 0 1px 0 rgba(255, 255, 255, .95);
+  --awu-scrim-bg: rgba(18, 20, 26, .16);
+  --awu-surface-opaque: #f6f6f8;
 
   --awu-ink: #1c1c1e;                          /* 16.44:1 */
-  --awu-ink-dim: rgba(60, 60, 67, .82);        /*  6.22:1 */
-  --awu-ink-mute: rgba(60, 60, 67, .72);       /*  4.69:1 */
-  --awu-ink-faint: rgba(60, 60, 67, .28);      /*  1.65:1 仅线条 */
+  --awu-ink-dim: rgba(60, 60, 67, .88);        /* 正文 */
+  --awu-ink-mute: rgba(60, 60, 67, .78);       /* 小字下限 */
+  --awu-ink-faint: rgba(60, 60, 67, .30);      /* 仅线条 */
 
   --awu-line: rgba(60, 60, 67, .14);
   --awu-line-strong: rgba(60, 60, 67, .24);
@@ -228,7 +254,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   --awu-rose: #c0392b;
   --awu-pink: #b03a63;
 
-  --awu-shadow: 0 24px 60px rgba(30, 30, 34, .16), 0 2px 8px rgba(30, 30, 34, .08);
+  --awu-shadow: 0 34px 84px rgba(28, 30, 40, .24), 0 6px 20px rgba(28, 30, 40, .10);
   --awu-scroll: rgba(60, 60, 67, .30);
   --dsh-scrollbar-thumb-hover: rgba(60, 60, 67, .48);
 }
@@ -421,12 +447,21 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   width: min(var(--awu-panel-w), calc(100vw - 32px));
   height: var(--awu-panel-max-h);
   max-height: var(--awu-panel-max-h);
-  border: 1px solid var(--awu-line-strong);
+  border: 1px solid var(--awu-glass-edge);
   border-radius: var(--awu-r-xl);
-  background: var(--awu-surface);
+  /* 玻璃本体：径向 sheen（左上/顶部高光）+ 一层极淡的竖向亮带 + 透光底色。
+     这三层都在内容之下，不遮字；靠它们，纯白背景上也能看出「这块是玻璃」。 */
+  background-image:
+    radial-gradient(120% 78% at 50% -22%, var(--awu-sheen) 0%, transparent 62%),
+    linear-gradient(180deg, var(--awu-glass-edge) 0%, transparent 12%);
+  background-color: var(--awu-glass-1);
   backdrop-filter: var(--awu-blur-panel);
   -webkit-backdrop-filter: var(--awu-blur-panel);
-  box-shadow: var(--awu-shadow), 0 0 0 100vmax var(--awu-scrim-bg), var(--awu-specular);
+  box-shadow:
+    var(--awu-shadow),
+    0 0 0 100vmax var(--awu-scrim-bg),
+    inset 0 1px 0 var(--awu-glass-edge),
+    inset 0 0 0 1px color-mix(in srgb, var(--awu-glass-edge) 40%, transparent);
   color: var(--awu-ink);
   font-family: var(--awu-sans);
   font-size: var(--awu-fs-body);
@@ -455,6 +490,9 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 左栏比右栏再压一层极淡的底：两栏同材质时中间那道分隔线太弱，列表会「浮」在面板上。
+     只加 3% 的灰，不破坏通透。 */
+  background: var(--awu-surface-strip);
   border-right: 1px solid var(--awu-line);
   overflow: hidden;
 }
@@ -502,7 +540,12 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   padding: var(--awu-gap-5) var(--awu-gutter) var(--awu-gap-4);
 }
 
-.awu-railHead > * { margin: 0; }
+/* 子块 margin 归零 —— 必须写到「两个类」的权重。写成 .awu-railHead > * 时与后面的
+   .awu-tabs 同为 (0,1,0)，而 .awu-tabs 在文件里更靠后，会赢回去；实测分段器被夹成
+   双份 gutter（207px 宽），「角色簿」直接变成省略号。 */
+.awu-railHead > .awu-distill-entry,
+.awu-railHead > .awu-tabs,
+.awu-railHead > .awu-toolbar { margin: 0; }
 
 /* 唯一断点：<900 收成单栏（详情页占满、列表退回全宽） */
 @media (max-width: 900px) {
@@ -670,11 +713,11 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-sigilBody { min-width: 0; flex: 1; }
 
 .awu-sigilName {
-  /* 衬线只给「人物感」：当前启用角色的名字 */
-  font-family: var(--awu-serif);
+  /* 与角色卡名一致：黑体 600 + 角色金（衬线已收回日记正文） */
+  font-family: var(--awu-sans);
   font-size: var(--awu-fs-headline);
   font-weight: 600;
-  letter-spacing: .02em;
+  letter-spacing: .01em;
   line-height: var(--awu-lh-tight);
   color: var(--awu-gold);
   white-space: nowrap;
@@ -702,6 +745,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 }
 
 /* ================================================================ 统计条 */
+/* 仪表行：三条并排，靠 1px 发丝线分栏。数字用 24px 半粗 + 等宽数字，
+   单位退成 12px 淡墨压低 —— 旧版 18px 数字在这一行里显得空。 */
 .awu-stats {
   flex: none;
   display: grid;
@@ -711,6 +756,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   border-radius: var(--awu-r-lg);
   overflow: hidden;
   background: var(--awu-line);
+  box-shadow: var(--awu-specular);
 }
 
 .awu-stat {
@@ -718,28 +764,30 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--awu-gap-1);
+  gap: 0;
   padding: var(--awu-gap-5) var(--awu-gap-4);
-  background: var(--awu-surface-2);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(120% 80% at 50% -30%, var(--awu-sheen) 0%, transparent 70%);
 }
 
 .awu-statNum {
   font-family: var(--awu-sans);
-  font-size: var(--awu-fs-title);
+  font-size: var(--awu-fs-display);
   font-weight: 600;
-  line-height: var(--awu-lh-tight);
-  letter-spacing: -.01em;
-  color: var(--awu-ink);
   font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  letter-spacing: -.02em;
+  color: var(--awu-ink);
 }
 
+/* 单位：跟数字同一基线，但小一号、淡一档，不抢数字 */
 .awu-statNum small {
   font-family: var(--awu-sans);
-  font-size: var(--awu-fs-caption);
+  font-size: var(--awu-fs-label);
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: .02em;
   color: var(--awu-ink-mute);
-  margin-left: var(--awu-gap-2);
+  margin-left: var(--awu-gap-3);
 }
 
 /* ================================================================ 分段控制（iOS segmented） */
@@ -866,24 +914,33 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   padding: var(--awu-gap-6) var(--awu-gap-6) var(--awu-gap-5);
   border: 1px solid var(--awu-line);
   border-radius: var(--awu-r-lg);
-  background: var(--awu-surface-2);
+  /* 卡面自己带一层顶部高光（径向），hover 时只提亮不压暗 —— iOS 手感：
+     点上去像纸片被灯照亮，而不是被灰罩住。高光画在 background-image 上，
+     不开伪元素，免得盖住文字。 */
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(120% 70% at 50% -24%, var(--awu-sheen) 0%, transparent 62%);
   text-align: left;
   font: inherit;
   color: inherit;
   cursor: pointer;
   overflow: hidden;
-  box-shadow: var(--awu-specular);
-  transition: border-color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease),
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
+  transition: border-color var(--awu-dur-2) var(--awu-ease), background-color var(--awu-dur-2) var(--awu-ease),
     box-shadow var(--awu-dur-2) var(--awu-ease), transform var(--awu-dur-2) var(--awu-ease);
   animation: awu-rise var(--awu-dur-4) var(--awu-ease) backwards;
 }
 
+/* hover：上浮 2px + 卡面提亮一档 + 阴影加深。刻意不写 background: --awu-glass-3，
+   那是灰色叠加层，实测整套变暗（主人原话「鼠标移上去变暗不太好看」）。 */
 .awu-card:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
   border-color: var(--awu-line-strong);
-  background: var(--awu-glass-3);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .22), var(--awu-specular);
+  background-color: var(--awu-glass-2-hi);
+  box-shadow: var(--awu-shadow-card-hi), var(--awu-specular);
 }
+
+/* 按下：回到原位，给一点「压下去」的反馈 */
+.awu-card:active { transform: translateY(0); box-shadow: var(--awu-shadow-card), var(--awu-specular); }
 
 .awu-card:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; }
 
@@ -953,8 +1010,9 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-cardName {
   display: block;
   max-width: 100%;
-  /* 名字：衬线 + 角色色 */
-  font-family: var(--awu-serif);
+  /* 名字：黑体 600 + 角色金。2026-10-30 试过宋体（SimSun），18px 上笔画发虚、
+     和 UI 的实心黑体打架；辨识度改由「金色 + 头像色块」承担，衬线只留日记正文。 */
+  font-family: var(--awu-sans);
   font-size: var(--awu-fs-title);
   font-weight: 600;
   letter-spacing: .01em;
@@ -1168,11 +1226,11 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-heroBody { min-width: 0; flex: 1 1 0%; }
 
 .awu-heroName {
-  /* 名字：衬线 + 角色色 */
-  font-family: var(--awu-serif);
+  /* 与卡片名一致：黑体 600 + 角色金 */
+  font-family: var(--awu-sans);
   font-size: var(--awu-fs-headline);
   font-weight: 600;
-  letter-spacing: .02em;
+  letter-spacing: .01em;
   line-height: var(--awu-lh-tight);
   color: var(--awu-gold);
 }
@@ -1190,35 +1248,39 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-heroActions { display: flex; gap: var(--awu-gap-3); flex-wrap: wrap; justify-content: flex-end; flex: none; }
 
 /* iOS inset grouped list：圆角分组 + 细分隔线 */
+/* 分组卡片：与角色卡同一套玻璃材质（描边 + 顶部高光），否则详情页左边是玻璃、
+   右边是「白纸」，两种材质拼在一起就显得简陋。 */
 .awu-section {
+  border: 1px solid var(--awu-line);
   border-radius: var(--awu-r-lg);
-  background: var(--awu-surface-2);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(130% 60% at 50% -22%, var(--awu-sheen) 0%, transparent 66%);
   overflow: hidden;
-  box-shadow: var(--awu-specular);
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
 }
 
 .awu-sectionHead {
   display: flex;
   align-items: center;
   gap: var(--awu-gap-4);
-  padding: var(--awu-gap-4) var(--awu-gap-6) var(--awu-gap-3);
+  padding: var(--awu-gap-4) var(--awu-gap-7) var(--awu-gap-3);
   border-bottom: 1px solid var(--awu-line);
-  font-size: var(--awu-fs-caption);
+  font-size: var(--awu-fs-label);
   font-weight: 600;
-  letter-spacing: .02em;
-  color: var(--awu-ink-mute);
+  letter-spacing: .04em;
+  color: var(--awu-ink-dim);
 }
 
 .awu-sectionHead .awu-count { font-family: var(--awu-sans); font-size: var(--awu-fs-caption); letter-spacing: 0; color: var(--awu-ink-mute); }
 
-.awu-sectionBody { padding: 0 var(--awu-gap-6); }
+.awu-sectionBody { padding: 0 var(--awu-gap-7); }
 
 /* iOS 表单行：左标签 + 右内容，行间发丝，最后一行去掉 */
 .awu-field {
   display: grid;
   grid-template-columns: 104px 1fr;
   gap: var(--awu-gap-6);
-  padding: var(--awu-gap-4) 0;
+  padding: var(--awu-gap-5) 0;
   font-size: var(--awu-fs-body);
   line-height: var(--awu-lh-body);
   border-bottom: 1px solid var(--awu-line);
@@ -1402,26 +1464,42 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 }
 
 /* ================================================================ 空态 / 载入 / 错误 */
+/* 2026-10-30 主人：「右栏那个巨大虚线框很空」。改法：
+   1) 虚线框整个去掉 —— 它把注意力吸到「一块空地」上；
+   2) 空态在栏内垂直居中（.awu-pane > .awu-empty 撑满并居中），不再堆在顶部；
+   3) 用一圈极淡的径向柔光代替边框，给「空」一点材质，而不是一个框。 */
 .awu-empty {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--awu-gap-4);
+  justify-content: center;
+  gap: var(--awu-gap-5);
   padding: var(--awu-gap-10) var(--awu-gap-8);
-  border: 1px dashed var(--awu-line-strong);
-  border-radius: var(--awu-r-lg);
+  border: none;
   text-align: center;
+  /* 柔光直接画在自身背景上：不开伪元素，避免 z-index 层级把光晕压到面板底下 */
+  background-image: radial-gradient(52% 38% at 50% 40%,
+    color-mix(in srgb, var(--awu-accent) 9%, transparent) 0%, transparent 72%);
+}
+
+.awu-pane > .awu-empty {
+  box-sizing: border-box;
+  min-height: 100%;
 }
 
 .awu-emptyMark {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: var(--awu-size-empty);
-  height: var(--awu-size-empty);
-  border-radius: var(--awu-r-pill);
-  background: var(--awu-surface-3);
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  border: 1px solid var(--awu-glass-edge);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(120% 80% at 50% -20%, var(--awu-sheen) 0%, transparent 64%);
   color: var(--awu-accent-text);
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
 }
 
 .awu-emptyTitle {
@@ -1433,10 +1511,10 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 }
 
 .awu-emptyHint {
-  font-size: var(--awu-fs-body);
+  font-size: var(--awu-fs-body-lg);
   line-height: var(--awu-lh-body);
   color: var(--awu-ink-mute);
-  max-width: 460px;
+  max-width: 360px;
 }
 
 /* 错误条：与状态带共用几何（alert 态） */
@@ -2338,6 +2416,19 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-modeLabel { font-size: var(--awu-fs-body-lg); font-weight: 600; }
 .awu-modeHint { font-size: var(--awu-fs-body); font-weight: 400; color: var(--awu-ink-mute); }
 
+/* ================================================================ 字体归属（最后统一裁决）
+   衬线只留两处辨识度：角色名（.awu-cardName / .awu-heroName / .awu-sigilName）与日记正文（.awu-line）。
+   其余一切「要读的字」——输入框、编辑分组、专注层、预览名——统一黑体：
+   Windows 上宋体小字发虚，主人反馈的「辨认困难」主要就来自这里。
+   写在文件末尾：与各处规则同权重，靠顺序赢，逐条改反而容易漏。 */
+.awu-textarea,
+.awu-editArea,
+.awu-editListText,
+.awu-editorName,
+.awu-previewName,
+.awu-focusInput,
+.awu-focusRead { font-family: var(--awu-sans); }
+
 /* ================================================================ 动效 */
 /* 入场：居中放大淡入。刻意不用 translateX —— 面板靠 left/right/margin:auto 居中，
    keyframes 里任何 transform 都会在那个 200ms 内覆盖布局，窗口会先偏到一边再跳回来。
@@ -2397,11 +2488,16 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  /* 降级 = 真·不透明。旧实现写 var(--awu-surface)（本身就是半透明玻璃），
+     于是「关掉透明」还是透的，等于降级无效。 */
   .awu-panel, .awu-dialog, .awu-focus, .awu-editorConfirmCard {
-    background: var(--awu-surface);
+    background-image: none;
+    background-color: var(--awu-surface-opaque);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
+  /* 玻璃描边在实心底上会显得脏，换成常规分隔线 */
+  .awu-panel { border-color: var(--awu-line-strong); box-shadow: var(--awu-shadow); }
 }
 
 @media (prefers-reduced-motion: reduce) {

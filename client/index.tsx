@@ -710,7 +710,7 @@ function CharacterDetailView(props: {
             <span>{t('detail.back')}</span>
           </button>
         </div>
-        <div className="awu-empty">
+        <div className="awu-empty" data-kind="error">
           <span className="awu-emptyMark"><IconAlert size={20} /></span>
           <span className="awu-emptyTitle">{t('detail.loadFailed')}</span>
           <span className="awu-emptyHint">{error}</span>
@@ -1395,6 +1395,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 {' '}
                 {t('active.none.hint')}
               </span>
+              {/* 状态带右侧原本空着，给一个直达入口：跳到角色簿 */}
+              <button
+                type="button"
+                className="awu-btn"
+                data-size="sm"
+                data-kind="ghost"
+                style={{ marginLeft: 'auto' }}
+                onClick={() => setTab('roster')}
+              >
+                {t('roster.pick')}
+                <span aria-hidden="true"> →</span>
+              </button>
             </div>
           )}
 
@@ -1464,7 +1476,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 {loading && <Skeleton shape="cards" />}
 
                 {!loading && roster.length === 0 && (
-                  <div className="awu-empty">
+                  <div className="awu-empty" data-kind="empty">
                     <span className="awu-emptyMark"><IconBook size={20} /></span>
                     <span className="awu-emptyTitle">{t('roster.empty.title')}</span>
                     <span className="awu-emptyHint">{t('roster.empty.hint')}</span>
@@ -1516,9 +1528,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     onEdit={() => { setEditError(''); setEditing(true) }}
                   />
                 ) : (
-                  <div className="awu-empty">
+                  <div className="awu-empty" data-kind="pick">
                     <span className="awu-emptyMark"><IconBook size={20} /></span>
                     <span className="awu-emptyHint">{t('roster.pick')}</span>
+                    <span className="awu-emptySub">{t('roster.pickHint')}</span>
                   </div>
                 ))}
 
@@ -1600,7 +1613,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 </div>
               </div>
             ) : (
-              <div className="awu-empty">
+              <div className="awu-empty" data-kind="diary">
                 <span className="awu-emptyMark"><IconQuill size={20} /></span>
                 <span className="awu-emptyHint">{t('diary.pick')}</span>
               </div>
