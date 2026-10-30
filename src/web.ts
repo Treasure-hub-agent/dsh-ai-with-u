@@ -1,0 +1,338 @@
+/**
+ * AI WITH U · Web 路由
+ *
+ * 面板的全部数据接口。刻意做成纯 REST + JSON，前端只做渲染，
+ * 这样面板换成任何技术栈都不影响宿主逻辑。
+ *
+ * 约定：所有响应都是 `{ ok: true, ... }` / `{ ok: false, error }`，
+ * 与 `client/api.ts` 的信封一致；前端只需要认路径和字段名。
+ *
+ * 指令类接口（忘记 / 改日记 / 全新开始 / 彻底重置 / 关系 / 换一句开场）
+ * 与 `tools.ts` 里的 awu_* 工具**共用 Store 的同一份逻辑**，行为一致。
+ * @module dsh-ai-with-u/web
+ */
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Store, DiaryEditInput } from './store.js'
+import type { PromptController } from './prompt.js'
+
+export const ROUTE_PREFIX = '/_dsh/ai-with-u'
+
+interface JsonBody { [key: string]: unknown }
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  const bytes = Buffer.from(JSON.stringify(body))
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Content-Length', String(bytes.length))
+  res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.writeHead(status)
+  res.end(bytes)
+}
+
+async function readBody(req: IncomingMessage): Promise<JsonBody> {
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of req) {
+    total += (chunk as Buffer).length
+    if (total > 4 * 1024 * 1024) throw new Error('请求体过大')
+    chunks.push(chunk as Buffer)
+  }
+  if (total === 0) return {}
+  const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('请求体必须是 JSON 对象')
+  return parsed as JsonBody
+}
+
+export interface RouteHandler {
+  (req: IncomingMessage, res: ServerResponse): Promise<void> | void
+}
+
+/** 写操作之后同步刷新提示词缓存（下一轮组装立刻生效）。 */
+async function afterWrite(prompt: PromptController): Promise<void> {
+  prompt.invalidate()
+  await prompt.refresh()
+}
+
+/** 构造全部路由。返回 method+path → handler 的映射，由 index.ts 统一注册。 */
+export function buildRoutes(store: Store, prompt: PromptController): Array<{ method: string; path: string; handler: RouteHandler }> {
+  const guard = (fn: RouteHandler): RouteHandler => async (req, res) => {
+    try {
+      await fn(req, res)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      send(res, 400, { ok: false, error: message })
+    }
+  }
+
+  /** 解析「操作哪个角色」：请求体显式 name 优先，否则用当前启用角色。 */
+  const resolveName = (body: JsonBody): string => {
+    const explicit = String(body['name'] ?? '').trim()
+    if (explicit !== '') return explicit
+    const active = prompt.characterName
+    if (active === undefined) throw new Error('缺少角色名，且当前没有启用角色')
+    return active
+  }
+
+  return [
+    // ------------------------------------------------------------ 总览 / 统计
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/overview`,
+      handler: guard(async (_req, res) => {
+        const list = await store.listCharacters()
+        const active = prompt.snapshot()
+        const sourceCount: Record<string, number> = {}
+        let totalMemory = 0
+        let totalTurns = 0
+        for (const item of list) {
+          sourceCount[item.source] = (sourceCount[item.source] ?? 0) + 1
+          totalMemory += item.memoryCount
+          const session = await store.readSession(item.name)
+          totalTurns += Number(session?.turn_count ?? 0) || 0
+        }
+        send(res, 200, {
+          ok: true,
+          root: store.root,
+          active,
+          relationTag: prompt.relationTag() ?? '',
+          stats: {
+            characters: list.length,
+            memoryEntries: totalMemory,
+            turns: totalTurns,
+            bySource: sourceCount,
+          },
+          recent: list.slice(0, 5).map(i => ({ name: i.name, lastActive: i.lastActive, memoryCount: i.memoryCount })),
+        })
+      }),
+    },
+    // ------------------------------------------------------------ 角色列表
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/characters`,
+      handler: guard(async (_req, res) => {
+        send(res, 200, { ok: true, characters: await store.listCharacters() })
+      }),
+    },
+    // ------------------------------------------------------------ 单角色详情
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/character`,
+      handler: guard(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const name = url.searchParams.get('name') ?? ''
+        const card = await store.readCard(name)
+        if (card === undefined) { send(res, 404, { ok: false, error: `找不到角色：${name}` }); return }
+        const relation = await store.relationState(name)
+        send(res, 200, {
+          ok: true,
+          name,
+          card,
+          diary: await store.readDiary(name),
+          session: (await store.readSession(name)) ?? {},
+          relation: { tag: `${name}（${relation.baseline}）`, bands: relation.bands, baseline: relation.baseline },
+          openingState: await store.openingState(name),
+        })
+      }),
+    },
+    // ------------------------------------------------------------ 保存角色卡
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/character/save`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = String(body['name'] ?? '').trim()
+        const card = body['card']
+        if (name === '') throw new Error('缺少角色名')
+        if (typeof card !== 'object' || card === null || Array.isArray(card)) throw new Error('card 必须是对象')
+        await store.writeCard(name, card as JsonBody)
+        if (prompt.characterName === name) await afterWrite(prompt)
+        send(res, 200, { ok: true, name })
+      }),
+    },
+    // ------------------------------------------------------------ 删除角色
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/character/delete`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = String(body['name'] ?? '').trim()
+        const withMemory = body['withMemory'] === true
+        if (name === '') throw new Error('缺少角色名')
+        if (prompt.characterName === name) await prompt.deactivate()
+        await store.deleteCharacter(name, withMemory)
+        send(res, 200, { ok: true })
+      }),
+    },
+    // ------------------------------------------------------------ 启用（插）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/activate`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = String(body['name'] ?? '').trim()
+        if (name === '') throw new Error('缺少角色名')
+        const state = await prompt.activate(name)
+        send(res, 200, { ok: true, active: state })
+      }),
+    },
+    // ------------------------------------------------------------ 退出（拔）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/deactivate`,
+      handler: guard(async (_req, res) => {
+        send(res, 200, { ok: true, active: await prompt.deactivate() })
+      }),
+    },
+    // ------------------------------------------------------------ 切换交互模式
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/mode`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const mode = body['mode'] === 'text' ? 'text' : 'text+action'
+        const name = prompt.characterName
+        if (name === undefined) throw new Error('当前没有启用角色')
+        const active = await prompt.setMode(mode)
+        // 会话里的 mode 同步落盘，跨客户端口径一致
+        const session = await store.readSession(name)
+        if (session !== undefined) await store.writeSession(name, { ...session, mode })
+        send(res, 200, { ok: true, active })
+      }),
+    },
+    // ------------------------------------------------------------ 日记编辑
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/diary/save`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = String(body['name'] ?? '').trim()
+        const entries = body['entries']
+        if (name === '') throw new Error('缺少角色名')
+        if (!Array.isArray(entries)) throw new Error('entries 必须是数组')
+        const normalized = entries.map((e) => {
+          const row = e as JsonBody
+          return {
+            date: String(row['date'] ?? ''),
+            timeline: Array.isArray(row['timeline']) ? row['timeline'].map(String) : [],
+            notes: Array.isArray(row['notes']) ? row['notes'].map(String) : [],
+          }
+        })
+        await store.writeDiary(name, normalized)
+        if (prompt.characterName === name) await afterWrite(prompt)
+        send(res, 200, { ok: true })
+      }),
+    },
+    // ------------------------------------------------------------ 忘记{事情}
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/forget`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = resolveName(body)
+        const keyword = String(body['keyword'] ?? '').trim()
+        if (keyword === '') throw new Error('缺少要忘记的关键词 keyword')
+        const result = await store.forget(name, keyword)
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...result })
+      }),
+    },
+    // ------------------------------------------------------------ 改日记{内容}
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/diary/edit`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = resolveName(body)
+        const text = String(body['text'] ?? '').trim()
+        if (text === '') throw new Error('缺少改写后的内容 text')
+        const patch: DiaryEditInput = {
+          text,
+          match: typeof body['match'] === 'string' ? body['match'] : undefined,
+          date: typeof body['date'] === 'string' ? body['date'] : undefined,
+          section: body['section'] === 'notes' ? 'notes' : body['section'] === 'timeline' ? 'timeline' : undefined,
+          index: typeof body['index'] === 'number' ? body['index'] : undefined,
+        }
+        const result = await store.editDiary(name, patch)
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...result })
+      }),
+    },
+    // ------------------------------------------------------------ 全新开始 / 彻底重置
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/session/reset`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = resolveName(body)
+        const scope = body['scope'] === 'all' ? 'all' : 'session'
+        // 彻底重置是显式二次确认操作：面板必须带 confirmAll: true
+        if (scope === 'all' && body['confirmAll'] !== true) {
+          throw new Error('彻底重置需要确认（confirmAll: true）')
+        }
+        const result = scope === 'all'
+          ? await store.resetStory(name)
+          : await store.resetSession(name)
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...result })
+      }),
+    },
+    // ------------------------------------------------------------ 关系
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/relation`,
+      handler: guard(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const explicit = (url.searchParams.get('name') ?? '').trim()
+        const name = explicit !== '' ? explicit : prompt.characterName
+        if (name === undefined) throw new Error('缺少角色名，且当前没有启用角色')
+        const state = await store.relationState(name)
+        send(res, 200, { ok: true, ...state, tag: `${state.character}（${state.baseline}）` })
+      }),
+    },
+    // ------------------------------------------------------------ 换一句开场
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/opening/next`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = resolveName(body)
+        const raw = body['candidates']
+        const candidates = Array.isArray(raw) ? raw.map(String) : []
+        const result = await store.rotateOpening(name, { candidates })
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...result })
+      }),
+    },
+    // ------------------------------------------------------------ 开局三态
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/opening/state`,
+      handler: guard(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const name = (url.searchParams.get('name') ?? '').trim()
+        if (name === '') throw new Error('缺少角色名')
+        send(res, 200, { ok: true, ...await store.openingState(name) })
+      }),
+    },
+    // ------------------------------------------------------------ 会话写入（供测试 / 外部客户端）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/session/commit`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const result = await store.commitTurn({
+          character: typeof body['name'] === 'string' && body['name'].trim() !== '' ? body['name'].trim() : undefined,
+          summary: typeof body['summary'] === 'string' ? body['summary'] : undefined,
+          user: typeof body['user'] === 'string' ? body['user'] : undefined,
+          assistant: typeof body['assistant'] === 'string' ? body['assistant'] : undefined,
+          topic: typeof body['topic'] === 'string' ? body['topic'] : undefined,
+          mood: typeof body['mood'] === 'string' ? body['mood'] : undefined,
+          turnId: typeof body['turnId'] === 'string' ? body['turnId'] : undefined,
+          count: body['count'] !== false,
+        })
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...result })
+      }),
+    },
+  ]
+}

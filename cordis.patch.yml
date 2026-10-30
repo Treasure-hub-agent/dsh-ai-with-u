@@ -1,0 +1,11 @@
+# dsh-ai-with-u bundle patch: mounts the 角色扮演管理器 plugin into a profile layer stack.
+#
+# 本文件使 dsh-ai-with-u 成为一个真正的 DSH bundle：
+# package.json 的 `dsh.bundle.patch` 指向这里，`dsh plugin add` / Web 插件页据此把
+# 本包追加进 profile 的 `dsh.profile.bundles`。
+#
+# Node half (exports ".") 运行在宿主进程：存储层 + 提示词插拔 + awu_* 工具 + /_dsh/ai-with-u 路由
+# Browser half (exports "./client") 由 package.json 的 `dsh.client` 声明，在 Web GUI 中加载。
+- insert:
+    - id: ai-with-u
+      name: 'dsh-ai-with-u'

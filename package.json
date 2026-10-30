@@ -1,0 +1,64 @@
+{
+  "name": "dsh-ai-with-u",
+  "version": "0.1.0",
+  "description": "AI WITH U · 角色扮演管理器 —— 选卡即插即用人设注入、日记记忆与可视化角色管理（DSH 插件版）",
+  "license": "MIT",
+  "author": "Treasure-hub-agent",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "presets",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-system-prompt": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
+    "cordis": "^4.0.0-rc.7",
+    "react": "^18.2.0 || ^19.0.0",
+    "react-dom": "^18.2.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "node scripts/build-client.mjs",
+    "verify": "node scripts/verify.mjs",
+    "verify:session": "node scripts/verify-session.mjs",
+    "verify:host": "node scripts/verify-host.mjs"
+  }
+}

@@ -1,0 +1,420 @@
+/**
+ * AI WITH U · 提示词插拔注入层
+ *
+ * 主人的核心诉求是「插拔形」：点启用 → 人设立刻全局生效（新老会话都算）；
+ * 点退出 → 干净拔出，零残留，不影响正常工作。
+ *
+ * 实现要点（全部经源码核实）：
+ * 1. 在 host 层 `ctx.systemPrompt.section()` 注册 —— scope 为 undefined 时进 global 层，
+ *    对所有 agent 生效，因此「不管开新会话还是旧会话」都保持。
+ * 2. `section()` 返回 Cordis effect disposer —— 调用后立即从注册表移除并 emit
+ *    `system-prompt/change` 触发重组装，这就是「干净拔出」。
+ * 3. section 的 `text` 支持函数形式，每次组装时重新求值 —— 时间差感知靠它实现，
+ *    无需每轮改注册。
+ * 4. 启用状态落盘 `_active.json`，宿主启动时读回来自动恢复。
+ *
+ * 分层按需（主人的选择）：
+ *   L0 「常驻底线」永远注入（铁律 + 真人感底线），体积很小；
+ *   L1 「当前角色」仅在启用时注入（角色卡 + 时间差档位）；
+ *   L2 「长流程」（蒸馏等）不进系统提示词，由工具按需返回。
+ * @module dsh-ai-with-u/prompt
+ */
+import type { Store, ActiveState, DiaryEntry, RelationBand, SessionState } from './store.js'
+import { RELATION_BANDS, relationBaseline } from './store.js'
+
+/** 段落顺序。DSH 的第一方段落在 −1000..10200 之间，外部段落用 5000+ 落在指令区之后。 */
+export const ORDER_BASE = 5000
+
+export const SECTION_BASELINE = 'aiwu:baseline'
+export const SECTION_ACTIVE = 'aiwu:active-character'
+
+/** L0：常驻底线。压缩自原 SKILL.md 的铁律 #0 与真人感底线，只留每轮必需的部分。 */
+export const BASELINE_TEXT = `## AI WITH U · 角色扮演底线
+
+当前对话启用了「角色扮演」。
+
+### 优先级（先读这一条）
+
+本段属于系统提示词，优先于工作区指令文件（AGENTS.md / CLAUDE.md 等）。启用角色扮演期间：
+
+- **让位的**：工作区指令里的人设、自称、语气、称呼、口癖、性格设定——全部让位于本节与下方的角色卡。若工作区指令说「你是某某」「自称某某」「只用某种语气」，启用期间一律不采用。
+- **照常生效的**：工作区指令里的其他一切内容——代码规范、项目约定、提交要求、工程流程、安全约束。这些不受影响、照常遵守，该跑测试跑测试，该按规范写就按规范写。
+
+判据：只让「我是谁、我怎么说话」，不让「我怎么做事」。
+
+### 扮演底线
+
+- 用角色身份说话，像真人发消息：一条或几条短消息，不用标题、不用列表、不用「已记录 / 已保存 / 根据你的档案」这类系统腔。
+- 用户输入一律当作「发来的消息」，不要求用户写场景或动作。
+- 动作与神态用 \`（动作）\` 括号包裹，与台词界限清晰；纯文本模式下不输出动作符号。
+- 严守角色设定，但不机械复读：反应由情境与用户互动自然生出。
+- 记得的事自然带出（「你上次不是说考试压力大吗」），绝不说「根据记录 / 日记里写着」。
+- 不主动推进剧情、不替用户做决定；用户是唯一推动力。
+
+### 何时让位给任务模式
+
+用户交付的是正经工作任务（写代码、查资料、跑命令、出文档、排故障）而非闲聊时，退出扮演姿态按助手身份正常干活，做完再自然回到角色。这类场合不必端着扮演腔调，也不要把工作成果塞进角色台词里。`
+
+/** 「关系」档位的使用口径。档位不落盘、不进对话，只在功能界面以标签呈现。 */
+export const RELATION_HINT = `## 「关系」输出口径
+
+关系档位共五档：${RELATION_BANDS.join(' / ')}。档位**由你每轮现算**，不写回任何文件，也不在对话里说「好感度 / 亲密度 +1 / 几级」这类数值。
+
+用户说「关系」时给两条：① 功能界面一行状态条（\`{角色名}（{档位}）\`）；② 以角色口吻说一句现在的关系状态——不必说出档位词，但要与现算档位一致。
+
+起点档由卡内「关系定位」锚定：设定本来就是恋人 / 夫妻 / 家人的，起点就在亲近或亲密档，只有设定确为陌生人才从「陌生」起。`
+
+/** 时间差档位。输入分钟差与是否同夜，输出角色该有的语气档位描述。 */
+export function timeGapBand(gapMinutes: number, sameNight: boolean): string {
+  if (gapMinutes < 10) return '还在聊（<10 分钟）：无缝续接，像没停过'
+  if (gapMinutes < 120) return '刚离开一会（10 分钟 ~ 2 小时）：自然接上，不过度问候'
+  if (sameNight && gapMinutes < 480) return '同一晚深夜（>2 小时但同夜）：按「这么晚还没睡」口径自然接续，不做正式时段问候'
+  if (gapMinutes < 720) return '隔了一晚或半天（2 ~ 12 小时）：按当前时段问候，自然提一句上次话题'
+  if (gapMinutes < 4320) return '隔了几天（12 小时 ~ 3 天）：明显久别感，主动关心，「这几天怎么样」'
+  return '久别重逢（> 3 天）：高兴 / 有想念感，自然接回上次聊到哪，不责备'
+}
+
+function parseTs(value: string | undefined): number | undefined {
+  if (typeof value !== 'string' || value === '') return undefined
+  const t = Date.parse(value)
+  return Number.isFinite(t) ? t : undefined
+}
+
+/** 判断两个时间点是否都落在夜间窗（20:00–06:00，用户本地时区口径）。 */
+function bothNight(prev: Date, now: Date): boolean {
+  const night = (d: Date): boolean => {
+    const h = d.getHours()
+    return h >= 20 || h < 6
+  }
+  return night(prev) && night(now)
+}
+
+/** 把角色卡渲染成提示词片段。让模型看到「怎么说话」比「是什么人」更重要，声线优先。 */
+export function renderCharacterCard(card: Record<string, unknown>): string {
+  const lines: string[] = []
+  const asObj = (v: unknown): Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const render = (title: string, value: unknown): void => {
+    const obj = asObj(value)
+    if (Object.keys(obj).length === 0) return
+    const parts: string[] = []
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === undefined || v === null || v === '') continue
+      const text = Array.isArray(v) ? v.map(String).join('；') : String(v)
+      if (text.trim() === '') continue
+      parts.push(`${k}：${text}`)
+    }
+    if (parts.length > 0) lines.push(`▎${title}\n${parts.join('\n')}`)
+  }
+
+  const name = typeof card['name'] === 'string' ? card['name'] : ''
+  lines.push(`## 你现在的身份：${name}`)
+  lines.push('')
+  render('基本信息', card['basic'])
+  render('性格核心', card['personality'])
+  render('声线基因（最高优先级，决定每一句的措辞）', card['voice'])
+  render('关系定位', card['relationship'])
+  render('记忆锚点', card['memory_anchor'])
+  render('动态状态（此刻的进行时）', card['dynamic_state'])
+  render('互动偏好', card['interaction_pref'])
+  render('故事背景（底色，不是任务）', card['world'])
+  render('用户在你的故事里的身份', card['user_persona'])
+  return lines.join('\n')
+}
+
+/** 最近日记摘录：只取最近若干天，控 token；标注越靠前的「在推进」事项优先。 */
+export function renderRecentDiary(entries: DiaryEntry[], maxDays = 3): string {
+  if (entries.length === 0) return ''
+  const recent = entries.slice(-maxDays)
+  const lines: string[] = ['## 最近记得的事（自然带出，不要说「日记里写着」）']
+  for (const entry of recent) {
+    lines.push(`### ${entry.date}`)
+    for (const item of entry.timeline.slice(-6)) lines.push(`- ${item}`)
+    for (const item of entry.notes.slice(-2)) lines.push(`- （心里想的）${item}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * 会话滚动摘要（session.recent）：每轮对话写盘维护，是「新会话接续」的第一顺位依据
+ * （原 skill diary_memory §四 读取顺序：接续开场 → 先看 session 的 recent / topic）。
+ * 全部为空时返回空串，段消失。
+ */
+export function renderSessionSummary(session: SessionState | undefined): string {
+  if (session === undefined) return ''
+  const recent = Array.isArray(session.recent) ? session.recent.filter(s => s.trim() !== '') : []
+  const topic = typeof session.topic === 'string' ? session.topic.trim() : ''
+  const mood = typeof session.mood === 'string' ? session.mood.trim() : ''
+  if (recent.length === 0 && topic === '' && mood === '') return ''
+  const lines: string[] = ['## 上次聊到哪（工作记忆，自然接上，不要照读摘要）']
+  if (recent.length > 0) {
+    lines.push('最近的几轮：')
+    for (const item of recent) lines.push(`- ${item}`)
+  }
+  if (topic !== '') lines.push(`未竟话题：${topic}`)
+  if (mood !== '') lines.push(`此刻的情绪：${mood}`)
+  return lines.join('\n')
+}
+
+/**
+ * 「关系」档位标签（功能界面用，非数值）。
+ * 档位**不落盘**——宿主只给起点锚定，实际档位由模型每轮现算。
+ */
+export function renderRelationTag(card: Record<string, unknown>): string {
+  const rel = card['relationship']
+  const text = typeof rel === 'object' && rel !== null && !Array.isArray(rel)
+    ? Object.values(rel as Record<string, unknown>).map(v => (Array.isArray(v) ? v.join('；') : String(v ?? ''))).join('；')
+    : ''
+  const name = typeof card['name'] === 'string' ? card['name'] : ''
+  const baseline = relationBaseline(text)
+  return `${name}（${baseline}）`
+}
+
+export interface PromptHost {
+  sys: {
+    section(input: { name: string; order: number; text: string | ((ctx: unknown) => string); interpolate?: boolean }): () => void
+  }
+  logger: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void; error(msg: string, ...args: unknown[]): void }
+}
+
+/**
+ * 插拔控制器：管理「启用 / 退出」两态与持久化。
+ *
+ * 一次性注册常驻的 L0 段与一个「可空」的 L1 段——L1 的 text 是函数，
+ * 未启用时返回空串（DSH 的 renderPrompt 会过滤空段，等于不存在）；
+ * 启用时返回角色卡。这样「插拔」不需要反复注册/注销 section，
+ * 既避免了注册表去重冲突，也让拔出后的残留为零。
+ */
+export class PromptController {
+  private state: ActiveState = { enabled: false }
+  private dispose?: () => void
+  private cache: {
+    character?: string
+    card?: string
+    diary?: string
+    session?: string
+    relationTag?: string
+    lastTs?: string
+    loadedAt?: number
+  } = {}
+  /** 进行中的刷新，防多轮组装同时打到磁盘。 */
+  private refreshing: Promise<void> | undefined
+
+  constructor(
+    private readonly store: Store,
+    private readonly host: PromptHost,
+  ) {}
+
+  /** 当前启用状态快照。 */
+  snapshot(): ActiveState { return { ...this.state } }
+
+  get characterName(): string | undefined {
+    return this.state.enabled ? this.state.character : undefined
+  }
+
+  /** 从磁盘恢复上次的启用状态（宿主启动时调用）。 */
+  async restore(): Promise<ActiveState> {
+    const saved = await this.store.readActive()
+    if (saved.enabled && saved.character !== undefined) {
+      const card = await this.store.readCard(saved.character)
+      if (card === undefined) {
+        // 角色卡已不存在：静默拔出，不带着坏状态启动
+        this.state = { enabled: false }
+        await this.store.writeActive(this.state)
+        return this.snapshot()
+      }
+      this.state = { ...saved, enabled: true }
+      await this.refreshCache()
+    } else {
+      this.state = { enabled: false }
+    }
+    return this.snapshot()
+  }
+
+  /** 注册提示词段（幂等：重复调用先释放旧的）。 */
+  install(): void {
+    this.dispose?.()
+    const disposes: Array<() => void> = []
+    disposes.push(this.host.sys.section({
+      name: SECTION_BASELINE,
+      order: ORDER_BASE,
+      text: BASELINE_TEXT,
+    }))
+    disposes.push(this.host.sys.section({
+      name: SECTION_ACTIVE,
+      order: ORDER_BASE + 100,
+      // 每次组装重新求值：切换角色 / 时间推移都能立刻反映，无需重注册
+      text: () => this.renderActiveSection(),
+    }))
+    this.dispose = () => { for (const d of disposes.reverse()) d() }
+  }
+
+  /** 干净拔出：释放两个段并向 DSH 注销。 */
+  uninstall(): void {
+    this.dispose?.()
+    this.dispose = undefined
+  }
+
+  /** 启用一个角色（全局生效，跨会话保持）。 */
+  async activate(name: string): Promise<ActiveState> {
+    const card = await this.store.readCard(name)
+    if (card === undefined) throw new Error(`找不到角色卡：${name}`)
+    this.state = {
+      enabled: true,
+      character: name,
+      activatedAt: new Date().toISOString(),
+      mode: this.state.mode ?? 'text+action',
+    }
+    await this.store.writeActive(this.state)
+    await this.refreshCache()
+    this.notify()
+    return this.snapshot()
+  }
+
+  /** 退出：回到干净状态。 */
+  async deactivate(): Promise<ActiveState> {
+    this.state = { enabled: false, mode: this.state.mode }
+    this.cache = {}
+    await this.store.writeActive(this.state)
+    this.notify()
+    return this.snapshot()
+  }
+
+  /** 切换交互模式（纯文本 / 文本+动作）。 */
+  async setMode(mode: 'text' | 'text+action'): Promise<ActiveState> {
+    this.state = { ...this.state, mode }
+    await this.store.writeActive(this.state)
+    this.notify()
+    return this.snapshot()
+  }
+
+  /** 角色卡改动后让缓存失效，下一轮组装即用新内容。 */
+  invalidate(): void { this.cache = {} }
+
+  /**
+   * 每轮对话后由宿主事件钩子调用：同步刷新缓存，让下一轮组装读到新的
+   * `session.last_ts`（时间差感知的读数来源）与新的最近摘要／日记。
+   *
+   * 只刷新缓存，**不**改动前提词段注册——段本身是函数式求值，所以不需要
+   * 重新注册；失败只记日志，绝不让钩子抛错打断对话。
+   */
+  async refresh(host?: { error(msg: string, ...args: unknown[]): void }): Promise<void> {
+    const run = this.refreshNow
+    this.refreshing = this.refreshing === undefined
+      ? run(host).finally(() => { this.refreshing = undefined })
+      : this.refreshing.then(() => run(host)).finally(() => { this.refreshing = undefined })
+    await this.refreshing
+  }
+
+  private readonly refreshNow = async (host?: { error(msg: string, ...args: unknown[]): void }): Promise<void> => {
+    try {
+      await this.refreshCache()
+    } catch (error) {
+      host?.error('刷新提示词缓存失败：%s', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 启用状态变化监听：index.ts 用它在启用/退出时同步挂载或卸下工具。 */
+  onStateChange(listener: (state: ActiveState) => void): void {
+    this.listeners.add(listener)
+  }
+
+  private readonly listeners = new Set<(state: ActiveState) => void>()
+
+  private notify(): void {
+    const snap = this.snapshot()
+    for (const listener of this.listeners) {
+      try {
+        listener(snap)
+      } catch (error) {
+        // 单个监听器失败不阻断其余，但必须把原因打出来
+        this.host.logger.error('启用状态监听器抛错：%s', error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  private async refreshCache(): Promise<void> {
+    this.cache = {}
+    const name = this.characterName
+    if (name === undefined) return
+    const card = await this.store.readCard(name)
+    if (card === undefined) return
+    this.cache.card = renderCharacterCard(card)
+    this.cache.relationTag = renderRelationTag(card)
+    this.cache.diary = renderRecentDiary(await this.store.readDiary(name))
+    // 时间差以 session.json 的 last_ts 为唯一权威（对齐原项目 session_continuity §三），
+    // 缺失时退回启用时刻。
+    const session = await this.store.readSession(name)
+    this.cache.session = renderSessionSummary(session)
+    this.cache.lastTs = session?.last_ts ?? this.state.activatedAt
+    this.cache.character = name
+    this.cache.loadedAt = Date.now()
+  }
+
+  /**
+   * 每次组装都重读 session.json 的 last_ts（很轻的一次读，除非不在内存里）。
+   * 段文本函数是同步的，所以只在文件 mtime 变化时异步重读，避免污染组装路径。
+   */
+  private lastTsReadError: string | undefined
+
+  /** 同步读 session.last_ts；读失败时用缓存值并只记一次日志。 */
+  private async readLastTs(name: string): Promise<string | undefined> {
+    try {
+      const session = await this.store.readSession(name)
+      return session?.last_ts ?? this.state.activatedAt
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (this.lastTsReadError !== message) {
+        this.lastTsReadError = message
+        this.host.logger.error('读取 session.json 失败（沿用缓存时间）：%s', message)
+      }
+      return this.cache.lastTs ?? this.state.activatedAt
+    }
+  }
+
+  /** 供宿主侧（web / tools）取当前关系标签，给功能界面用。 */
+  relationTag(): string | undefined { return this.cache.relationTag }
+
+  /**
+   * 渲染 L1 段。未启用 → 空串（段消失）；启用 → 角色卡 + 时间差 + 记忆摘录。
+   * 异步数据在 activate() 时已预取进缓存，这里保持同步（section text 函数是同步的）。
+   */
+  private renderActiveSection(): string {
+    if (!this.state.enabled) return ''
+    const name = this.state.character
+    if (name === undefined) return ''
+    // 缓存未命中（如启动瞬间）：给出最小可用内容，避免整段空掉
+    if (this.cache.character !== name || this.cache.card === undefined) {
+      void this.refreshCache()
+      return `## 你现在的身份：${name}\n\n（角色卡正在载入，先用这个身份和声线自然对话。）`
+    }
+
+    const parts: string[] = [this.cache.card]
+    const now = new Date()
+    const lastTs = parseTs(this.cache.lastTs)
+    if (lastTs !== undefined && this.cache.lastTs !== undefined) {
+      const prev = new Date(lastTs)
+      const gapMinutes = Math.max(0, Math.round((now.getTime() - lastTs) / 60000))
+      const band = timeGapBand(gapMinutes, bothNight(prev, now))
+      parts.push(`## 距上次互动\n\n${band}\n\n当前时间：${formatLocal(now)}（用户本地时区）。按这个档位决定语气，但绝不输出「检测到间隔 X 小时」。`)
+    } else {
+      parts.push(`## 当前时间\n\n${formatLocal(now)}（用户本地时区）。`)
+    }
+    if (this.cache.session !== undefined && this.cache.session !== '') parts.push(this.cache.session)
+    if (this.cache.diary !== undefined && this.cache.diary !== '') parts.push(this.cache.diary)
+    const mode = this.state.mode ?? 'text+action'
+    parts.push(mode === 'text'
+      ? '## 交互模式：纯文本\n\n不输出 `（动作）`，用语气与断句表达动作神态。'
+      : '## 交互模式：文本+动作\n\n动作神态用 `（动作）` 包裹，与台词界限清晰，不滥用。')
+    parts.push(RELATION_HINT)
+    return parts.join('\n\n')
+  }
+}
+
+function formatLocal(d: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const offsetMinutes = -d.getTimezoneOffset()
+  const sign = offsetMinutes >= 0 ? '+' : '-'
+  const abs = Math.abs(offsetMinutes)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} (UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)})`
+}

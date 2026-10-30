@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# 明确二进制
+*.png binary
+*.webp binary
+*.ico binary
+*.zip binary

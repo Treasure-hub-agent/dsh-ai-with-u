@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物（发布时才生成；源码在 src/ 与 client/）
+lib/*.js
+lib/*.map
+!lib/.gitkeep
+
+# 调试备份
+.backup-*/
+._*
+
+# 测试与临时
+.tmp/
+tmp/
+*.log
+*.tmp
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 运行时数据（用户数据目录，绝不入库）
+.ai-with-u/
+*.db
+*.sqlite
