@@ -77,11 +77,7 @@
       ]
     },
     "source": [
-      "https://anime.bang-dream.com/avemujica/character/sakiko/",
-      "https://zh.moegirl.org.cn/丰川祥子",
-      "https://baike.baidu.com/item/丰川清告",
-      "https://en.wikipedia.org/wiki/Ave_Mujica",
-      "https://zh.moegirl.org.cn/index.php?title=丰川祥子&action=raw"
+      "distill"
     ],
     "creator_notes": "蒸馏自《BanG Dream! It's MyGO!!!!!》/《BanG Dream! Ave Mujica》。五维充足度：profile 高 / personality 高 / interaction 中 / memory 高 / relations 中。直引 6 条、事实 9 条、印象 3 条。〔待补〕日常对话的逐句台词——只查到官方「気品のある言葉遣いで話す」的描述与几个关键场景台词，日常语气是据官方描述+场景推断。⚠️单一来源：祖父丰川定治「忘记生父」那段；父亲被逐原因存在两说（见 conflicts）。",
     "tags": [
@@ -269,7 +265,8 @@
             "https://anime.bang-dream.com/avemujica/character/sakiko/",
             "https://zh.moegirl.org.cn/丰川祥子",
             "https://baike.baidu.com/item/丰川清告",
-            "https://en.wikipedia.org/wiki/Ave_Mujica"
+            "https://en.wikipedia.org/wiki/Ave_Mujica",
+            "https://zh.moegirl.org.cn/index.php?title=丰川祥子&action=raw"
           ],
           "sufficiency": {
             "profile": "高",

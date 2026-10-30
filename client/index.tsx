@@ -229,13 +229,29 @@ function StatStrip(props: { stats: { characters: number; memory: number; turns: 
 }
 
 /** 一行「键 · 值」。 */
-function Field({ k, v }: { k: string; v: string }): JSX.Element {
+function Field({ k, v, title }: { k: string; v: string; title?: string }): JSX.Element {
   return (
     <div className="awu-field">
-      <span className="awu-fieldKey">{k}</span>
+      <span className="awu-fieldKey" title={title ?? k}>{k}</span>
       <span className="awu-fieldVal">{v}</span>
     </div>
   )
+}
+
+/**
+ * 把「来源」键缩成可读标签。
+ *
+ * stats.bySource 的键来自 CCv3 的 data.source：自产卡是 distill / import / custom，
+ * 但外部导入卡可能写整条 URL（规范允许）。直接把 URL 铺进 Field 会和右侧计数挤在一起，
+ * 所以 URL 一律缩成域名，完整值走 title 悬停。
+ */
+function sourceLabel(key: string): string {
+  if (!/^https?:\/\//i.test(key)) return key
+  try {
+    return new URL(key).hostname.replace(/^www\./, '')
+  } catch {
+    return key
+  }
 }
 
 /** 分段字段（性格/声音/关系）的小节。 */
@@ -1657,7 +1673,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   {Object.keys(overview?.stats.bySource ?? {}).length === 0
                     ? <div className="awu-hint">{t('stats.none')}</div>
                     : Object.entries(overview?.stats.bySource ?? {}).map(([key, value]) => (
-                      <Field key={key} k={key} v={String(value)} />
+                      /*
+                       * `source` 在 CCv3 里是「这张卡的出处」，理论上很短（distill / import / custom）。
+                       * 但外部导入卡可能塞整条 URL —— 直接把 URL 铺进 Field 会和右侧数字挤在一起，
+                       * 所以这里把 URL 缩成域名显示，完整值挂在 title 上。
+                       */
+                      <Field key={key} k={sourceLabel(key)} title={key} v={String(value)} />
                     ))}
                 </Section>
                 <Section title={t('stats.recent')}>

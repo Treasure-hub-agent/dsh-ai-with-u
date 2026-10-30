@@ -222,7 +222,7 @@
 ## 五、Phase 4 · 生成角色卡
 
 > **不产出额外文件**：老版 skill 的 `full_card.md` / `manifest.json` 这类多文件产物我们暂时不做——
-> 来源、证据覆盖度、冲突裁决**全部写进卡里**（`data.source` / `data.creator_notes` /
+> 来源、证据覆盖度、冲突裁决**全部写进卡里**（`aiwu.evidence` / `data.creator_notes` /
 > `extensions.aiwu.evidence` / `extensions.aiwu.conflicts`）。你只需要凑出一份 `data`。
 
 ### 5.1 分工：常驻人设 vs 世界书
@@ -282,7 +282,7 @@ awu_card_save({
             { "field": "relations.在意的人", "value": "很护着家里人", "grade": "impression", "source": "社区讨论" }
           ],
           "coverage": { "verbatim": 12, "artifact": 7, "impression": 3 },
-          "sources": ["https://…", "…"],
+          "sources": ["https://…", "…"],    // ★ 查过的 URL 全部放这里，**不要**放 data.source
           "sufficiency": { "profile": "高", "personality": "中", "interaction": "高",
                            "memory": "中", "relations": "低" },
           "lite": false
@@ -298,7 +298,8 @@ awu_card_save({
       }
     },
 
-    "source": ["https://…"],               // 来源 URL（CCv3 的 source 是字符串数组）
+    "source": ["distill"],                  // 出处标识（distill / import / custom）——**不要塞资料 URL**；
+                                        // 研究引用一律进 aiwu.evidence.sources（见下）
     "creator_notes": "蒸馏自《××》；印象级 3 条，relations 维度偏低（[待补]）",
 
     "character_book": {                     // 可选：只放"被问到才需要"的设定
