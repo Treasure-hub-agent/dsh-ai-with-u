@@ -205,29 +205,6 @@ function ErrorBar(props: { message: string; onRetry?: () => void; t: Translate }
   )
 }
 
-/** 统计条。 */
-function StatStrip(props: { stats: { characters: number; memory: number; turns: number }; t: Translate }): JSX.Element {
-  const { stats, t } = props
-  // 三项一组：大数字（衬线）+ 单位（无衬线小字），下面一行英文/次级说明做层次
-  const cells: Array<{ value: number; unit: string; key: string }> = [
-    { value: stats.characters, unit: t('stats.characters'), key: 'characters' },
-    { value: stats.memory, unit: t('stats.memory'), key: 'memory' },
-    { value: stats.turns, unit: t('stats.turns'), key: 'turns' },
-  ]
-  return (
-    <div className="awu-stats">
-      {cells.map(cell => (
-        <div className="awu-stat" key={cell.key} data-metric={cell.key}>
-          <span className="awu-statNum">
-            {cell.value}
-            <small>{cell.unit}</small>
-          </span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 /** 一行「键 · 值」。 */
 function Field({ k, v, title }: { k: string; v: string; title?: string }): JSX.Element {
   return (
@@ -787,7 +764,7 @@ function CharacterDetailView(props: {
           <button
             type="button"
             className="awu-btn awu-editEntry" data-kind="edit"
-            data-size="sm"
+            data-size="md"
             onClick={onEdit}
             disabled={busy}
           >
@@ -795,17 +772,17 @@ function CharacterDetailView(props: {
             {t('detail.edit')}
           </button>
           {live ? (
-            <button type="button" className="awu-btn" data-size="sm" onClick={onDeactivate} disabled={busy}>
+            <button type="button" className="awu-btn" data-size="md" onClick={onDeactivate} disabled={busy}>
               <IconEject size={12} />
               {t('detail.deactivate')}
             </button>
           ) : (
-            <button type="button" className="awu-btn" data-size="sm" data-kind="primary" onClick={onActivate} disabled={busy}>
+            <button type="button" className="awu-btn" data-size="md" data-kind="primary" onClick={onActivate} disabled={busy}>
               <IconPower size={12} />
               {t('detail.activate')}
             </button>
           )}
-          <button type="button" className="awu-btn" data-size="sm" data-kind="danger" onClick={onDelete} disabled={busy}>
+          <button type="button" className="awu-btn" data-size="md" data-kind="danger" onClick={onDelete} disabled={busy}>
             <IconTrash size={12} />
             {t('detail.delete')}
           </button>
@@ -1366,6 +1343,23 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             <div className="awu-headMain">
               <div className="awu-kicker">{t('panel.kicker')}</div>
               <div className="awu-title">角色<em>管理器</em></div>
+              {/*
+                三个总量指标：原来占右栏顶部一整条，视觉重量和正文打架（主人反馈「太大了」）。
+                收成标题下方一行紧凑元信息，右栏空间全部还给内容。
+              */}
+              <div className="awu-counts" role="group" aria-label={t('stats.title')}>
+                <span className="awu-countItem" data-metric="characters">
+                  <b>{stats.characters}</b>{t('stats.characters')}
+                </span>
+                <span className="awu-countSep" aria-hidden="true">·</span>
+                <span className="awu-countItem" data-metric="memory">
+                  <b>{stats.memory}</b>{t('stats.memory')}
+                </span>
+                <span className="awu-countSep" aria-hidden="true">·</span>
+                <span className="awu-countItem" data-metric="turns">
+                  <b>{stats.turns}</b>{t('stats.turns')}
+                </span>
+              </div>
             </div>
             <div className="awu-headActions">
               <button
@@ -1545,8 +1539,6 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             </aside>
 
             <main className="awu-main">
-              <StatStrip stats={stats} t={t} />
-
               <div
                 className="awu-pane"
                 id="awu-tabpanel"

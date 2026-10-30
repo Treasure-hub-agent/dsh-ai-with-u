@@ -745,49 +745,69 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 }
 
 /* ================================================================ 统计条 */
-/* 仪表行：三条并排，靠 1px 发丝线分栏。数字用 24px 半粗 + 等宽数字，
-   单位退成 12px 淡墨压低 —— 旧版 18px 数字在这一行里显得空。 */
+/* 2026-10-30 主人第三轮：「详情页上面 角色/记忆/对话 三个计数块太大了，视觉重量和内容主体打架」。
+   处理成两件事：
+   1) 从「一条 110px 高的分栏仪表板」压成「一行 20px 的元信息」：
+      数字 26→15px、单位 13→12px，去掉卡片底与竖分隔，改用 3px 圆点分隔；仍然左对齐成一行。
+   2) 详情页里**整条不显示** —— hero 副标题本来就写着「· 0 条记忆 · 0 对话」，
+      同样的信息出现两遍才是真正的「重量打架」。用 :has() 按当前视图切换，
+      不支持 :has() 的老内核只会退化成「小一号的统计行」，不影响可用性。 */
 .awu-stats {
   flex: none;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
-  margin: 0 var(--awu-gutter) var(--awu-gap-6);
-  border-radius: var(--awu-r-lg);
-  overflow: hidden;
-  background: var(--awu-line);
-  box-shadow: var(--awu-specular);
+  display: flex;
+  align-items: baseline;
+  gap: var(--awu-gap-5);
+  margin: var(--awu-gap-4) var(--awu-gutter) 0;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
 }
 
+/* 视图切换：详情页不需要这条读数 */
+.awu-main:has(.awu-detail) .awu-stats { display: none; }
+
 .awu-stat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  padding: var(--awu-gap-5) var(--awu-gap-4);
-  background-color: var(--awu-glass-2);
-  background-image: radial-gradient(120% 80% at 50% -30%, var(--awu-sheen) 0%, transparent 70%);
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--awu-gap-2);
+  padding: 0;
+  background: none;
+  position: relative;
+}
+
+/* 分节点：比竖线轻，只负责断句 */
+.awu-stat + .awu-stat::before {
+  content: "";
+  align-self: center;
+  width: 3px;
+  height: 3px;
+  margin-right: var(--awu-gap-3);
+  border-radius: var(--awu-r-pill);
+  background: var(--awu-ink-faint);
 }
 
 .awu-statNum {
   font-family: var(--awu-sans);
-  font-size: var(--awu-fs-display);
+  font-size: var(--awu-fs-body-lg);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-  letter-spacing: -.02em;
-  color: var(--awu-ink);
+  line-height: 1.2;
+  letter-spacing: -.01em;
+  color: var(--awu-ink-dim);
 }
 
 /* 单位：跟数字同一基线，但小一号、淡一档，不抢数字 */
 .awu-statNum small {
   font-family: var(--awu-sans);
-  font-size: var(--awu-fs-label);
+  font-size: var(--awu-fs-caption);
   font-weight: 500;
   letter-spacing: .02em;
   color: var(--awu-ink-mute);
-  margin-left: var(--awu-gap-3);
+  margin-left: var(--awu-gap-2);
 }
 
 /* ================================================================ 分段控制（iOS segmented） */
@@ -1214,13 +1234,14 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-detailHero {
   display: flex;
   align-items: center;
-  gap: var(--awu-gap-6);
+  gap: var(--awu-gap-7);
   flex-wrap: wrap;
-  padding: var(--awu-gap-6);
+  padding: var(--awu-gap-7);
   border: 1px solid var(--awu-line);
   border-radius: var(--awu-r-lg);
-  background: var(--awu-surface-2);
-  box-shadow: var(--awu-specular);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(120% 90% at 50% -30%, var(--awu-sheen) 0%, transparent 68%);
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
 }
 
 .awu-heroBody { min-width: 0; flex: 1 1 0%; }
@@ -1245,7 +1266,31 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   text-overflow: ellipsis;
 }
 
-.awu-heroActions { display: flex; gap: var(--awu-gap-3); flex-wrap: wrap; justify-content: flex-end; flex: none; }
+/* hero 右侧的动作组。2026-10-30 主人：「编辑/启用/删除 三个按钮太小，而且挨得很近」。
+   修法不是简单放大，而是把「一目了然的风险梯度」做出来：
+     编辑 = 中性（透明底 + 常规描边，退到次要层）
+     启用 = 主操作（蓝色实底 + 蓝色投影，唯一的高饱和块）
+     删除 = 危险（红描边 + 红字，不填底，避免和主操作抢）
+   尺寸统一抬到 36px 高（原 28px），间距 6→10px，弹层/编辑器里的 sm 按钮不受影响。 */
+.awu-heroActions {
+  display: flex;
+  gap: var(--awu-gap-5);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  flex: none;
+}
+
+.awu-heroActions .awu-btn[data-size="sm"] {
+  height: 36px;
+  padding: 0 var(--awu-gap-7);
+  gap: var(--awu-gap-3);
+  border-radius: var(--awu-r-sm);
+  font-size: var(--awu-fs-body);
+  font-weight: 600;
+}
+
+.awu-heroActions .awu-btn svg { flex: none; }
 
 /* iOS inset grouped list：圆角分组 + 细分隔线 */
 /* 分组卡片：与角色卡同一套玻璃材质（描边 + 顶部高光），否则详情页左边是玻璃、
