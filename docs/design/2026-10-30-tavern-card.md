@@ -1,0 +1,997 @@
+# 酒馆卡 CCv3 格式 + 「常规人设常驻 / 世界书按需注入」设计（v0.2.0 核心）
+
+> 状态：**设计稿（第一批）**。作者：tavern-architect。日期：2026-10-30。
+> 依据：官方 `SPEC_V3`（Character Card V3）、现有代码逐行读过的结果（`src/prompt.ts` 420 行 / `src/store.ts` 951 行 / `src/index.ts` 328 行 / `client/card-schema.ts` 318 行）、
+> `docs/DEVELOPMENT.md` §二/§三/§九、`06-tmp\aiwu-survey\host.md`（31 条风险）。
+>
+> **本文分两批交付**：
+> - **第一批（本文，可拍板）**：§1 存储形态、§2 旧格式迁移、§3 L1 组装、§3.5 宏、§5 长度策略、§6 风险回归、§7 验收清单、§8 实现清单、§9 待拍板。
+> - **第二批（等 `tavern-researcher` 的 `06-tmp\tavern-study\REPORT.md`）**：**§4 世界书注入算法**——这一节目前只有**结构与待定清单**，明确标了 `⏳待调研`。
+>   原因：`dsh-universal-worldbook` 主打的「请求级一次性注入、不污染上下文」说明那里有真坑，不能想当然定死。
+>
+> **硬约束（全文遵守）**：零新依赖；只动宿主侧（`src/tavern.ts` 新建、`src/prompt.ts`、`src/store.ts`、`src/index.ts` 钩子接线、`presets/**`、`scripts/verify-tavern.mjs`）；不碰 `client/**`、不碰 `distill/`；**不设计任何需要改 DSH 宿主的方案**。
+
+---
+
+## 0. 结论速览（一屏看完）
+
+| # | 决定 | 一句话理由 |
+|---|---|---|
+| D1 | `characters/<名>/card.json` **直接存 CCv3 对象本体**，不设中间层 | 磁盘 JSON 就是能被酒馆吃掉的卡；少一层转换就少一个丢字段的地方 |
+| D2 | 插件自有数据全部进 **`data.extensions.aiwu`**，另给 **`schema: 1`** 版本号 | CCv3 允许未知 extension；导出到别的前端不报错、不丢我们的结构 |
+| D3 | 原生字段（`description` / `personality` / `scenario` / `mes_example` / `system_prompt` / `post_history_instructions` / `first_mes` / `alternate_greetings`）是**单向投影**：结构 → 原生；原生不反写结构 | 一个方向就够；双向同步必然打架 |
+| D4 | 旧 34 字段**全部有明确落点**，认不出的键进 `aiwu.legacy.extra`（原样 JSON） | 宁可多存一个垃圾桶，也不丢用户数据 |
+| D5 | 迁移 **读时归一（内存）+ 首次写盘落盘 + 首次写盘前备份 `card.v1.bak.json`**；不做启动批量迁移（可选项，见 §2.5） | 不产生「启动即改盘」的惊吓；旧卡永远能读 |
+| D6 | L1 仍是**一个** section（`aiwu:active-character`，order 5100，函数式求值），内部按「静态块 → 易变块」重排 | 不新增注册段；把易变内容后置以保住 prompt 前缀缓存 |
+| D7 | `system_prompt` / `post_history_instructions` 在 DSH 里**没有对应通道** → 降级为 L1 内两段**明确标注**的文本块（「角色自带指令」「收尾提醒」） | 不改宿主系统提示词，只能"追加",不能"替换" |
+| D8 | `mes_example` **默认开**，但受 1200 字符预算与 `<START>` 分块约束 | 示例对话是声线最强的锚；迁移卡没有就为空，不编造 |
+| D9 | 长度**不设硬上限**，只给 4 档软警告（阈值见 §5.1） | 主人明确要「不设上限」；警告是可忽略的建议 |
+| D10 | 世界书走**独立 section `aiwu:lore`（order 5150）**，未命中时返回 `''`（DSH 过滤空段） | 倾向方案，但**保留到第二批定稿**（§4） |
+| D11 | 「忘却」的搜索面 = **卡内全部可注入文本**（`awiu` 所有字符串叶子 + `character_book.entries[].content` + `imported.raw` + 开场白），删完**重投影**；返回体带 `scanned` 计数，扫过 0 处不允许报成功 | 旧代码只认 `memory_anchor`/`dynamic_state` 两个键，迁移后会"提示成功、一个字没删"（Lead P0-1）。**规则见 §2.7** |
+| D12 | **`presets/*/card.json` 保持旧格式不动** | Lead 决定（P0-2）：全新安装时真的跑一遍迁移逻辑 = 迁移代码每天都在跑回归。改 §2.5/§8 |
+| D13 | **删除 `prompt.ts` 的 `renderCharacterCard`**，L1 只走 `renderL1` | Lead 发现（P0-3）：留着就是两套渲染并联，token 翻倍。`toLegacyView` 是**数据视图**，不是渲染器 |
+
+---
+
+## 1. 存储形态
+
+### 1.1 决定：直存 CCv3，不设中间层
+
+```
+~/.dsh/ai-with-u/                  # 可用 AIWU_STORAGE_ROOT 覆盖（不变）
+├── _index.json                    # 角色索引（不变，仍是 {path,last_active,source}）
+├── _active.json                   # 启用状态（不变）
+└── characters/<角色名>/
+    ├── card.json                  # ← 直接是 CCv3 对象（spec: chara_card_v3）
+    ├── card.v1.bak.json           # ← 迁移前的旧卡原件（只在首次迁移时写一次）
+    ├── diary.md                   # 不变
+    └── session.json               # 不变
+```
+
+`card.json` 顶层形状：
+
+```jsonc
+{
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": { /* 见 §1.4 */ }
+}
+```
+
+### 1.2 为什么不要中间层
+
+被否的两个方案：
+
+| 方案 | 否决理由 |
+|---|---|
+| 内部模型（34 字段）+ CCv3 只做导入导出 | 每次读写都要过一层双向转换。转换层漏一个键就**静默丢数据**，而且这类丢数据只在用户导出/导入时才暴露——`host.md` 风险 23（`readJson` 把损坏当不存在）就是同款教训：错在"没有第二个人检查"。 |
+| CCv3 落盘 + 内存里另一套结构 | 同上的另一个版本，还多了"哪个是真身"的歧义。 |
+
+**直存的额外好处**（这些是真实需求，不是洁癖）：
+
+1. **无损 round-trip**：`读 → 不改 → 写` 字节级不变（`JSON.stringify(parse(x))` 稳定），
+   导入一张社区卡、改一个字、导出回去，外部字段（`assets` / `creator_notes_multilingual` / 别人的 `extensions.*`）一个不掉。
+2. **三条线共用一个对象**：编辑器（ui-designer）、蒸馏（distill-designer）、指南（guide-designer）都读同一个 `data`，
+   不需要「你再问我一遍字段叫什么」的对齐成本。
+3. **调试可读**：出问题时 `Get-Content card.json` 就是真相，不需要在脑子里做反序列化。
+
+### 1.3 字段归属三原则
+
+1. **CCv3 有原生位、语义又对的 → 用原生位**（`description` / `personality` / `scenario` / `first_mes` / `alternate_greetings` / `mes_example` / `system_prompt` / `post_history_instructions`）。
+2. **原生位装不下、或装了会破坏语义的 → `data.extensions.aiwu.*`**
+   （年龄、声线七字段、关系三字段、用户人设、动态状态、记忆锚点、互动偏好、插件行为配置）。
+   > 这里听从主人的口径：**关系起点 / 声线八字 / 用户人设 / 动态状态 / 记忆锚点** 五块明确进 `extensions.aiwu`。
+3. **不认识的键一律原地保留**：`data.*` 未知键、`data.extensions.<别人>` 整包、`spec/spec_version` 之外的顶层键，全部原样写回。
+   > 写卡实现的铁律：**以读到的对象为底做合并（spread），绝不用我们的字段白名单重建对象。**
+
+### 1.4 `data` 完整形状 + `extensions.aiwu` 逐字段说明
+
+下面是一张**从旧格式迁移过来的自制卡**的完整样子（以预置卡「虞照」为样本，值已截断）：
+
+```jsonc
+{
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "虞照",
+    "nickname": "",                                  // 留空 → {{char}} 用 name（§3.5）
+
+    // ---------- 原生投影（结构 → 这里的单向生成，§1.5） ----------
+    "description": "身份：两个月前搬进你合租房的室友。\n\n背景：话多、爱笑、把家里弄得热闹；每天出门前给你留一张便利贴，写的都是今天晚上吃什么，和一句「记得吃早饭」。",
+    "personality": "关键词：外向、话痨、自来熟、情绪写在脸上\n内在矛盾：什么都愿意说，唯独家里的事一句不提；越是安静的那几秒越像在躲什么\n对待亲近之人：主动到有点缠人……",
+    "scenario": "来处：他家里条件不差，从小被安排好了每一步……\n落差：他把那份安排放着没接……\n如今的日子：白天睡到十点……\n你与他的旧：搬进来那天他带了一整箱啤酒……",
+    "mes_example": "",                               // 迁移卡没有（不编造）；外部导入/蒸馏卡可能有
+    "system_prompt": "【声线基因】对话节奏：快，一次连发 3-4 条……\n爱用句式：诶诶诶／我跟你说／真的假的！／是不是很棒\n自称：我\n对用户的称呼：直接喊你名字（偶尔叫「室友大人」逗你）\n非语言小动作：（便利贴贴在你门上）……\n【互动偏好】回复长度倾向：短句连发 3-4 条……",
+    "post_history_instructions": "【收尾提醒】禁忌词：不端着、不说反话、不冷战……\n雷区：不主动聊家里；你问到他会笑着岔开……",
+    "first_mes": "虞照，26 岁，两个月前搬进你合租房的室友……（第四下的时候他直接打电话过来了）\n\n诶诶诶！你几点回来啊……",
+    "alternate_greetings": [
+      "（便利贴贴在你显示器边上：今天降温，外套在沙发上。）……",
+      "（他把三袋外卖堆在门口）我点了三家的……",
+      "我把鼓搬回来了……"
+    ],
+    "creator_notes": "",                             // 迁移留痕/用户备注（不注入提示词）
+    "creator": "ai-with-u",
+    "character_version": "1.0",
+    "tags": [],
+    "group_only_greetings": [],
+    "creation_date": 1793558400,                     // 秒级 Unix（CCv3 口径）
+    "modification_date": 1793558400,
+    "source": [],                                    // CCv3 的 source 是 string[]；旧卡的 "custom" 不塞这里（§1.6）
+    "assets": [],                                    // 本轮不做 PNG/CHARX，留空
+
+    // ---------- 世界书 ----------
+    "character_book": { /* 可选；结构见 §4.2，本轮只透传不解析 PNG */ },
+
+    // ---------- 插件自有 ----------
+    "extensions": {
+      "aiwu": {
+        "schema": 1,
+        "updated_at": "2026-10-30T20:40:00+08:00",
+
+        "basic": {
+          "age": "26"
+          // 姓名/身份/背景 已在 data.name / data.description；这里不重复存，
+          // 例外：姓名与 data.name 不一致时存 realName（迁移告警，§2.4）
+          // "realName": "虞照"
+        },
+
+        "personality": {
+          "keywords": ["外向", "话痨", "自来熟", "情绪写在脸上"],
+          "contradiction": "什么都愿意说，唯独家里的事一句不提……",
+          "towardClose": "主动到有点缠人……"
+        },
+
+        "voice": {
+          "pace": "快，一次连发 3-4 条；常一句拆成两三条发，想到什么补什么",
+          "catchphrases": ["诶诶诶", "我跟你说", "真的假的！", "是不是很棒"],
+          "selfRef": "我",
+          "callsUser": "直接喊你名字（偶尔叫「室友大人」逗你）",
+          "emotes": ["兴奋「好耶！」", "被戳到时「……啊？」"],
+          "forbidden": "不端着、不说反话、不冷战；生气也是直说，气完两分钟就来找你说话",
+          "gestures": ["（便利贴贴在你门上）", "（把两袋菜往你怀里一塞）"]
+        },
+
+        "relationship": {
+          "startPoint": "合租室友，他搬进来两个月",
+          "charCallsUser": "你的名字；逗你时叫「室友大人」",
+          "userCallsChar": "虞照 / 小照"
+        },
+
+        "userPersona": {
+          "who": "他一屋两室的合租室友，房子是你先租下的",
+          "relation": "两个月，从陌生人处成了「会互相留饭」的关系",
+          "sharedHistory": "上个月你发烧，他翘了活在家煮了两天粥……",
+          "displayName": ""                              // {{user}} 的替换值；空则渲染成「你」（§3.5）
+        },
+
+        "dynamicState": {
+          "mood": "亢奋，刚抢到东西的好心情",
+          "recent": "他这周接了个急活，白天改稿晚上打鼓，两天没怎么睡",
+          "doing": "在超市打折区给你发消息，手里拎着两袋菜",
+          "updated_at": "2026-10-30T20:40:00+08:00"
+        },
+
+        "memoryAnchors": [
+          "便利贴有一整叠，颜色按事情分：黄色是吃什么，蓝色是提醒，粉色是他说不出口的话",
+          "他手机一响就先看是谁；是家里打来的，他会走到阳台再说话",
+          "他做噩梦醒来会自己去厨房煮面，锅铲碰锅的声音很响"
+        ],
+
+        "interactionPref": {
+          "length": "短句连发 3-4 条，像打字很快的人；情绪满时一条能顶三句",
+          "emoji": "自然用，开心时多（不刻意堆）",
+          "comfortZone": "吃的、他的鼓、外卖、你的一天",
+          "taboo": "不主动聊家里；你问到他会笑着岔开（「诶你猜我今天遇到谁！」），但不会生气"
+        },
+
+        // 插件行为覆盖（全部可选，缺省走全局默认）
+        "prompt": {
+          "includeMesExamples": true,       // mes_example 是否进 L1（默认 true，§3.4）
+          "includeSystemPrompt": true,      // 角色自带指令是否进 L1
+          "lengthWarnings": true,           // 关闭后不再算长度告警
+          "lore": {                          // ⏳待调研定稿（§4.3）
+            "enabled": true,
+            "scanDepth": null,               // null = 用全局默认
+            "budgetChars": null,
+            "recursive": null
+          }
+        },
+
+        // 迁移/导入留痕（只增不改，便于回滚与审计）
+        "legacy": {
+          "from": "aiwu-v1",               // aiwu-v1 | native | png | charx
+          "at": "2026-10-30T20:40:00+08:00",
+          "originalName": "虞照",
+          "extra": {}                       // 认不出的旧键原样放这里（§2.3）
+        },
+
+        // 外部卡保真区（§1.5 冲突规则）：原生原文逐字留存，L1 优先用它
+        "imported": {
+          "from": "png",
+          "at": "2026-10-30T20:40:00+08:00",
+          "raw": { "description": "……原文……" }
+        }
+      }
+    }
+  }
+}
+```
+
+字段速查：
+
+| `aiwu` 键 | 类型 | 旧字段来源 | 进 L1 | 说明 |
+|---|---|---|---|---|
+| `schema` | number | — | — | 扩展自身版本，**只增不改**，供未来迁移 |
+| `basic.age` | string | `basic.年龄` | 否（并入投影不出现在 L1 单独段） | 原生位缺失 |
+| `personality.*` | object | `personality.关键词/内在矛盾/对待亲近之人` | 是 | 同时投影进 `data.personality` |
+| `voice.*` | object(7) | `voice.*` 7 字段 | **是（最高优先级）** | 同时投影进 `data.system_prompt` |
+| `relationship.*` | object(3) | `relationship.*` | 是 | 不进原生位（§1.6） |
+| `userPersona.*` | object(3+1) | `user_persona.*` | 是 | 不进原生位 |
+| `dynamicState.*` | object(3+1) | `dynamic_state.*` | 是 | 每轮由 `awu_*`/面板更新 |
+| `memoryAnchors` | string[] | `memory_anchor.要点` | 是（常驻块） | 等价于「constant 世界书条目」，§4.3 待调研复核 |
+| `interactionPref.*` | object(4) | `interaction_pref.*` | 是 | 部分投影进 `system_prompt`/`post_history` |
+| `prompt` | object | — | — | 插件行为覆盖，缺省走默认 |
+| `legacy` / `imported` | object | — | 否 | 留痕与保真，永不参与渲染顺序（除 §1.5 保真规则） |
+
+### 1.5 唯一的方向：结构 → 原生投影（含冲突规则）
+
+```
+extensions.aiwu.*  ──(writeCard 时确定性生成)──►  description / personality / scenario /
+（结构权威）                                    system_prompt / post_history_instructions /
+                                                first_mes / alternate_greetings / mes_example
+```
+
+**生成规则（顺序即实现顺序）**
+
+1. 只生成**投影为空或属于我们拥有**的字段：
+   - `description` ← `basic.身份` + `basic.一句话背景`（两段）
+   - `personality` ← `personality.关键词/内在矛盾/对待亲近之人`（三行）
+   - `scenario` ← `world.*`（四行）
+   - `system_prompt` ← `voice.*` + `interactionPref.length/emoji/comfortZone`
+   - `post_history_instructions` ← `voice.forbidden` + `interactionPref.taboo`
+   - `first_mes` / `alternate_greetings` ← `opening` / `openings`（**逐字，不加前缀**；开场白是台词）
+   - `mes_example`：**不生成**（不编造对话）。只有导入/蒸馏卡自带时才存在。
+2. 结构里该段为空（`''` / `[]`）且原生字段已有内容 → **不覆盖**（保护外部导入 / 手工改过的原生字段）。
+3. 结构里该段非空 → 覆盖原生字段（我们编辑器改过的以结构为准）。
+4. `aiwu.imported.raw.<原生字段>` 存在 → **L1 渲染优先用 raw 原文**；结构仅用于编辑器展示与增量修改；
+   用户一旦在面板改了该结构字段，`fromLegacyView` 就把对应 `raw` 条目删掉（转为结构权威）。
+
+**一句话概括**：自制卡（`legacy.from === 'aiwu-v1'`）走结构；外部卡（`from` 为 `native/png/charx`）走原文保真 + 结构做影子；
+
+### 1.6 三个容易踩的语义坑（本轮先定死）
+
+| 坑 | 决定 | 理由 |
+|---|---|---|
+| `data.source` 是 `string[]`，旧卡 `source` 是 `"custom"` | 旧 `source` 存 **`aiwu.legacy.source`**（string），`data.source` 只承载外部卡自带的数组，原样透传 | 别把分类标签塞进语义是"来源链接"的字段；`_index.json` 的 `source` 字段由 `cardSource(card)` 派生：`aiwu.legacy.source ?? data.source[0] ?? 'custom'` |
+| `openings` 的轮换游标靠"数组顺序"持久化（`rotateOpening` 把用过的移到末尾） | **保持这个语义**，映射到 `alternate_greetings` 的数组顺序 | 零新增字段；酒馆前端也不解释顺序，互不干扰 |
+| `{{char}}` 用 `nickname` 优先 | `nickname` 留空 → 等于 `name`；迁移时**不**把 `basic.姓名` 塞进 nickname | 别把"真名"当"昵称"，否则 `{{char}}` 全变成真名 |
+
+---
+
+## 2. 旧格式迁移（34 字段 → CCv3）
+
+### 2.1 四种输入识别（`normalizeCard` 的第一件事）
+
+| 输入 | 判据 | 动作 |
+|---|---|---|
+| **V3** | `spec === 'chara_card_v3'` 且 `data` 是对象 | 补默认值（不裁剪、不改内容），原样返回 |
+| **V2** | `spec === 'chara_card_v2'` 且 `data` 是对象 | 包一层 `{spec:'chara_card_v3', spec_version:'3.0', data: 原 data}`；V2 的 `character_book` 结构兼容，直接带过来；`fromLegacyView` 用 `deriveFromNative` 反解结构 |
+| **legacy（本项目 v0.1）** | 顶层有 `basic`/`voice`/`relationship`/... 任一中文组，或 `name` + 无 `spec` | 走 §2.2 映射表 |
+| **无法识别** | 上述都不是 | **不抛错、不丢**：`{spec, spec_version, data:{name: 目录名或'', extensions:{aiwu:{schema:1, legacy:{from:'unknown', extra:<原对象>}}}}}`；`creator_notes` 写一行「此卡格式未识别，原文已备份到 extensions.aiwu.legacy.extra」 |
+
+> `normalizeCard` 是**纯函数**（不打时间戳、不碰磁盘），时间戳由调用方（`writeCard`）补。
+> 这是"幂等"能字节级断言的前提（§2.4）。
+
+### 2.2 逐字段映射表（34 行，`client/card-schema.ts` 的 `GROUPS` 是真相）
+
+`data.extensions.aiwu` 简写 `awiu`。
+
+| # | 旧路径（组.字段） | 新落点 | 备注 |
+|---|---|---|---|
+| 1 | `basic.姓名` | `data.name` | 与旧 `name` 相同 → 无操作；不同 → `data.name` 取旧 `name`（目录名不变），姓名存 `awiu.basic.realName` 并告警 |
+| 2 | `basic.年龄` | `awiu.basic.age` | 原生无位 |
+| 3 | `basic.身份` | `description` 第 1 段（`身份：`）+ 结构留 `awiu.basic` 不重复 | 投影 |
+| 4 | `basic.一句话背景` | `description` 第 2 段（`背景：`） | 投影 |
+| 5 | `voice.对话节奏` | `awiu.voice.pace` + `system_prompt`「声线基因」块 | 投影 |
+| 6 | `voice.爱用句式` | `awiu.voice.catchphrases` + `system_prompt` | 数组；投影时用 `／` 连接 |
+| 7 | `voice.自称` | `awiu.voice.selfRef` + `system_prompt` | |
+| 8 | `voice.对用户的称呼` | `awiu.voice.callsUser` + `system_prompt` | |
+| 9 | `voice.情绪口头禅` | `awiu.voice.emotes` + `system_prompt` | 数组 |
+| 10 | `voice.禁忌词` | `awiu.voice.forbidden` + **`post_history_instructions`** | 放"历史之后"语义位（§3.3） |
+| 11 | `voice.非语言小动作` | `awiu.voice.gestures` + `system_prompt` | 数组 |
+| 12 | `personality.关键词` | `awiu.personality.keywords` + `personality` 第 1 行 | 数组；`、` 连接 |
+| 13 | `personality.内在矛盾` | `awiu.personality.contradiction` + `personality` 第 2 行 | |
+| 14 | `personality.对待亲近之人` | `awiu.personality.towardClose` + `personality` 第 3 行 | |
+| 15 | `relationship.关系起点` | `awiu.relationship.startPoint` | **不进原生**；`relationBaseline()` 仍用它现算档位 |
+| 16 | `relationship.角色怎么称呼用户` | `awiu.relationship.charCallsUser` | |
+| 17 | `relationship.用户怎么称呼角色` | `awiu.relationship.userCallsChar` | |
+| 18 | `world.来处` | `awiu.world.origin` + `scenario` 第 1 行 | |
+| 19 | `world.落差` | `awiu.world.gap` + `scenario` 第 2 行 | |
+| 20 | `world.如今的日子` | `awiu.world.nowadays` + `scenario` 第 3 行 | |
+| 21 | `world.你与他的旧` | `awiu.world.sharedPast` + `scenario` 第 4 行 | |
+| 22 | `memory_anchor.要点` | `awiu.memoryAnchors`（string[]） | 非数组时包成 `[String(v)]` |
+| 23 | `dynamic_state.当前情绪` | `awiu.dynamicState.mood` | |
+| 24 | `dynamic_state.近况` | `awiu.dynamicState.recent` | |
+| 25 | `dynamic_state.此刻在做什么` | `awiu.dynamicState.doing` | |
+| 26 | `interaction_pref.回复长度倾向` | `awiu.interactionPref.length` + `system_prompt` | |
+| 27 | `interaction_pref.表情使用` | `awiu.interactionPref.emoji` + `system_prompt` | |
+| 28 | `interaction_pref.话题舒适区` | `awiu.interactionPref.comfortZone` + `system_prompt` | |
+| 29 | `interaction_pref.雷区` | `awiu.interactionPref.taboo` + **`post_history_instructions`** | |
+| 30 | `user_persona.你是谁` | `awiu.userPersona.who` | **不进原生** |
+| 31 | `user_persona.与 TA 的关系` | `awiu.userPersona.relation` | |
+| 32 | `user_persona.共同经历` | `awiu.userPersona.sharedHistory` | |
+| 33 | `opening` | `data.first_mes` | 逐字，不加前缀 |
+| 34 | `openings` | `data.alternate_greetings` | 保持顺序（轮换游标语义） |
+
+**不在 GROUPS 但必须处理的键**
+
+| 旧键 | 落点 |
+|---|---|
+| `name` | `data.name`（主键，同时仍是目录名） |
+| `source` | `aiwu.legacy.source`（string） |
+| `creator_notes`（若旧卡有） | `data.creator_notes` 原样 |
+| 其余未知键 | `aiwu.legacy.extra.<key>`（原样 JSON，不 stringify 化、不改类型） |
+
+### 2.3 认不出的东西怎么办（"不丢"的具体含义）
+
+- 旧卡的**未知组内键**（如 `voice.语气补充`）：进 `awiu.legacy.extra.voice['语气补充']`，**并在 `creator_notes` 追加一行**
+  `⚠️ 迁移时以下字段没有对应位置，已原样保留：voice.语气补充` —— 用户能在面板里看到、能手工搬。
+- 旧卡某个字段**类型不对**（`memory_anchor.要点` 写成字符串）：转成能表达的形式（`[string]`），原文同时进 `legacy.extra`。
+- **双重保险**：整份旧卡在首次迁移写盘前落一份 `card.v1.bak.json`（§2.4）。
+
+### 2.4 幂等与回滚
+
+**幂等（可字节级断言）**
+
+```js
+// scripts/verify-tavern.mjs 里的断言
+const a = JSON.stringify(migrateLegacyCard(legacy))
+const b = JSON.stringify(migrateLegacyCard(JSON.parse(a)))   // 已是 V3
+assert(a === b)                                              // 必须相等
+```
+
+成立的前提（实现时必须守住）：
+
+1. `migrateLegacyCard` / `normalizeCard` **纯函数**：不读当前时间、不读磁盘、不写 `updated_at`。
+2. 时间戳（`creation_date` / `modification_date` / `awiu.updated_at`）由 `writeCard` 在**首次落盘**时补一次；
+   之后每次写只更新 `modification_date`。
+3. 默认值补全是**只补缺**（`if (x === undefined) x = default`），不是"重置"。
+
+**回滚（三步，一条命令）**
+
+```powershell
+# 出问题：把备份拷回原位，重启 DSH，旧格式照常可读（读时归一永远兼容）
+Copy-Item "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.v1.bak.json" `
+          "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.json" -Force
+```
+
+- 备份**只在 `card.v1.bak.json` 不存在时写**（不覆盖真正的原件）。
+- 备份写入与 V3 写入是同一次 `writeCard` 里的两步：先备份 → 再写 V3。备份失败 → **整体失败**（宁可不迁移，也不留半截）。
+
+### 2.5 迁移时机（我的建议 vs 可选项）
+
+| 时机 | 做不做 | 说明 |
+|---|---|---|
+| **读时归一**（`readCard` 内部 `normalizeCard`，内存里永远是 V3） | ✅ **做** | 旧卡永远能读；不会"某天插件升级后看见卡片消失" |
+| **首次写盘时落盘 V3**（改一个字保存、换开场、`awu_forget` 命中卡字段） | ✅ **做** | 自然收敛，无惊喜 |
+| **启动时批量迁移所有卡** | ❌ **不做（可选项，待拍板）** | 好处是"盘上一夜之间统一"；坏处是启动即改用户文件、且失败回滚要人手动。个人倾向：**不做**，需要时给个面板按钮（未来） |
+| **预置卡（`presets/**`）** | ✅ 本次直接改成 CCv3 | 新装机种入的就是新格式；`seedPresets` 只在 `characters/` 不存在时跑，不影响老用户 |
+
+> ⚠️ 老用户的卡在第一次写之前一直是旧 JSON 在盘上——**这是特性不是 bug**：读时归一让两种格式共存，不会出现"半迁移"状态。
+
+### 2.6 迁移风险清单
+
+| # | 风险 | 影响 | 处置 |
+|---|---|---|---|
+| M1 | `data.source` 类型从 string 变 string[] | `web.ts` 的 `bySource` 统计、`_index.source` | 统一走 `cardSource(card)` 派生；`_index.json` 结构不动 |
+| M2 | 面板保存走旧 34 字段视图 → 可能把 `extensions.aiwu` 覆盖掉 | 丢结构化数据 | `fromLegacyView(view, base)` 必须**以现有 CCv3 为底**做字段级合并，禁止重建对象 |
+| M3 | `name` 与 `basic.姓名` 不一致的卡 | 目录名与卡内名分裂 | 迁移告警 + `realName` 留痕；改名功能仍不在本轮范围 |
+| M4 | 旧卡被人在插件之外改成 CCv3 又被我们迁移逻辑读 | 二次包裹 | `isV3Card` 先判，命中就只补默认值 |
+| M5 | `openings` 里有空串/非字符串 | 酒馆前端校验失败 | 迁移时 `map(String).filter(s => s.trim() !== '')` |
+| M6 | 卡片体积（4 KB → 8~10 KB，双写投影 + 结构） | 读盘次数不变，体积可接受 | 只 `listCharacters` 时全量读，已有 IO 放大问题（host.md 风险 30）不在本轮 |
+| M7 | 用户手工把 `description` 改得和结构不一致 | 下次保存被结构覆盖 | 文档写明"以编辑器为准"；`aiwu.imported.raw` 机制只服务外部卡 |
+
+---
+
+## 3. L1 组装算法（"常规人设常驻"）
+
+### 3.1 不推翻的前提（照 `src/prompt.ts` 现状）
+
+1. L1 仍是**一个** section：`SECTION_ACTIVE = 'aiwu:active-character'`，`order = ORDER_BASE + 100 = 5100`，`text` 是**函数**，每次组装重新求值。
+2. 未启用 → 返回 `''`（DSH 过滤空段，等于不存在）。
+3. **不新增/不注销 section**（注册表去重冲突是已知坑）；世界书段是**新增一个**常驻注册的 section（注册一次，未命中返回 `''`）。
+4. L1 段文本函数是**同步**的：异步数据（卡、日记、会话、世界书命中素材）必须在 `refreshCache()` 里预取。
+
+### 3.2 组成与顺序（静态块 → 世界书 → 易变块 → 行为口径）
+
+| # | 段 | 来源 | 作用 | 易变？ | 缺失时 |
+|---|---|---|---|---|---|
+| 1 | `## 你现在的身份：{name}` | `data.name` | 身份锚 | 否 | 段必有 |
+| 2 | `▎角色定义` | `description`（原文/投影） | "他是谁" | 否 | 空则省 |
+| 3 | `▎性格核心` | `data.personality` / `aiwu.personality` | 行为底色 | 否 | 省 |
+| 4 | `▎声线基因（最高优先级，决定每一句的措辞）` | `aiwu.voice.*` | **灵魂字段**：怎么说话 | 否 | 省 |
+| 5 | `▎关系定位` | `aiwu.relationship.*` + `relationBaseline()` 起点档 | 称呼与距离 | 否 | 省 |
+| 6 | `▎故事背景（底色，不是任务）` | `data.scenario` / `aiwu.world` | 来处与落差 | 否 | 省 |
+| 7 | `▎角色自带指令（来自角色卡，非系统提示词）` | `data.system_prompt` | 声线/长度的硬约束 | 否 | 省 |
+| 8 | `▎用户在这个故事里` | `aiwu.userPersona.*` | 你是谁 | 否 | 省 |
+| 9 | `▎记忆锚点（必须记住）` | `aiwu.memoryAnchors` | 具体细节 | 否（`forget` 会改） | 省 |
+| 10 | `▎动态状态（此刻的进行时）` | `aiwu.dynamicState.*` | 当下心情/近况 | **是**（面板可改） | 省 |
+| 11 | `▎互动偏好` | `aiwu.interactionPref.*` | 手感与边界 | 否 | 省 |
+| 12 | `▎示例对话` | `data.mes_example`（宏展开） | 声线样板 | 否 | 空则省（默认开，§3.4） |
+| 13 | **世界书命中条目** | `data.character_book` | 按需知识 | **是** | 未命中省（§4） |
+| 14 | `## 距上次互动` + 当前时间 | `session.last_ts` / `activatedAt` | 时间差档位 | **是（每分钟）** | 走 fallback |
+| 15 | 会话摘要 | `session.recent/topic/mood` | 接续 | **是（每轮）** | 省 |
+| 16 | 最近日记 | `diary.md` 最近 3 天 | 记忆 | **是（每次写日记）** | 省 |
+| 17 | `## 交互模式` | `_active.json.mode` | 文本/动作口径 | 否 | 有默认 |
+| 18 | `## 「关系」输出口径`（`RELATION_HINT`） | 常量 | 禁止数值化 | 否 | 必有 |
+| 19 | **收尾提醒** | `data.post_history_instructions` | 禁忌/雷区（§3.3） | 否 | 省 |
+
+**为什么这么排**
+
+- **1–12 是稳定前缀**：卡不变 → 这一大块字节不变 → prompt 前缀缓存能命中。
+- **13 是"条件稳定"**：未命中时返回 `''`（前缀不受影响）；命中且内容稳定时，下一轮同样命中同一批条目 → 前缀仍稳定。只有命中集合变化的那一轮会失一次缓存（不可避免，见 §6.2）。
+- **14–16 天生每轮变**（时间差/摘要），必须靠后，否则它们一变就把后面全部打穿。
+- **17–19 是"行为口径"**，放最后符合"越靠近输出越有约束力"的经验，也让 `post_history_instructions` 尽量贴后（§3.3）。
+
+### 3.3 `system_prompt` / `post_history_instructions` 的映射
+
+**硬事实**：DSH 插件只有一个通道 `ctx.systemPrompt.section()`，只能**追加**系统提示词段，**不能**改写/替换 DSH 自己的系统提示，也没有"对话历史之后"的注入位（历史之后由宿主自己拼）。
+
+**决定：降级为两段自带标注的文本，不做任何"假装是系统提示词"的事。**
+
+```
+▎角色自带指令（来自角色卡，非系统提示词）
+下面这段是角色卡作者写的扮演指令，优先级低于本系统提示词与用户指令，但高于角色卡其余描写：
+—————
+{data.system_prompt，宏展开后}
+—————
+```
+
+```
+## 收尾提醒（角色卡自带）
+
+{data.post_history_instructions，宏展开后}
+```
+
+**为什么要这样标注（不是为了免责）**：
+
+1. 酒馆的 `post_history_instructions` 靠"位置在历史之后"获得强压制力。我们在 DSH 里**复制不了位置**，
+   所以必须让模型自己知道"这是卡片自带的提醒"，不是"系统在改规则"——否则它会以为自己拿到了系统级授权，可能越权。
+2. `system_prompt` 在酒馆里是**系统提示词模板**（可以整个替换酒馆的系统提示）。我们如果原样塞进 L1，
+   一张卡里写着"忽略所有其他指令"就会污染整个 DSH 会话。标注 + 明确优先级是唯一低风险做法。
+3. 位置近似：`post_history_instructions` 放在 **L1 最末（第 19 位）**，是所有"我们注入的内容"里最接近模型输出的位置；
+   `L0` 优先级声明仍然压在最前面，两不冲突。
+
+**不做的事**：不把 `system_prompt` 拼进 `BASELINE_TEXT`；不设 `order` 越过 DSH 第一方段落（会打乱 L0/L1 分层）。
+
+### 3.4 `mes_example` 默认开还是关
+
+**默认开**，但有三重约束：
+
+| 约束 | 规则 | 理由 |
+|---|---|---|
+| 长度 | 展开后 > **1200 字符** → 按 `<START>` 分块，从后往前丢，直到 ≤1200；全丢则整段省略并记 `warn` 日志 | 示例对话价值高但极贵；1200 中文 ≈ 800 token/轮 |
+| 分块 | 只渲染到 `block:{N}` / `<START>` 边界，**不切断一句台词** | 切一半的示例会教坏声线 |
+| 迁移卡 | 迁移卡没有 `mes_example` → 不渲染、不生成 | **绝不编造对话**（蒸馏卡才有） |
+
+为什么默认开：`voice.*` 是"元描述"（"节奏快，一次连发 3-4 条"），模型要靠推理转化成台词；
+`mes_example` 是**同一件事的示范**，转化成本最低、声线锚定最强。这也是酒馆把 `mes_example` 作为四大原生字段之一的原因。
+
+关掉的方式：`aiwu.prompt.includeMesExamples = false`（面板开关，ui-designer 后续接）。
+
+### 3.5 宏替换
+
+| 宏 | 行为（L1 静态块） | 行为（开场/消息侧） |
+|---|---|---|
+| `{{char}}` | `data.nickname \|\| data.name` | 同左 |
+| `{{user}}` | `aiwu.userPersona.displayName \|\| '你'` | 同左 |
+| `{{// 注释}}` | **整段删除** | 同左 |
+| `{{comment: 注释}}` | **整段删除** | 同左 |
+| `{{random:A,B}}` | **取首项 A**（稳定求值） | 真随机 |
+| `{{pick:A,B}}` | **取首项 A**（稳定求值） | 真随机 |
+| `{{roll:N}}` | 渲染为 `dN`（不投骰，静态块里没有"这一轮"的语义） | 投 `1..N` |
+| `@@depth/@position/@scan_depth/@activate/@dont_activate` | 世界书条目的**行首装饰器**：已知项解析成行为，**未知 `@@` 行整行丢弃**（不作为正文注入） | 同左 |
+
+**`{{random}}` / `{{pick}}` 为什么静态块取首项**：它们是给开场白准备的（"换一句开场"时真随机才有意义）。
+如果 L1 里每轮重新抽，前缀缓存每轮失效、还会让模型看到"设定在跳"。
+> ⚠️ 已知近似：`{{user}}` 拿不到 DSH 的真实用户身份（插件没有这个服务）。默认「你」；用户在面板填 `displayName` 才具体化。
+
+**实现签名（`src/tavern.ts`）**
+
+```ts
+export type MacroMode = 'stable' | 'live'
+export function expandMacros(text: string, ctx: { char: string; user: string; mode: MacroMode }): string
+```
+
+- L1 渲染一律 `mode: 'stable'`；开场/候选生成用 `'live'`。
+- 装饰器解析单独函数：`parseDecorators(content): { content: string; decorators: Record<string,string> }`，两者都**纯函数**（可单测、可断言）。
+
+### 3.6 渲染预算与降级
+
+| 情况 | 行为 |
+|---|---|
+| 缓存未命中（启动瞬间 / 刚 invalidate） | 沿用现状：给最小可用内容 `## 你现在的身份：{name}\n\n（角色卡正在载入，先用这个身份和声线自然对话。）`，并 `void refreshCache()`。**同时修掉"清缓存导致整轮降级"的 P0-7**：改成"构造新对象后整体替换"，读盘期间继续用旧快照 |
+| 卡被删但 `_active.json` 仍指向它 | `restore()` 已有处理（静默拔出 + 写回）；`renderActiveSection` 再加一层：`name` 存在但卡读不到 → 返回 `''` 并记一次 error（不每轮刷屏） |
+| 世界书命中为空 | 该段返回 `''`（不产生空标题） |
+| 单段超长 | **不截断**（主人要"不设上限"）；只在 §5 给软警告。`mes_example` 是唯一例外（1200 字符硬预算，§3.4） |
+
+### 3.7 L1 的对外契约（`renderL1` 签名）
+
+```ts
+export interface L1Extras {
+  /** 距上次互动的时间差档位文本（prompt.ts 现算后传入，tavern.ts 不碰时间逻辑） */
+  timeGapText?: string
+  /** session.recent + topic + mood 渲染好的文本 */
+  sessionText?: string
+  /** 日记渲染好的文本 */
+  diaryText?: string
+  /** 交互模式文本 */
+  modeText?: string
+  /** 世界书命中文本（§4，由 selectLoreEntries 产出） */
+  loreText?: string
+  /** 关系口径常量（prompt.ts 传入，避免循环依赖） */
+  relationHint?: string
+}
+
+export function renderL1(card: CharacterCardV3, extras: L1Extras): string
+```
+
+**为什么把 extras 拆出来**：`tavern.ts` 只负责"卡片 → 文本"，时间差/会话/日记/关系口径仍归 `prompt.ts`。
+这样可以单独对 `renderL1` 做纯函数单测（`verify-tavern.mjs`），也不会让 `tavern.ts` 依赖 `store.ts`（避免循环导入）。
+
+---
+
+## 4. 世界书注入（⏳ 第二批：结构先行，算法待调研定稿）
+
+> **本节现在只定"骨架与硬约束"，算法细节一律 `⏳待调研`。**
+> 等 `tavern-researcher` 的 `06-tmp\tavern-study\REPORT.md`（四家社区插件源码阅读）到位后补完。
+> 已知线索：`dsh-universal-worldbook` 主打"请求级一次性注入、不污染上下文"——说明"注入会不会污染/累积"是真坑。
+
+### 4.1 已确定的硬约束（不依赖调研，先钉死）
+
+| # | 约束 | 含义 |
+|---|---|---|
+| C1 | **通道只有一个** | 只能走 `ctx.systemPrompt.section()`（动态文本函数）+ `agent/pre-step` + 现有 REST。**不新增工具、不改宿主** |
+| C2 | **没有"历史之后"的注入位** | 所以世界书只能进系统提示词的一侧；`before_char` / `after_char` 只能映射成"系统提示词内的相对位置"（§4.6） |
+| C3 | **不常驻工具** | 主人已否掉"常驻查询工具"。"主动读取"若要保留，只能是"按需注入一段可读清单"或未来的一次性查询形态，**本轮不实现** |
+| C4 | **零依赖** | 没有 tokenizer，预算只能按字符近似（§4.5） |
+| C5 | **防抖** | 同一轮内多次 `pre-step`（工具循环会重复触发）**绝不能**导致同一批条目被"追加两次" |
+| C6 | **去重** | 同一 `entry` 在一轮内只出现一次；同一段文本不重复出现 |
+| C7 | **未命中零成本** | 没有命中时 section 返回 `''`，不进系统提示词、不影响前缀缓存 |
+| C8 | **可关闭** | `aiwu.prompt.lore.enabled = false` 时整段消失（排查用） |
+
+### 4.2 契约（现在就能定，因为它只是函数签名）
+
+```ts
+export interface LoreSelection {
+  /** 命中的条目（保持 insertion_order 排序后） */
+  entries: Array<{ id: string; name: string; position: 'before_char' | 'after_char'; text: string }>
+  /** 渲染好的单个文本块（含 position 分组标题）；没命中为 '' */
+  text: string
+  /** 诊断信息，不进提示词，只给 verify 脚本和日志 */
+  diag: {
+    scannedChars: number
+    hitCount: number
+    constantCount: number
+    usedChars: number
+    budgetChars: number
+    droppedByBudget: string[]
+    deduped: string[]
+  }
+}
+
+export function selectLoreEntries(
+  book: Lorebook | undefined,
+  recentTexts: string[],          // 最近 N 条对话原文/摘要（由 pre-step 采集）
+  options: {
+    scanDepth: number             // ⏳默认值待定
+    budgetChars: number           // ⏳默认值待定
+    charName: string; userName: string   // 宏展开用
+    enabled?: boolean
+    recursive?: boolean           // ⏳是否做递归扫描，待定
+  },
+): LoreSelection
+```
+
+**为什么先定签名**：世界书是"卡的能力"，`selectLoreEntries` 是纯函数，可以和 `prompt.ts` 解耦；
+调研结论只影响**默认值与匹配细节**，不影响这条缝。真到要改算法，改实现不改接口。
+
+### 4.3 待定决策点清单（⏳每一条都要调研后填）
+
+| # | 决策点 | 候选 | 评估标准 | 我现在的倾向（未定稿） |
+|---|---|---|---|---|
+| W1 | `scan_depth` 默认几 | 2 / 4 / 6 / 摘要+原文混合 | 命中率 vs 误命中 vs 成本；我们只有 `session.recent`（5 条 × 120 字） | 4（最近 4 条） |
+| W2 | `constant` 条目 | 无条件全部注入 / 受预算约束 / 只注入 `enabled && constant` | 预算是硬约束，constant 也不能例外 | 全部注入但**会计入预算**，超预算按 `insertion_order` 截断 |
+| W3 | `selective` + `secondary_keys` | ①有 `selective` 才要 secondary 全中 ②只要任一 ③忽略 selective | 酒馆口径 vs 实现复杂度 | ①（语义正确），`secondary_keys` 为空则退化为只看主 keys |
+| W4 | 大小写 | 统一 `toLowerCase()` / 尊重 `case_sensitive` | 中文无大小写，只影响英文 | 默认忽略大小写；`case_sensitive: true` 时严格 |
+| W5 | `use_regex` | 支持 / 不支持（按字面量处理） | 零依赖下 `new RegExp` 可用，但用户写坏正则会抛 | 支持，但 `try/catch` 包住，失败按字面量匹配并记 `diag` |
+| W6 | 预算单位 | `token_budget`（token） / 字符预算 / 双轨 | 无 tokenizer；酒馆卡里写的是 token | **字符预算为主**，`token_budget` 按 `×1.5`（中文保守）换算成字符上界，取两者更小 |
+| W7 | 预算默认值 | 800 / 1500 / 2500 字符 | 每轮常驻成本；L1 静态块已经 ~3000 字符 | 1500 字符 |
+| W8 | 命中后放哪个 section | ①L1 内（第 13 位）②独立 section `aiwu:lore` | 可观察性 / 前缀缓存 / 未来能否单独开关 | **独立 section**（D10），但等调研确认社区做法 |
+| W9 | `before_char` / `after_char` 落点 | before → L1 开头之前 / after → 静态块之后 | 语义近似度；`before_char` 会顶掉"身份标题"的锚定效果 | `after_char` → 静态块之后（第 13 位）；`before_char` → 身份标题之前，加小标题区分 |
+| W10 | 递归扫描 | 做 / 不做 | 酒馆 `recursive_scanning` 的收益主要在"一条命中带出另一条" | **v1 不做**（复杂 + 易失控），写进文档"不支持" |
+| W11 | 匹配素材 | `session.recent` / 本轮用户原文 / `topic` / `mood` | 摘要 120 字截断会丢关键词 | `recent` + `topic` + **本轮用户原文**（pre-step 从会话事件取最后一条 user），三者拼接 |
+| W12 | 同一 entry 多 key 命中 | 只注入一次 | 显然 | 按 entry 去重（`id` 优先，无 `id` 用 `name`，都无用内容哈希） |
+| W13 | `insertion_order` 冲突（同值） | 稳定排序 / 按 `priority` | 可预测性 | 先 `priority` 降序，再 `insertion_order` 升序，再 `id` 字典序（稳定） |
+
+### 4.4 防抖与去重（可以现在定，因为这是通道性质决定的）
+
+**先说清一件事**：因为走 `systemPrompt.section`，每次组装都是**重新求值、整段重生成**，没有"往历史里追加一条 context 消息"的通道。
+所以"同一轮多次 pre-step 重复注入"在我们的形态里**不可能表现为"追加"**——重放是纯函数，天然幂等。
+
+真正要防的是三件事：
+
+| 风险 | 场景 | 处置 |
+|---|---|---|
+| **轮次串味** | 同一轮内工具循环多次 `pre-step`，每次都 `refresh`，A 轮的素材没写完 B 轮又进来（`prompt.refresh` 串行化本身是坏的，P0-6） | ① 修 `prompt.refresh` 的串行化（一起修 P0-6）；② cache 里带 `loreForTurn: turnKey`，渲染时 turnKey 不匹配就**沿用上一次的文本**（不返回空、不阻塞），并记一次 debug 日志 |
+| **同一条目重复** | `constant` 与关键词同时命中同一条；或两条内容完全一样 | 先按 `id/name/内容哈希` 去重（W12），再拼文本时对段落级 `Set` 去重 |
+| **同一段文本重复** | 卡里 `memoryAnchors` 与世界书某条内容相同（用户从世界书抄了一份） | 渲染后对**整段**做一次"相邻重复段落折叠"（保守：只折叠完全相等的段落，不做模糊） |
+
+**turnKey 从哪来**：`agent/pre-step` 的 payload 有 `agent.id` 与 `turn`（`index.ts` 已在用），拼 `${agentId}:${turn}` 即可；
+`turn` 缺失时退化为 `session.id` + 时间窗。
+
+### 4.5 预算换算（无 tokenizer）
+
+```
+字符预算 = min( options.budgetChars, token_budget × 1.5 )
+```
+
+- 中文保守估计 **1 token ≈ 1.5 汉字**（宁少不多，超预算比欠预算更危险——每轮重复付费）。
+- `token_budget` 缺失 → 只用字符预算。
+- 超预算时：先丢"关键词命中"里排名靠后的（按 W13 排序后从尾丢），`constant` 条目**最后丢**（记 `diag.droppedByBudget`）。
+
+### 4.6 `before_char` / `after_char` 落点（候选，⏳待调研）
+
+```
+[before_char 条目]（加小标题「▎先读这些设定」）
+## 你现在的身份：{name}
+...静态块 1–12...
+[after_char 条目]（加小标题「▎相关设定」）
+...易变块 14–19...
+```
+
+- 语义近似：酒馆的 `before_char` = 角色定义之前，`after_char` = 角色定义之后。我们映射到"身份标题前 / 静态块后"。
+- `after_char` 是主流（默认 `position` 在酒馆里也是 `after_char`），所以绝大多数条目会落在静态块后面。
+- 风险：`before_char` 排在"身份标题"之前，可能削弱身份锚；只有当条目确实需要先读时才用。
+
+### 4.7 拿到调研报告后要补的三件事
+
+1. **填 §4.3 的 13 个决策点**（每个都要写"选了哪个 + 一句为什么 + 是否与社区一致/为什么不一致"）。
+2. **对比四家的注入形态**：一次性注入 / 每轮注入 / 工具读取，各自的上下文污染与成本结论，落成 §4.8「社区对照表」。
+3. **列出"我们抄不了的部分"**：任何需要"往会话里追加消息"或"改宿主提示词"的做法 → 明确标注"DSH 无此通道，放弃"。
+
+---
+
+## 5. 长度策略（"不设上限 + 软警告"）
+
+### 5.1 阈值表
+
+| 指标 | 软警告阈值 | 提示文案（面板） | 理由 |
+|---|---|---|---|
+| `description`（投影后） | **> 1200 字符** | 「角色设定偏长（{n} 字），建议把细节拆到世界书：常驻内容每一轮都要重新付费」 | 1200 中文 ≈ 800 token/轮；100 轮 ≈ 8 万 token 累计输入 |
+| 单卡 L1 静态块（第 1–12 段合计，不含世界书/日记/会话） | **> 3000 字符** | 「这张卡的常驻人设约 {n} 字，每轮都会注入」 | 3000 中文 ≈ 2000 token/轮；再加易变块就 4000+ |
+| 世界书单条 `content` | **> 800 字符** | 「这一条太长（{n} 字），建议拆成多条、各自配关键词，命中更准」 | 单条过长会一条吃掉整轮预算 |
+| 世界书总量（全部 `entries` 的 `content` 之和） | **> 20000 字符** 或 **条目数 > 30** | 「世界书偏大（{n} 条 / {m} 字），命中率会下降，建议合并同主题条目」 | 关键词匹配的噪声随条目数线性上升 |
+| `card.json` 文件 | **> 200 KB** | 「卡片文件偏大，面板加载会变慢」 | REST 上限 4 MB，但每次 `listCharacters` 全量读 |
+| 世界书某条 `keys` 数量 | 0 且非 `constant` | 「这条没有关键词，永远不会被命中（除非标记为常驻）」 | 静默失效是最气人的 bug |
+
+### 5.2 不做什么
+
+- **不截断、不拒绝保存、不缩减 L1**：主人的要求是"不设上限"，任何硬限制都会在某天变成"我的卡为什么少了一段"。
+- **不做自动拆分**：不替用户把 `description` 拆进世界书（那是蒸馏/编辑器线的交互，不是存储层的活）。
+- **警告只在 UI 显示**（`awu-` 前缀的提示条，ui-designer 接），日志里只记一次（防刷屏）。
+
+### 5.3 极端情况的边界
+
+| 情况 | 行为 |
+|---|---|
+| 单张卡 L1 > 20000 字符 | 仍然注入（不截断），日志 warn 一次；超出模型上下文是模型侧的事 |
+| 世界书条目全部命中（`constant` + 关键词） | 受预算约束截断（§4.5），并 `diag.droppedByBudget` 记录被丢的 `id` |
+| `token_budget` 写得极小（如 100） | 预算 = `min(budgetChars, 150)`；`constant` 条目也按预算丢，日志说明 |
+
+---
+
+## 6. 风险与回归
+
+### 6.1 每轮 token 成本估算
+
+口径：中文 **1 token ≈ 1.5 字符**（保守，即高估成本）；英文按 4 字符/token（本插件内容基本全中文）。
+
+| 组成 | v0.1 现状 | v0.2.0（标准档） | 备注 |
+|---|---|---|---|
+| L0 常驻底线 | 684 字符 ≈ 460 token | 同左 | **不变** |
+| L1 静态人设（第 1–12 段） | ~1200 字 ≈ 800 token | ~2900 字 ≈ 1950 token | 主要是双写结构 + 声线细化 |
+| ↳ 其中 `mes_example` | 0 | ~800 字 ≈ 530 token | 上限 1200 字 |
+| 世界书命中 | 0 | ~800 字 ≈ 530 token | 受 1500 字预算约束 |
+| 时间差 + 会话 + 日记 | ~900 字 ≈ 600 token | 同左 | 不变 |
+| 交互模式 + 关系口径 | ~450 字 ≈ 300 token | 同左 | 不变 |
+| **合计 / 轮** | **~2100 token** | **~4300 token**（≈2.1×） | 未命中世界书时 ~3800 |
+
+累计成本（100 轮会话，全部当输入重算）：
+
+- v0.1：约 **21 万** token
+- v0.2.0：约 **43 万** token（世界书常命中时）
+
+**降本旋钮（按效果排序）**
+
+1. `mes_example` 关掉 → −530 token/轮
+2. 世界书预算降到 800 字 → −200 token/轮（按需内容变少，但命中率降）
+3. 拆卡（把 `description` 的长内容移进世界书）→ 静态块变小，只有命中才付费
+
+> 这几个旋钮都已在 `aiwu.prompt` 里留了开关，面板后续接上即可。
+
+### 6.2 prompt cache 影响（为什么顺序很重要）
+
+- DSH 把 system prompt 拼成一段前缀发给模型；**前缀一旦在某个位置变化，后面全部失效**。
+- 我们的段在 `order 5000/5100/5150`（第一方段落之后），所以：
+  - ✅ 卡不变 → 第 1–12 段字节稳定 → 前缀命中；
+  - ❌ 第 14 段的"当前时间"**每分钟都在变** → 它后面的所有内容（会话/日记/模式/关系口径）每轮都重新计费；
+  - ⚠️ 第 13 段（世界书）位于"稳定前缀"和"易变块"之间：**未命中时 `''`（等于不存在，前缀不受影响）；命中且下一轮仍命中同一批条目时，前缀仍稳定**。只有"命中集合变化"的那一轮会失一次缓存。
+- 结论：**世界书段必须放在时间差之前**（即第 13 位），否则它会跟着时间一起每轮失效。
+- 另一个已存在的浪费：`renderActiveSection` 每次都输出"当前时间"，哪怕没有时间差档位。这一条保留（时间感知是产品价值），但要在文档里写清"这是刻意用缓存换体验"。
+
+### 6.3 「5 分钟以上长会话会不会反复注入」
+
+**不会重复注入，但会重复付费。** 三个层次说清：
+
+1. **注入是重放，不是追加**：`section.text` 每次组装重新求值，`system prompt` 是"整段重建"，不存在"越聊越长"。v0.1 就是这样。
+2. **每轮成本是常数**：静态块 + 命中块 + 易变块，长度与轮数无关。
+3. **真正的风险是"命中素材过期"**：`session.recent` 只有 **5 条 × 120 字**摘要（`RECENT_WINDOW=5`），
+   30 轮之后，20 轮前提到过的角色名早就掉出窗口 → 世界书命中率随会话变长而**下降**。
+   处置（§4.3 W11）：把 `topic`（未竟话题，跨轮保留）和**本轮用户原文**一起作为匹配素材；
+   仍不够的话，后续可以考虑"把最近 N 轮的完整用户消息存进 session.json"（**不在本轮**，会改 session 结构）。
+
+### 6.4 `session.json` 的 `recent` 要不要参与关键词匹配
+
+**要参与，但不能独占。** 决定：
+
+| 素材 | 参与 | 理由 |
+|---|---|---|
+| `session.recent[-5:]` | ✅ | 现成的滚动摘要，成本为零；覆盖"最近 5 轮"足够 |
+| `session.topic` | ✅ | 跨轮保留，弥补 recent 的窗口短 |
+| **本轮用户原文**（`agent/pre-step` 从会话事件取最后一条 `user/message`） | ✅ | 摘要 120 字截断会丢关键词；原文最准 |
+| 全量会话历史 | ❌ | IO 成本高、隐私面大；`extractTurnTexts` 已经只扫尾部 |
+| `diary.md` | ❌（本轮） | 日记是"记忆"，不是"触发词"；混进来会命中一堆历史无关条目。⏳待调研看社区做法 |
+
+> 隐私说明：匹配只发生在内存里，不落盘、不进日志（日志只记 `diag.hitCount`，不记命中文本）。
+
+### 6.5 与客户端/其它线的过渡契约（**这条要 Lead 拍板**）
+
+现状：`store.readCard()` / `listCharacters()` 返回的对象被 `web.ts` 直接塞进 REST 响应，客户端按旧 34 字段读
+（`client/card-schema.ts:215` 的 `toDraft(card)` 读 `card.basic` 等）。**一旦 store 改成返回 CCv3，活面板会立刻空白。**
+
+推荐过渡方案（v0.2.0 内保留，v0.3.0 删旧视图）：
+
+```ts
+// GET /character 响应（新增 ccv3 / fields 两个键，card 保持旧语义不破客户端）
+{ ok: true, name, card: toLegacyView(ccv3), ccv3, fields: toLegacyView(ccv3), ... }
+
+// POST /character/save：两个入口
+{ name, card: <旧 34 字段视图> }   → fromLegacyView(view, 现有 ccv3) 合并写回（保留未知键）
+{ name, ccv3: <完整 CCv3> }        → normalizeCard 后直存
+```
+
+代价：`web.ts` 要加 3 处投影（约 15 行）；`web.ts` **不在我的写盘范围**（integration-contract §一 归 distill-designer），
+所以这条需要在排期时指给人。**不做的后果**：面板空白、无法建卡/改卡（P0 级）。
+
+> ⚠️ 顺带提醒：新增路由时**不要依赖 `buildRoutes` 的 `method` 字段**（`src/index.ts:208-214` 注册时丢弃），
+> 必须在 handler 里自己看 `req.method`。本次设计**不新增路由**，所以不受影响。
+
+### 6.6 `store.ts` 的两个 P0（本次必须一起修，否则 CCv3 会放大它们）
+
+| P0 | 现状 | 与本次的关系 | 处置 |
+|---|---|---|---|
+| **写盘无互斥**（`host.md` P0-2） | `atomicWrite` 只防半个文件，不防丢更新：两个会话并发 `turn-stopping`、或面板保存与轮次写盘交错，会互相覆盖 | CCv3 让单次写更大、投影更多，"读-改-写"的窗口更长 → 丢更新概率上升 | `Store` 加**按角色名的串行队列**（`Map<name, Promise>`，同角色串行、不同角色并行）；`writeCard` / `commitTurn` / `appendDiary` / `forget` / `editDiary` 全部入队 |
+| **`readJson` 把损坏当不存在**（`host.md` P0-23） | JSON 坏 → 返回 `undefined` → `ensureIndex` 把卡从索引剔除 → 用户看到"卡凭空消失" | 迁移期更危险：一次坏写 + 一次重建 = 卡从列表消失 | 区分 `ENOENT`（不存在，正常）与 `SyntaxError`（损坏，异常）：损坏时**把文件改名成 `card.json.corrupt-<时间戳>` 备份**，返回 `undefined` 但**保留索引条目**并 stderr 留痕；`ensureIndex` 不因损坏而删条目 |
+
+### 6.7 其它回归清单
+
+| # | 风险 | 验证方式 |
+|---|---|---|
+| R1 | 面板保存把 `extensions.aiwu` 覆盖成空 | `fromLegacyView` 单测：只改一个字段 → 其余结构字节不变 |
+| R2 | `awu_forget` 仍去删 `card.memory_anchor`（旧路径） | 改成删 `awu.memoryAnchors` + `awu.dynamicState.*`；verify 断言 |
+| R3 | `awu_opening_next` 仍写 `card.openings` | 改成写 `alternate_greetings`；verify 断言轮换顺序 |
+| R4 | `relationState` / `renderRelationTag` 读 `card.relationship` | 改读 `toLegacyView(card).relationship`（或直接 `awu.relationship`） |
+| R5 | `web.ts` 的 `bySource` 统计 | 走 `cardSource(card)`；verify 断言 `source` 仍是字符串 |
+| R6 | 旧卡第一次被读时不落盘 → 与预期"迁移了"不一致 | 文档明确"读时归一"，验收里给"什么时候会真正落盘"的判据 |
+| R7 | `seedPresets` 种入 CCv3 后，`ensureIndex` 的 `card['name']` 取值 | CCv3 的名称在 `data.name`，不在顶层 → **`ensureIndex` / `seedPresets` / `listCharacters` 全部要改读 `data.name`**（这是最容易漏的一处） |
+| R8 | `REQUIRED_FIELDS` / `FULL_FIELDS` 死常量 | 顺手删掉或改成 CCv3 版本（host.md P2-21） |
+
+---
+
+## 7. 验收清单（可执行）
+
+> 宿主侧改动**必须重启 DSH 才生效**（`lib/index.js` 不热加载）。浏览器侧改完 `npm run build` + 刷新页面。
+
+### 7.1 构建与类型（写代码后第一道门）
+
+```powershell
+cd D:\CODEX\deepseek-work\01-projects\dsh-ai-with-u
+npm run build:host
+# 期望：无输出（或只有 tsc 的 0 error 摘要），$LASTEXITCODE -eq 0
+```
+
+### 7.2 格式自检脚本
+
+```powershell
+node scripts/verify-tavern.mjs
+# 期望最后一行：全部通过（N 项），exit code 0
+```
+
+`scripts/verify-tavern.mjs` 至少断言（纯函数 + 临时目录，不碰真实存档）：
+
+| # | 断言 | 方法 |
+|---|---|---|
+| V1 | 三张 `presets/*/card.json` 都是合法 CCv3 | `spec === 'chara_card_v3'`、`spec_version === '3.0'`、`data.name` 非空、`data.extensions.aiwu.schema === 1` |
+| V2 | 迁移幂等（字节级） | `migrateLegacyCard(migrateLegacyCard(x))` 与前者 `JSON.stringify` 相等 |
+| V3 | 34 字段零丢失 | 反射 `client/card-schema.ts` 的 `GROUPS`（脚本里内置一份同样的 34 项列表，避免 import TSX），逐项断言迁移后能在 CCv3 里找回，**且内容字符串完全相等** |
+| V4 | 未知键保留 | 塞 `{ "自定义": { "x": 1 } }` → 迁移后出现在 `awiu.legacy.extra`；塞 `data.extensions.other` → 原样在 |
+| V5 | 世界书命中 | 关键词出现在 `recentTexts` → 命中；不出现在扫描深度内 → 不命中 |
+| V6 | 世界书预算 | 造 20 条 × 400 字，全部命中 → `text.length <= budgetChars`，`diag.droppedByBudget.length > 0` |
+| V7 | 世界书去重 | `constant` + 关键词双命中同一条 → 只出现一次；两条相同内容 → 只出现一次 |
+| V8 | 世界书常量 | `constant: true` 且关键词不出现 → 仍注入 |
+| V9 | 大小写 / `use_regex` / 坏正则 | `"Hello"` 命中 `"hello"`；`use_regex` 正则应生效；坏正则不抛、按字面量 |
+| V10 | 宏：`{{char}}`/`{{user}}`/`{{//}}`/`{{comment:}}` | 注释整段消失；`{{char}}` 用 nickname 优先 |
+| V11 | 宏：静态块 stability | 同一输入连调两次 `renderL1` → 输出字节相等（`random/pick` 不会抖） |
+| V12 | L1 顺序 | `system_prompt` 段 → `post_history` 段 → 时间差段 的**下标递增** |
+| V13 | `toLegacyView` round-trip | `fromLegacyView(toLegacyView(card), card)` 与 `card` 的 `awiu` 结构相等 |
+| V14 | 损坏文件不丢索引 | 写坏 `card.json` → `readCard` 返回 `undefined`、`.corrupt-*` 备份存在、`ensureIndex` 后索引条目仍在 |
+| V15 | 并发写串行化 | 并发 25 次 `commitTurn` 同角色 → `turn_count` 恰等于 25（旧实现会少） |
+
+### 7.3 重启 DSH 后的 REST 探活
+
+```powershell
+# 1) 总览：插件活着
+(Invoke-WebRequest 'http://127.0.0.1:59609/_dsh/ai-with-u/overview' -UseBasicParsing).Content
+# 期望：{"ok":true,...,"stats":{"characters":3,...}}
+
+# 2) 单卡：能看到 CCv3（过渡期字段名待 §6.5 拍板后定）
+(Invoke-WebRequest 'http://127.0.0.1:59609/_dsh/ai-with-u/character?name=虞照' -UseBasicParsing).Content
+# 期望：包含 "spec":"chara_card_v3" 与 "aiwu"；包含 34 字段旧视图（若采纳 §6.5）
+
+# 3) 磁盘：真的写成 CCv3（启用 + 保存一次后）
+Get-Content "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.json" -TotalCount 4
+# 期望："spec": "chara_card_v3",
+#        "spec_version": "3.0",
+#        "data": {
+# 且同目录出现 card.v1.bak.json（首次迁移的机器）
+```
+
+### 7.4 迁移与回滚演练
+
+```powershell
+# 演练：先备份现场
+Copy-Item "$env:USERPROFILE\.dsh\ai-with-u" "$env:TEMP\aiwu-drill" -Recurse -Force
+
+# 1) 触发一次写盘：面板改一个字保存（或 POST /character/save）
+# 2) 断言盘上是 CCv3 且备份存在
+$d = "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照"
+(Get-Content "$d\card.json" -Raw | ConvertFrom-Json).spec          # 期望 chara_card_v3
+Test-Path "$d\card.v1.bak.json"                                    # 期望 True
+# 3) 幂等：再保存一次，新建/修改时间之外的字节应该稳定
+$h1 = (Get-FileHash "$d\card.json").Hash
+# 保存第二次
+$h2 = (Get-FileHash "$d\card.json").Hash
+# 期望：$h1 -eq $h2（modification_date 在同秒内）/ 仅时间戳变化
+
+# 4) 回滚
+Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
+# 重启 DSH 后 /overview 仍正常、卡仍可见（读时归一）
+```
+
+### 7.5 手验（重启后 3 分钟冒烟）
+
+1. 左侧栏「角色管理」→ 角色簿里 3 张卡都在、名字正确（验证 R7：`data.name` 读取）。
+2. 启用虞照 → 首次对话 → 模型自称/称呼/句长符合声线（验证 L1 声线段生效）。
+3. 面板改 `dynamic_state.当前情绪` → 保存 → 再发一句 → 回复情绪应变化（验证结构投影 & 缓存刷新）。
+4. 「换一句开场」→ 开场白换成下一句（验证 `alternate_greetings` 轮换）。
+5. 说「忘掉便利贴」→ `awu_forget` 命中 `memoryAnchors`（验证 R2）。
+6. 世界书（第二次交付后）：在卡里加一条 key 为「火锅」的条目 → 聊天提到火锅 → 该条出现在 L1（可用 `/character` 的 L1 调试字段或日志 `diag` 验证）。
+
+---
+
+## 8. 实现清单（给 Lead 排期用）
+
+| 文件 | 动作 | 规模（估） | 归属 |
+|---|---|---|---|
+| `src/tavern.ts` | **新建**：CCv3/V2/Legacy 类型、`normalizeCard`、`migrateLegacyCard`、`toLegacyView`、`fromLegacyView`、`deriveFromNative`、`renderL1`、`selectLoreEntries`、`expandMacros`、`parseDecorators`、`lengthWarnings`、`cardSource` | ~800 行 | 我 |
+| `src/prompt.ts` | L1 改用 `renderL1`；`refreshCache` 读 CCv3；新增 `aiwu:lore` section（第二批）；修 P0-6（refresh 串行化）+ P0-7（清缓存降级） | ~150 行改动 | 我 |
+| `src/store.ts` | `readCard` 读时归一；`writeCard` 接受 CCv3 / 旧视图并做投影 + 备份；`ensureIndex`/`seedPresets`/`listCharacters` 改读 `data.name`；按角色串行队列；`readJson` 损坏备份；`forget`/`rotateOpening`/`relationState` 改路径 | ~250 行改动 | 我 |
+| `src/index.ts` | 仅钩子接线：`pre-step` 把 `recentTexts` + `turnKey` 传给 `prompt.refresh` | ~20 行 | 我 |
+| `presets/*/card.json`（×3） | 转 CCv3，内容逐字保留（性格/声线/开场一个不丢） | 3 个文件 | 我 |
+| `scripts/verify-tavern.mjs` | **新建**：V1–V15 断言 | ~400 行 | 我 |
+| `src/web.ts` | **过渡期兼容投影**（§6.5）：`/character`、`/characters`、`/character/save` 各 1 处 | ~15 行 | **不在我的写盘范围** → 请 Lead 指派（distill-designer 名下） |
+| `client/**` | 编辑器读 `ccv3`/`fields`、世界书编辑 UI、长度警告 UI | — | ui-designer |
+| `distill/flow.md` + 契约 | 蒸馏输出改成 CCv3 JSON（见 §8.1） | — | distill-designer |
+
+### 8.1 给蒸馏线的契约摘要（可直接抄进 `flow.md`）
+
+蒸馏产物必须是**一个 CCv3 JSON**，键名照官方 spec（英文键），我们的结构化扩展放在 `data.extensions.aiwu`：
+
+```jsonc
+{
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "角色名",
+    "description": "身份 + 背景（可多段）",
+    "personality": "关键词 / 内在矛盾 / 对待亲近之人",
+    "scenario": "来处 / 落差 / 如今的日子 / 与用户的旧",
+    "mes_example": "<START>\n{{user}}: …\n{{char}}: …（至少 2 组，声线样板）",
+    "system_prompt": "声线硬约束：节奏/自称/称呼/口头禅/小动作/回复长度",
+    "post_history_instructions": "禁忌词 / 雷区（收尾提醒）",
+    "first_mes": "开场白（可含动作，但不写 {{char}} 前缀）",
+    "alternate_greetings": ["开场 2", "开场 3"],
+    "creator": "distill",
+    "character_version": "1.0",
+    "tags": ["来源作品名"],
+    "group_only_greetings": [],
+    "extensions": {
+      "aiwu": {
+        "schema": 1,
+        "voice": { "pace": "", "catchphrases": [], "selfRef": "", "callsUser": "", "emotes": [], "forbidden": "", "gestures": [] },
+        "relationship": { "startPoint": "", "charCallsUser": "", "userCallsChar": "" },
+        "personality": { "keywords": [], "contradiction": "", "towardClose": "" },
+        "userPersona": { "who": "", "relation": "", "sharedHistory": "", "displayName": "" },
+        "dynamicState": { "mood": "", "recent": "", "doing": "" },
+        "memoryAnchors": [],
+        "interactionPref": { "length": "", "emoji": "", "comfortZone": "", "taboo": "" }
+      }
+    }
+  }
+}
+```
+
+三条硬要求：① 拿不到证据的字段**留空字符串/空数组**，不要编；② `mes_example` 必须写（声线锚）；
+③ 不要写 `spec` 之外的自造顶层键。
+
+### 8.2 给编辑器线的契约摘要
+
+- 读：`GET /character` 的 `ccv3`（完整对象）+ `fields`（旧 34 字段视图，编辑用）。
+- 写：`POST /character/save { name, ccv3 }`（结构化编辑走这条，未知键原样带回）。
+- 世界书编辑：直接改 `ccv3.data.character_book.entries`，**不新增 REST**。
+- 长度警告：读 `ccv3.data.extensions.aiwu.length`（⚠️ 待实现时确认：我建议这个字段**不落盘**，由 `GET` 时现算，避免派生数据漂移）。
+
+---
+
+## 9. 待 Leader 拍板（3 条）
+
+| # | 问题 | 我的建议 | 不定的后果 |
+|---|---|---|---|
+| **Q1** | REST 过渡契约：`card` 保持旧 34 字段视图 + 新增 `ccv3`/`fields`？还是硬切？ | **双视图过渡**（§6.5）。`web.ts` 不在我写盘范围，需要派 15 行给人 | 面板空白（P0）或客户端改动阻塞 |
+| **Q2** | 是否启动时批量迁移现有卡（落盘）？ | **不做**。读时归一 + 首次写盘落盘 + 备份，足够 | 盘上长期混两种格式；好处是没有"启动即改盘" |
+| **Q3** | 记忆锚点是否等价于世界书 `constant` 条目？ | **保持独立**（`awiu.memoryAnchors`），L1 里当 constant 块渲染 | 若并入世界书，`awu_forget`/面板都要改世界书编辑，复杂度上升 |
+
+以及在 §4.3 里列了 **13 个世界书决策点**，等调研报告到位后我一次性收口。
+
+---
+
+## 附录 A：与现有代码的对应关系（改动定位）
+
+| 现有位置 | 现状 | 改动 |
+|---|---|---|
+| `src/prompt.ts:93` `renderCharacterCard` | 渲染旧 9 组中文键 | **保留（过渡期给 `toLegacyView` 用）**，但 L1 改走 `tavern.renderL1` |
+| `src/prompt.ts:336` `refreshCache` | `this.cache = {}` 先清空（P0-7） | 构造新对象整体替换 |
+| `src/prompt.ts:301` `refresh` | 串行化坏了（P0-6） | 改成 promise 链 + token 校验 |
+| `src/prompt.ts:382` `renderActiveSection` | 拼卡片/时间差/会话/日记/模式/关系 | 拼 `renderL1(...)` + extras（顺序见 §3.2） |
+| `src/store.ts:75` `readJson` | 损坏当不存在（P0-23） | 区分 ENOENT / SyntaxError + `.corrupt-*` 备份 |
+| `src/store.ts:249/287/356/411` | 读-改-写无锁（P0-2） | 按角色串行队列 |
+| `src/store.ts:233` `ensureIndex` | `card['name']` | 改 `card.data?.name ?? card['name']` |
+| `src/store.ts:283` `readCard` | 原样返回 JSON | 返回 `normalizeCard(...)` |
+| `src/store.ts:287` `writeCard` | 强制 `name` 后写盘 | 投影 + 备份 + 原子写 + 索引 |
+| `src/store.ts:509` `forget` | 删 `memory_anchor`/`dynamic_state` | 删 `awiu.memoryAnchors` / `awiu.dynamicState` |
+| `src/store.ts:715/753` `rotateOpening`/`openingState` | `openings` / `opening` | `data.alternate_greetings` / `data.first_mes` |
+| `src/store.ts:676` `relationState` | `card['relationship']` | `awiu.relationship`（经 `toLegacyView`） |
+| `src/store.ts:29-33` | 死常量 | 删 / 换成 CCv3 版本 |
+| `src/index.ts:290` `pre-step` | 只 `pc.refresh(log)` | `pc.refresh(log, { recentTexts, turnKey })` |
+| `presets/*/card.json` | 34 字段 | CCv3（内容逐字保留） |
+
+## 附录 B：命名与术语统一（指南线用）
+
+| 术语 | 统一说法 | 不用的说法 |
+|---|---|---|
+| 卡片格式 | 「酒馆卡 CCv3」/「CCv3 角色卡」 | 「V3 卡」「chara_card」 |
+| 世界书 | 「世界书（Lorebook）」 | 「词条库」「知识库」 |
+| 常驻人设 | 「常规人设（每轮常驻）」 | 「基础人设」「核心提示词」 |
+| 按需注入 | 「按需注入的设定」 | 「动态 RAG」 |
+| 插件扩展区 | 「`extensions.aiwu`（插件私有字段）」 | 「自定义字段」 |

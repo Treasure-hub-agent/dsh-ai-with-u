@@ -27,6 +27,10 @@ export const ROUTES = {
   deleteCharacter: '/character/delete',
   saveDiary: '/diary/save',
 
+  // ---- 从作品蒸馏角色卡（v2：消息通道；卡片格式待 CCv3 定稿）----
+  distillFlow: '/distill/flow',
+  distillParse: '/distill/parse',
+
   // ---- 记忆与剧情维护（后端 task-1 新增）----
   forget: '/forget',
   diaryEdit: '/diary/edit',
@@ -277,6 +281,60 @@ export function saveCharacter(name: string, card: Card): Promise<{ name: string 
 /** 删除角色。withMemory=true 时连同日记一并删除。 */
 export function deleteCharacter(name: string, withMemory = false): Promise<unknown> {
   return post(ROUTES.deleteCharacter, { name, withMemory })
+}
+
+// ---------------------------------------------------------------- 蒸馏（v2）
+
+/**
+ * 蒸馏流程文件信息（随包发布的 `distill/flow.md`）。
+ *
+ * `instruction` 就是「发进当前会话的那段话」：它只包含流程文件的绝对路径与一句要求，
+ * 正文（阶段、字段契约、输出格式）由模型自己去读文件 —— 所以契约永远不进 system prompt，
+ * 也不进这段指令（L2 原则的 v2 落地方式）。
+ */
+export interface DistillFlowInfo {
+  ok: true
+  /** flow.md 的绝对路径（模型按它去读文件） */
+  path: string
+  /** 要发进会话的指令全文 */
+  instruction: string
+  /** instruction 的字符数（面板用来判断会不会太长） */
+  chars: number
+  /** flow.md 自身的字符数（用于确认文件存在且非空） */
+  flowChars: number
+}
+
+/** 读蒸馏流程文件与要发送的指令。 */
+export function fetchDistillFlow(): Promise<DistillFlowInfo> {
+  return request<DistillFlowInfo>(ROUTES.distillFlow)
+}
+
+/**
+ * 蒸馏卡片的校验结果（**骨架，签名先定死**）。
+ *
+ * ⏸ 实现挂起：卡片格式要改成酒馆卡 CCv3（`spec: chara_card_v3` + `character_book`），
+ * 宿主的 `POST /distill/parse` 与 34 字段校验等 tavern 格式定稿后重做
+ * （存档：docs/design/2026-10-30-distill-entry.md §5.2b / §5.7）。
+ * 在那之前调用会拿到「宿主侧尚未提供该能力」（路由未注册 → 404 无信封）。
+ */
+export interface DistillParseResult {
+  ok: true
+  card: Record<string, unknown>
+  stats: { filled: number; total: number }
+  missingGroups: string[]
+  missingFields: string[]
+  warnings: string[]
+  conflict?: { name: string }
+}
+
+/**
+ * 把模型输出的自由文本校验成一张可进编辑器的卡（**骨架**）。
+ *
+ * 路由尚未注册，调用会抛 `ApiUnavailableError`；`UI` 侧此刻不接这条路径，
+ * 保留函数只为锁住前后端签名，等格式定稿后填实现。
+ */
+export function parseDistillCard(raw: string): Promise<DistillParseResult> {
+  return post<DistillParseResult>(ROUTES.distillParse, { raw })
 }
 
 /** 覆写角色日记。 */

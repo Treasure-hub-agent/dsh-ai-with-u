@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
+import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 import type { Card } from './api'
 import { GROUPS, filledCount, isEmptyValue, isDirty, mergeCard, toDraft } from './card-schema'
 import type { Draft, FieldSpec, GroupSpec } from './card-schema'
@@ -210,6 +211,18 @@ export function CardEditor(props: {
   })
   const [confirmLeave, setConfirmLeave] = useState(false)
   const bodyRef = useRef<HTMLDivElement | null>(null)
+  // 两层 role="dialog"：编辑器本体一层，未保存确认再叠一层
+  const editorRef = useRef<HTMLDivElement | null>(null)
+  const confirmRef = useRef<HTMLDivElement | null>(null)
+
+  // 焦点顺序不能换：先记「打开前焦点在哪」，再把焦点送进容器，最后才拦 Tab。
+  // 未保存确认打开时压栈成为最上层，Tab 只在确认卡里循环；关掉后焦点回到编辑器。
+  useRestoreFocus(true)
+  useInitialFocus(editorRef, true)
+  useFocusTrap(editorRef, true)
+  useRestoreFocus(confirmLeave)
+  useInitialFocus(confirmRef, confirmLeave)
+  useFocusTrap(confirmRef, confirmLeave)
 
   const dirty = useMemo(() => isDirty(card, draft), [card, draft])
   const progress = useMemo(() => {
@@ -253,7 +266,7 @@ export function CardEditor(props: {
   }
 
   return (
-    <div className="awu-editor" role="dialog" aria-modal="true" aria-label={t('edit.title')}>
+    <div ref={editorRef} className="awu-editor" role="dialog" aria-modal="true" aria-label={t('edit.title')}>
       {/* 顶部：标题栏 */}
       <header className="awu-editorHead">
         <div className="awu-editorHeadMain">
@@ -330,7 +343,7 @@ export function CardEditor(props: {
 
       {/* 未保存确认 */}
       {confirmLeave && (
-        <div className="awu-editorConfirm" role="dialog" aria-modal="true" aria-label={t('edit.discardTitle')}>
+        <div ref={confirmRef} className="awu-editorConfirm" role="dialog" aria-modal="true" aria-label={t('edit.discardTitle')}>
           <div className="awu-editorConfirmCard">
             <div className="awu-editorConfirmTitle">
               <IconQuill size={15} />

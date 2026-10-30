@@ -14,6 +14,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store, DiaryEditInput } from './store.js'
 import type { PromptController } from './prompt.js'
+import { distillFlowInfo } from './distill.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
 
@@ -334,5 +335,16 @@ export function buildRoutes(store: Store, prompt: PromptController): Array<{ met
         send(res, 200, { ok: true, ...result })
       }),
     },
+    // ------------------------------------------------------------ 蒸馏：流程文件 + 要发送的指令
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/distill/flow`,
+      handler: guard(async (_req, res) => {
+        // 指令里只有 flow.md 的绝对路径与一句要求；流程正文永不进提示词（L2 铁律）
+        send(res, 200, { ok: true, ...await distillFlowInfo() })
+      }),
+    },
+    // 注：`POST /distill/parse`（粘贴卡片 JSON → 34 字段校验）已随「改 CCv3 格式」一起挂起，
+    // 等 tavern 格式定稿后按新契约重做，见 docs/design/2026-10-30-distill-entry.md §5.2b。
   ]
 }

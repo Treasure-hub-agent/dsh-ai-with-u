@@ -12,6 +12,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react'
 
+import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
+
 import {
   activateCharacter,
   deactivateCharacter,
@@ -31,6 +33,8 @@ import {
   nextOpening,
 } from './api'
 import { CardEditor } from './card-editor'
+import { DistillButton } from './distill'
+import { GuideView, guideFirstRun, markGuideSeen } from './guide'
 import type {
   ActiveState,
   Card,
@@ -80,7 +84,7 @@ export interface FooterActionProps {
   [key: string]: unknown
 }
 
-type Tab = 'roster' | 'diary' | 'stats'
+type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 
 /** 面板与按钮之间的间距（px）。 */
 const GAP = 10
@@ -126,14 +130,21 @@ function useScrollLock(active: boolean): void {
   }, [active])
 }
 
-/** 弹层通用行为：Esc 关闭 + 点击遮罩关闭。 */
+/** 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。 */
 function Overlay(props: {
   label: string
   onClose: () => void
   children: JSX.Element | JSX.Element[]
 }): JSX.Element {
   const { label, onClose, children } = props
+  const boxRef = useRef<HTMLDivElement | null>(null)
   useScrollLock(true)
+
+  // 焦点顺序不能换：先记回来处 → 再把焦点送进容器 → 最后拦 Tab。
+  useRestoreFocus()
+  useInitialFocus(boxRef, true)
+  useFocusTrap(boxRef, true)
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
@@ -153,7 +164,7 @@ function Overlay(props: {
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="awu-dialog" role="dialog" aria-modal="true" aria-label={label}>
+      <div ref={boxRef} className="awu-dialog" role="dialog" aria-modal="true" aria-label={label}>
         {children}
       </div>
     </div>,
@@ -900,7 +911,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const wide = useWideLayout(layerRef, typeof props.wide === 'boolean' ? props.wide : undefined)
 
   const [open, setOpen] = useState(false)
-  const [tab, setTab] = useState<Tab>('roster')
+  // 首次打开面板时把「指南」当一次落地页（读 localStorage 标记，隐私模式下按已看过处理）
+  const [tab, setTab] = useState<Tab>(() => (guideFirstRun() ? 'guide' : 'roster'))
   const [list, setList] = useState<CharacterSummary[]>([])
   const [overview, setOverview] = useState<Overview | undefined>(undefined)
   const [active, setActive] = useState<ActiveState>({ enabled: false })
@@ -968,6 +980,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [open, reload])
+
+  // 打开过面板就记下「指南已看过」（标记只在浏览器 localStorage，不碰插件数据目录）
+  useEffect(() => {
+    if (open) markGuideSeen()
+  }, [open])
 
   const loadDetail = useCallback(async (name: string): Promise<void> => {
     if (name === '') { setDetail(undefined); setDetailError(''); return }
@@ -1040,7 +1057,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       if (!inside) setOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && dialog === '') {
+      // 编辑器打开时 dialog 恰好是空串 —— 必须显式排除 editing，否则 Esc 会先关面板、
+      // 编辑器随之卸载，用户未保存的改动一起没了。
+      if (event.key === 'Escape' && dialog === '' && !editing) {
         event.stopPropagation()
         setOpen(false)
       }
@@ -1051,7 +1070,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [open, dialog])
+  }, [open, dialog, editing])
 
   // -------------------------------------------------------- 动作
   const onActivate = (name: string): void => { void run(() => activateCharacter(name)) }
@@ -1207,6 +1226,29 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     left: pos.left,
     bottom: pos.bottom,
     maxHeight: pos.maxHeight,
+  }
+
+  // 分段器：roving tabindex + 方向键 / Home / End。
+  // 面板里只有一个 tabpanel（.awu-body），所以 aria-controls 永远指向存在的元素。
+  const TAB_IDS: Array<{ id: Tab; node: string }> = [
+    { id: 'roster', node: 'awu-tab-roster' },
+    { id: 'diary', node: 'awu-tab-diary' },
+    { id: 'stats', node: 'awu-tab-stats' },
+    { id: 'guide', node: 'awu-tab-guide' },
+  ]
+  const tabIndex = Math.max(0, TAB_IDS.findIndex(item => item.id === tab))
+  const tabNode = TAB_IDS[tabIndex].node
+
+  const onTabKey = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    // 带修饰键的组合（⌘/Ctrl + ←）留给宿主或输入法，不抢
+    if (event.altKey || event.ctrlKey || event.metaKey) return
+    const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+    const jump = event.key === 'Home' ? 0 : event.key === 'End' ? TAB_IDS.length - 1 : -1
+    if (delta === 0 && jump < 0) return
+    event.preventDefault()
+    const next = jump >= 0 ? jump : (tabIndex + delta + TAB_IDS.length) % TAB_IDS.length
+    setTab(TAB_IDS[next].id)
+    document.getElementById(TAB_IDS[next].node)?.focus()
   }
 
   // -------------------------------------------------------- 渲染
@@ -1367,41 +1409,34 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           <StatStrip stats={stats} t={t} />
 
           {/* 分段器 */}
-          <div className="awu-tabs" role="tablist" aria-label={t('panel.title')}>
-            <button
-              type="button"
-              role="tab"
-              className="awu-tab"
-              data-on={tab === 'roster' ? 'true' : 'false'}
-              aria-selected={tab === 'roster'}
-              onClick={() => setTab('roster')}
-            >
-              {t('panel.tab.roster')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className="awu-tab"
-              data-on={tab === 'diary' ? 'true' : 'false'}
-              aria-selected={tab === 'diary'}
-              onClick={() => setTab('diary')}
-            >
-              {t('panel.tab.diary')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className="awu-tab"
-              data-on={tab === 'stats' ? 'true' : 'false'}
-              aria-selected={tab === 'stats'}
-              onClick={() => setTab('stats')}
-            >
-              {t('panel.tab.stats')}
-            </button>
+          <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
+            {TAB_IDS.map(item => (
+              <button
+                key={item.id}
+                id={item.node}
+                type="button"
+                role="tab"
+                className="awu-tab"
+                data-on={tab === item.id ? 'true' : 'false'}
+                aria-selected={tab === item.id}
+                aria-controls="awu-tabpanel"
+                tabIndex={tab === item.id ? 0 : -1}
+                onClick={() => setTab(item.id)}
+              >
+                {t(`panel.tab.${item.id}`)}
+              </button>
+            ))}
           </div>
 
           {/* 主体 */}
-          <div className="awu-body">
+          <div
+            className="awu-body"
+            id="awu-tabpanel"
+            role="tabpanel"
+            aria-labelledby={tabNode}
+            tabIndex={0}
+            aria-busy={busy}
+          >
             {tab === 'roster' && (detailName !== '' ? (
               <CharacterDetailView
                 detail={currentDetail}
@@ -1423,12 +1458,15 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
                     {t('roster.count', { n: roster.length })}
                   </span>
+                  {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
+                  <span style={{ marginLeft: 'auto' }}>
+                    <DistillButton t={t} />
+                  </span>
                   <button
                     type="button"
                     className="awu-btn"
                     data-size="sm"
                     data-kind="primary"
-                    style={{ marginLeft: 'auto' }}
                     onClick={() => openDialog('new')}
                   >
                     <IconPlus size={12} />
@@ -1580,6 +1618,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 </Section>
               </div>
             )}
+
+            {tab === 'guide' && <GuideView t={t} />}
           </div>
 
           {/* 弹层 */}
