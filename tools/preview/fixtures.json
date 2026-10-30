@@ -526,14 +526,21 @@
       "mode": "text+action",
       "recent": [
         "聊到旧书与雨天"
-      ]
+      ],
+      "relation": {
+        "tag": "亲近",
+        "baseline": "熟悉",
+        "turnCount": 24,
+        "lastActive": "2026-10-30T15:25:29.571Z",
+        "diaryEntries": 2
+      }
     },
     "relation": {
       "tag": "亲近",
       "baseline": "熟悉",
       "turnCount": 24,
       "lastActive": "2026-10-30T15:25:29.571Z",
-      "diaryEntries": 5
+      "diaryEntries": 2
     },
     "openingState": {
       "state": "none",

@@ -1286,6 +1286,49 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   text-overflow: ellipsis;
 }
 
+/* hero 下方的第二行元信息（关系起点 / 最近互动）。
+   JSX 侧数据缺失时整块不渲染；这里再兜一条 :empty，避免空 div 撑出 8px 空隙。 */
+.awu-heroMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--awu-gap-6);
+  margin-top: var(--awu-gap-4);
+  font-size: var(--awu-fs-caption);
+  line-height: 1.4;
+  color: var(--awu-ink-mute);
+}
+
+.awu-heroMeta:empty { display: none; }
+
+.awu-heroMetaItem {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--awu-gap-2);
+  white-space: nowrap;
+}
+
+/* 两项之间一个 3px 圆点，落在 gap 正中，比竖线轻 */
+.awu-heroMetaItem + .awu-heroMetaItem::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--awu-gap-6) / -2 - 1.5px);
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: var(--awu-r-pill);
+  background: var(--awu-ink-faint);
+}
+
+/* 值比标签重要：同字号、高一档墨色 + 600 */
+.awu-heroMetaItem b {
+  font-family: var(--awu-sans);
+  font-weight: 600;
+  color: var(--awu-ink-dim);
+}
+
 /* hero 右侧的动作组。2026-10-30 主人：「编辑/启用/删除 三个按钮太小，而且挨得很近」。
    修法不是简单放大，而是把「一目了然的风险梯度」做出来：
      编辑 = 中性（透明底 + 常规描边，退到次要层）
@@ -1409,10 +1452,12 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   padding: 2px var(--awu-gap-3);
   margin: 0 calc(var(--awu-gap-3) * -1);
   border-radius: var(--awu-r-xs);
-  /* 设计语言：衬线体承担人物感 —— 日记正文必须是衬线 */
-  font-family: var(--awu-serif);
+  /* 2026-10-30 深夜改判：日记正文也走黑体。
+     理由（?live=1 的真实数据）：14px 宋体在玻璃上笔画太细，和周围的实心黑体不在一个重量级，
+     整段时间线看着「发虚」。衬线于是只剩头像里那个字形块。 */
+  font-family: var(--awu-sans);
   font-size: var(--awu-fs-body-lg);
-  line-height: var(--awu-lh-loose);
+  line-height: 24px;
   letter-spacing: .01em;
   color: var(--awu-ink-dim);
   transition: background var(--awu-dur-2) var(--awu-ease);
@@ -1498,10 +1543,13 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   font-variant-numeric: tabular-nums;
 }
 
+/* 维护区（危险操作）：2026-10-30 深夜改 —— 整块 8% 红底太吵，像整页报错；
+   改成「中性玻璃 + 红描边 + 红标题」，危险感由头部和按钮承担，区块本身不喊叫。 */
 .awu-dangerZone {
   margin-top: var(--awu-gap-1);
+  border: 1px solid color-mix(in srgb, var(--awu-danger) 20%, transparent);
   border-radius: var(--awu-r-lg);
-  background: color-mix(in srgb, var(--awu-danger) 8%, var(--awu-surface-2));
+  background-color: var(--awu-glass-2);
   overflow: hidden;
 }
 
@@ -1514,7 +1562,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   display: flex;
   align-items: center;
   gap: var(--awu-gap-5);
-  padding: var(--awu-gap-4) var(--awu-gap-6);
+  padding: var(--awu-gap-5) var(--awu-gap-7);
   border-bottom: 1px solid color-mix(in srgb, var(--awu-danger) 14%, transparent);
 }
 
@@ -2080,13 +2128,16 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 
 .awu-dialog {
   position: relative;
-  width: min(var(--awu-dialog-w), 100%);
+  /* 表单弹层收窄到 620：760 宽下三个输入框会被拉成两条长杠，iOS sheet 的呼吸感就没了。
+     这个宽度直接写在这里，不动 --awu-dialog-w 令牌（蒸馏弹层还在用它兜底 420）。 */
+  width: min(620px, 100%);
   max-height: min(84vh, var(--awu-dialog-max-h));
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--awu-line-strong);
+  border: 1px solid var(--awu-glass-edge);
   border-radius: var(--awu-r-xl);
-  background: var(--awu-surface-dialog);
+  background-color: var(--awu-surface-dialog);
+  background-image: radial-gradient(120% 70% at 50% -20%, var(--awu-sheen) 0%, transparent 60%);
   backdrop-filter: var(--awu-blur);
   -webkit-backdrop-filter: var(--awu-blur);
   box-shadow: var(--awu-shadow), var(--awu-specular);
@@ -2120,7 +2171,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   letter-spacing: 0;
 }
 
-.awu-dialogBody { padding: var(--awu-gap-5) var(--awu-gap-8) var(--awu-gap-2); overflow-y: auto; }
+.awu-dialogBody { padding: var(--awu-gap-6) var(--awu-gap-8) var(--awu-gap-5); overflow-y: auto; }
 
 .awu-dialogFoot {
   display: flex;
