@@ -50,6 +50,23 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
 installStyles()
 
+/*
+ * 场景开关（只影响沙盒）：
+ *   ?live=1   模拟「已启用一张卡」——overview.active 打开、详情带日记与会话，
+ *             用来验收日记时间线、启用态横幅这些「只有启用后才出现」的界面。
+ *   ?dark=1   强制深色。
+ */
+const params = new URLSearchParams(window.location.search)
+const scenario = params.get('live') === '1' ? 'live' : 'default'
+if (scenario === 'live' && (fixtures as Record<string, unknown>).liveOverview !== undefined) {
+  const live = (fixtures as Record<string, unknown>).liveOverview
+  const detail = (fixtures as Record<string, unknown>).liveDetail
+  ROUTES.unshift(
+    [/\/overview$/, 'overview', () => live],
+    [/\/character$/, 'character', () => detail],
+  )
+}
+
 const host = document.getElementById('root')
 if (host !== null) {
   createRoot(host).render(

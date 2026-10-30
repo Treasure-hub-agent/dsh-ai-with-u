@@ -538,6 +538,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   flex-direction: column;
   gap: var(--awu-gap-6);
   padding: var(--awu-gap-5) var(--awu-gutter) var(--awu-gap-4);
+  /* 工具栏与列表之间一条发丝：把「操作区 / 内容区」分开，滚动列表从线下开始 */
+  border-bottom: 1px solid var(--awu-line);
 }
 
 /* 子块 margin 归零 —— 必须写到「两个类」的权重。写成 .awu-railHead > * 时与后面的
@@ -598,6 +600,41 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 
 .awu-title em { font-style: normal; color: var(--awu-accent-text); }
 
+/* 标题下方的总量元信息（原右栏顶部的三个大计数块）。
+   2026-10-30 主人第三轮：「三个计数块太大，视觉重量和内容主体打架」——
+   这里做成一行 12px 的小字读数：数字等宽（列对齐）、单位同色、分隔点更淡。
+   它现在跟标题同属 headMain，随头部一起走，详情页也不必再让出顶部空间。 */
+.awu-counts {
+  display: flex;
+  align-items: baseline;
+  gap: var(--awu-gap-3);
+  margin-top: var(--awu-gap-3);
+  font-size: var(--awu-fs-caption);
+  line-height: 1.35;
+  letter-spacing: .01em;
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+.awu-countItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--awu-gap-2);
+}
+
+/* 数字用等宽：三个数字右沿对齐，扫视时不会跳 */
+.awu-countItem b {
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-body);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--awu-ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.awu-countSep { color: var(--awu-ink-faint); }
+
 .awu-headActions { display: flex; align-items: center; gap: var(--awu-gap-2); flex: none; }
 
 .awu-iconBtn {
@@ -644,17 +681,18 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   flex: none;
   display: flex;
   align-items: center;
-  gap: var(--awu-gap-5);
+  gap: var(--awu-gap-4);
   margin: 0 var(--awu-gutter) var(--awu-gap-5);
-  padding: var(--awu-gap-4) var(--awu-gap-6);
-  min-height: 48px;
+  padding: var(--awu-gap-3) var(--awu-gap-6);
+  min-height: 44px;
   border: 1px solid var(--awu-line);
-  border-radius: var(--awu-r-lg);
-  background: var(--awu-surface-2);
+  border-radius: var(--awu-r-md);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(120% 140% at 50% -60%, var(--awu-sheen) 0%, transparent 70%);
   overflow: hidden;
   color: var(--awu-ink-mute);
   font-size: var(--awu-fs-body);
-  line-height: var(--awu-lh-body);
+  line-height: var(--awu-lh-snug);
 }
 
 /* live = 角色专属色：左侧 2px 色轨 + 一点点角色色底 */
@@ -689,11 +727,14 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   pointer-events: none;
 }
 
+/* 未启用 = 安静的一条提示，不再用虚线框（虚线在这套界面里已经借给了拖放区，
+   而且「一整条虚线」正是主人说的简陋感的来源）。 */
 .awu-status[data-status="idle"],
 .awu-idle {
-  border-style: dashed;
-  border-color: var(--awu-line-strong);
-  background: transparent;
+  border-style: solid;
+  border-color: var(--awu-line);
+  background-color: transparent;
+  background-image: none;
 }
 
 .awu-status[data-status="info"] {
@@ -744,71 +785,6 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   background: var(--awu-ink-faint);
 }
 
-/* ================================================================ 统计条 */
-/* 2026-10-30 主人第三轮：「详情页上面 角色/记忆/对话 三个计数块太大了，视觉重量和内容主体打架」。
-   处理成两件事：
-   1) 从「一条 110px 高的分栏仪表板」压成「一行 20px 的元信息」：
-      数字 26→15px、单位 13→12px，去掉卡片底与竖分隔，改用 3px 圆点分隔；仍然左对齐成一行。
-   2) 详情页里**整条不显示** —— hero 副标题本来就写着「· 0 条记忆 · 0 对话」，
-      同样的信息出现两遍才是真正的「重量打架」。用 :has() 按当前视图切换，
-      不支持 :has() 的老内核只会退化成「小一号的统计行」，不影响可用性。 */
-.awu-stats {
-  flex: none;
-  display: flex;
-  align-items: baseline;
-  gap: var(--awu-gap-5);
-  margin: var(--awu-gap-4) var(--awu-gutter) 0;
-  padding: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
-  overflow: visible;
-  font-size: var(--awu-fs-caption);
-  color: var(--awu-ink-mute);
-}
-
-/* 视图切换：详情页不需要这条读数 */
-.awu-main:has(.awu-detail) .awu-stats { display: none; }
-
-.awu-stat {
-  display: inline-flex;
-  align-items: baseline;
-  gap: var(--awu-gap-2);
-  padding: 0;
-  background: none;
-  position: relative;
-}
-
-/* 分节点：比竖线轻，只负责断句 */
-.awu-stat + .awu-stat::before {
-  content: "";
-  align-self: center;
-  width: 3px;
-  height: 3px;
-  margin-right: var(--awu-gap-3);
-  border-radius: var(--awu-r-pill);
-  background: var(--awu-ink-faint);
-}
-
-.awu-statNum {
-  font-family: var(--awu-sans);
-  font-size: var(--awu-fs-body-lg);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-  letter-spacing: -.01em;
-  color: var(--awu-ink-dim);
-}
-
-/* 单位：跟数字同一基线，但小一号、淡一档，不抢数字 */
-.awu-statNum small {
-  font-family: var(--awu-sans);
-  font-size: var(--awu-fs-caption);
-  font-weight: 500;
-  letter-spacing: .02em;
-  color: var(--awu-ink-mute);
-  margin-left: var(--awu-gap-2);
-}
 
 /* ================================================================ 分段控制（iOS segmented） */
 .awu-tabs {
@@ -1141,35 +1117,58 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-btn:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
 .awu-btn:disabled { opacity: .42; cursor: not-allowed; transform: none; }
 
+/* 主操作：唯一的高饱和实心块。阴影加深一档，让它在三个动作里明显最重 */
 .awu-btn[data-kind="primary"] {
   border-color: transparent;
   background: var(--awu-accent-strong);
   color: var(--awu-on-accent);
   font-weight: 600;
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--awu-accent) 28%, transparent);
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--awu-accent) 34%, transparent);
 }
 
-.awu-btn[data-kind="primary"]:hover { filter: brightness(1.08); background: var(--awu-accent-strong); }
+.awu-btn[data-kind="primary"]:hover {
+  filter: brightness(1.08);
+  background: var(--awu-accent-strong);
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--awu-accent) 42%, transparent);
+}
 
 .awu-btn[data-kind="ghost"] { border-color: transparent; background: transparent; color: var(--awu-ink-mute); }
 .awu-btn[data-kind="ghost"]:hover { background: var(--awu-surface-3); color: var(--awu-ink); }
 
+/* 危险操作：红描边 + 红字，不填底 —— 和主操作分开，也不在静止态喊叫 */
 .awu-btn[data-kind="danger"] {
-  border-color: color-mix(in srgb, var(--awu-danger) 34%, transparent);
+  border-color: color-mix(in srgb, var(--awu-danger) 40%, transparent);
   background: transparent;
   color: var(--awu-danger);
 }
-.awu-btn[data-kind="danger"]:hover { background: color-mix(in srgb, var(--awu-danger) 12%, transparent); }
+.awu-btn[data-kind="danger"]:hover {
+  background: color-mix(in srgb, var(--awu-danger) 14%, transparent);
+  border-color: color-mix(in srgb, var(--awu-danger) 55%, transparent);
+}
 
-/* 编辑入口：中性偏蓝，与危险/主操作分开（旧类名 awu-editEntry 保留兼容） */
+/* 编辑入口：中性档 —— 主人要求「编辑=中性」，所以不给蓝色，用常规描边退到次要层
+   （旧版是蓝色描边，和主操作抢注意力）。旧类名 awu-editEntry 保留兼容。 */
 .awu-btn[data-kind="edit"],
 .awu-editEntry {
-  border-color: color-mix(in srgb, var(--awu-accent) 34%, transparent);
+  border-color: var(--awu-line-strong);
   background: transparent;
-  color: var(--awu-accent-text);
+  color: var(--awu-ink-dim);
 }
 .awu-btn[data-kind="edit"]:hover,
-.awu-editEntry:hover { background: color-mix(in srgb, var(--awu-accent) 12%, transparent); }
+.awu-editEntry:hover {
+  background: var(--awu-glass-3);
+  border-color: var(--awu-line-strong);
+  color: var(--awu-ink);
+}
+
+/* md 档：详情页 hero 的动作按钮用它（原 sm 28px 太小）。全局定义，弹层里也能用 */
+.awu-btn[data-size="md"] {
+  height: 38px;
+  padding: 0 var(--awu-gap-6);
+  font-size: var(--awu-fs-body);
+  font-weight: 500;
+  border-radius: var(--awu-r-sm);
+}
 
 .awu-btn[data-size="sm"] { height: var(--awu-size-hit); padding: 0 var(--awu-gap-4); font-size: var(--awu-fs-label); border-radius: var(--awu-r-xs); }
 .awu-btn[data-size="block"] { width: 100%; height: 40px; }
@@ -1179,7 +1178,7 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--awu-gap-6);
+  gap: var(--awu-gap-7);
   max-width: var(--awu-content-max);
   margin: 0 auto;
   animation: awu-slide-in var(--awu-dur-3) var(--awu-ease);
@@ -1271,7 +1270,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
      编辑 = 中性（透明底 + 常规描边，退到次要层）
      启用 = 主操作（蓝色实底 + 蓝色投影，唯一的高饱和块）
      删除 = 危险（红描边 + 红字，不填底，避免和主操作抢）
-   尺寸统一抬到 36px 高（原 28px），间距 6→10px，弹层/编辑器里的 sm 按钮不受影响。 */
+   尺寸：data-size 已由 JSX 从 sm 改成 md（基础 38px），这里再放大到 40px、内边距 18px，
+   间距 6→10px；窄屏折行时整组右对齐、行间也有 10px，不会挤成两行半。 */
 .awu-heroActions {
   display: flex;
   gap: var(--awu-gap-5);
@@ -1281,13 +1281,20 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   flex: none;
 }
 
-.awu-heroActions .awu-btn[data-size="sm"] {
-  height: 36px;
-  padding: 0 var(--awu-gap-7);
+/* 选择器要压到 (0,3,0) 才吃得掉 .awu-btn[data-size="md"]，两条同权重时后写的赢 */
+.awu-heroActions .awu-btn[data-size="md"] {
+  height: 40px;
+  padding: 0 var(--awu-gap-8);
   gap: var(--awu-gap-3);
   border-radius: var(--awu-r-sm);
   font-size: var(--awu-fs-body);
   font-weight: 600;
+}
+
+/* 窄屏：三个动作等宽铺满一行，避免「两个半」这种最难看的折法 */
+@media (max-width: 900px) {
+  .awu-heroActions { justify-content: flex-start; }
+  .awu-heroActions .awu-btn[data-size="md"] { flex: 1 1 auto; padding: 0 var(--awu-gap-6); }
 }
 
 .awu-heroActions .awu-btn svg { flex: none; }
@@ -1308,11 +1315,12 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   display: flex;
   align-items: center;
   gap: var(--awu-gap-4);
-  padding: var(--awu-gap-4) var(--awu-gap-7) var(--awu-gap-3);
+  padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-4);
   border-bottom: 1px solid var(--awu-line);
+  /* 分节标题：13px 600 + 微字距。它是「卡内小标题」，比字段值重、比名字轻 */
   font-size: var(--awu-fs-label);
   font-weight: 600;
-  letter-spacing: .04em;
+  letter-spacing: .06em;
   color: var(--awu-ink-dim);
 }
 
@@ -1562,6 +1570,15 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   max-width: 360px;
 }
 
+/* 第二行说明（JSX 里是好几个 .awu-emptyHint）：降一级字号与墨色，
+   让空态读起来是「一句主提示 + 一句补充」，而不是两行同样重的话。 */
+.awu-emptyHint + .awu-emptyHint {
+  margin-top: calc(var(--awu-gap-3) * -1);
+  font-size: var(--awu-fs-body);
+  color: var(--awu-ink-mute);
+  opacity: .85;
+}
+
 /* 错误条：与状态带共用几何（alert 态） */
 .awu-err {
   display: flex;
@@ -1606,10 +1623,12 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  /* 1120 大窗下编辑器收成 880 居中：像 iPad 设置页，而不是把表单拉满整屏 */
+  /* 铺满面板：头部与底部操作栏是「面板级 chrome」，必须顶到两边；
+     表单本体由 .awu-editorBody 的对称 padding 收到 760，读起来仍然是 iPad 设置页那种窄栏。
+     旧版把整块编辑器收在 880，导致底栏成了一条悬在面板中间的白色横杠。 */
   width: 100%;
-  max-width: 880px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   animation: awu-slide-in var(--awu-dur-3) var(--awu-ease);
 }
 
@@ -1711,14 +1730,17 @@ html:not([data-ds-dark-theme]) .awu-dialog {
 .awu-editGroup {
   /* 纵向 flex 容器里的分组不能参与收缩，否则折叠的分组会被压成一条空横条 */
   flex: none;
+  border: 1px solid var(--awu-line);
   border-radius: var(--awu-r-lg);
-  background: var(--awu-surface-2);
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(140% 70% at 50% -30%, var(--awu-sheen) 0%, transparent 68%);
   overflow: hidden;
-  box-shadow: var(--awu-specular);
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
   transition: background var(--awu-dur-2) var(--awu-ease), box-shadow var(--awu-dur-2) var(--awu-ease);
 }
 
-.awu-editGroup[data-open="true"] { background: var(--awu-glass-3); }
+/* 展开态只加强描边，不再叠灰度底 —— 灰底会把「正在编辑的这块」压暗，反而像禁用 */
+.awu-editGroup[data-open="true"] { border-color: var(--awu-line-strong); }
 
 /* 灵魂字段：角色色描边（保留 v0.1 的"这块最重要"信号） */
 .awu-editGroup[data-soul="true"] {
@@ -1938,7 +1960,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   gap: var(--awu-gap-4);
   padding: var(--awu-gap-4) var(--awu-gutter) var(--awu-gap-5);
   border-top: 1px solid var(--awu-line);
-  background: var(--awu-surface-foot);
+  /* 底栏要「站」在面板上：玻璃底 + 30px 模糊（小面积，允许强模糊） */
+  background-color: var(--awu-glass-2);
   backdrop-filter: var(--awu-blur);
   -webkit-backdrop-filter: var(--awu-blur);
 }
@@ -2088,13 +2111,17 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   padding: 0 var(--awu-gap-5);
   border: 1px solid var(--awu-line-strong);
   border-radius: var(--awu-r-md);
-  background: var(--awu-surface-field);
+  /* 输入框必须比面板「实」：玻璃面板透气，字段底也半透明的话，
+     壁纸色会从字缝里钻上来，读不清（编辑器里实测最明显）。 */
+  background-color: var(--awu-glass-2);
+  background-image: radial-gradient(140% 120% at 50% -40%, var(--awu-sheen) 0%, transparent 70%);
   color: var(--awu-ink);
   font: inherit;
   font-family: var(--awu-sans);
   font-size: var(--awu-fs-control);
   letter-spacing: 0;
   outline: none;
+  box-shadow: var(--awu-specular);
   transition: border-color var(--awu-dur-2) var(--awu-ease), box-shadow var(--awu-dur-2) var(--awu-ease);
 }
 

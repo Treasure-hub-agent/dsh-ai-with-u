@@ -222,6 +222,19 @@ function Field({ k, v, title }: { k: string; v: string; title?: string }): JSX.E
  * 但外部导入卡可能写整条 URL（规范允许）。直接把 URL 铺进 Field 会和右侧计数挤在一起，
  * 所以 URL 一律缩成域名，完整值走 title 悬停。
  */
+/**
+ * 「角色来源」的显示名：三个已知出处映射成中文，其余原样（含 URL 缩域名的兜底）。
+ *
+ * 为什么要映射：source 是 CCv3 的出处标识（custom / distill / import），
+ * 直接铺英文在中文界面里像裸 key；而外部导入卡可能塞 URL，所以还要兜一层缩域名。
+ */
+function sourceLabelOf(key: string, t: Translate): string {
+  if (key === 'custom') return t('stats.source.custom')
+  if (key === 'distill') return t('stats.source.distill')
+  if (key === 'import') return t('stats.source.import')
+  return sourceLabel(key)
+}
+
 function sourceLabel(key: string): string {
   if (!/^https?:\/\//i.test(key)) return key
   try {
@@ -1657,9 +1670,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             {tab === 'stats' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
                 <Section title={t('stats.title')}>
-                  <Field k={t('stats.characters')} v={`${stats.characters} ${t('stats.characters.full')}`} />
-                  <Field k={t('stats.memory')} v={`${stats.memory} ${t('stats.memory.full')}`} />
-                  <Field k={t('stats.turns')} v={`${stats.turns} ${t('stats.turns.full')}`} />
+                  <Field k={t('stats.characters')} v={String(stats.characters)} />
+                  <Field k={t('stats.memory')} v={String(stats.memory)} />
+                  <Field k={t('stats.turns')} v={String(stats.turns)} />
                 </Section>
                 <Section title={t('stats.source')}>
                   {Object.keys(overview?.stats.bySource ?? {}).length === 0
@@ -1670,7 +1683,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                        * 但外部导入卡可能塞整条 URL —— 直接把 URL 铺进 Field 会和右侧数字挤在一起，
                        * 所以这里把 URL 缩成域名显示，完整值挂在 title 上。
                        */
-                      <Field key={key} k={sourceLabel(key)} title={key} v={String(value)} />
+                      <Field key={key} k={sourceLabelOf(key, t)} title={key} v={t('stats.source.count', { n: value })} />
                     ))}
                 </Section>
                 <Section title={t('stats.recent')}>
