@@ -429,6 +429,10 @@ export function normalizeCard(input: unknown, opts: NormalizeOptions = {}): Char
     const card = clone(input)
     fillDataDefaults(card.data, opts)
     deriveFromNative(card.data, opts)
+    // 结构是权威、原生位是投影：归一化结束时把**空着的**投影补上（P0-8）。
+    // 蒸馏卡走到这里时 `aiwu` 齐全而原生位全空，不补就是落盘空卡；已经写了原生内容的
+    // （模型亲手给的、或外部导入卡的原文）由 `projectNative` 内部逐字段让路，一个字不动。
+    projectNative(card.data)
     return card
   }
   if (isV2Card(input)) {
@@ -440,6 +444,7 @@ export function normalizeCard(input: unknown, opts: NormalizeOptions = {}): Char
     }
     fillDataDefaults(card.data, opts)
     deriveFromNative(card.data, { ...opts, from: opts.from ?? 'native' })
+    projectNative(card.data)
     return card
   }
   if (isLegacyCard(input)) return migrateLegacyCard(rec(input), opts)
@@ -735,30 +740,71 @@ export function migrateLegacyCard(input: Json, opts: NormalizeOptions = {}): Cha
   }
   if (!isEmptyText(input['creator_notes'])) data.creator_notes = str(input['creator_notes'])
 
-  projectNative(data)
+  // 迁移：结构由 34 字段表单定义 → 投影是权威输出，必须重写（哪怕原生位有残留）
+  projectNative(data, { overwrite: true })
   if (now !== undefined) stampCardTimes({ spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }, now)
   return { spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }
 }
 
 // ============================================================================ 投影（结构 → 原生，单向）
 
-/** 结构 → 原生字段。空结构不覆盖已有原生内容（保护外部导入/手工改过的字段）。 */
-export function projectNative(data: CardData): void {
+export interface ProjectNativeOptions {
+  /**
+   * 原生位已有内容时也重写。
+   *
+   * 只给「结构定义上就是权威」的路径用（迁移 / 面板保存 / 忘却）；
+   * 落盘归一（`normalizeCard`）**不要**传——那条路径要保住模型或用户亲手写的原生描写
+   * （flow §5.2：「原生位你若自己写了，插件只在为空时覆盖」）。
+   */
+  overwrite?: boolean
+}
+
+/**
+ * 结构 → 原生字段（单向投影）。默认**只填空**，不覆盖已有原生内容。
+ *
+ * **为什么它必须逐字段判断**（2026-10-30 修 P0-8）：
+ * 它会收到两类卡，判据不同，不能一把覆盖——
+ *   1. **自制卡**（蒸馏 / 面板新建 / 迁移）：有 `aiwu` 结构、原生位是空的 →
+ *      投影**必须写**，否则落盘的 `description` / `personality` / `scenario` /
+ *      `system_prompt` / `post_history_instructions` 全空，导出到别的酒馆前端就是空卡，
+ *      而插件自己在 L1 读结构渲染，从外面完全看不出来。
+ *   2. **外部导入卡**：`aiwu.imported.raw` 里存着原文 → 投影**必须让路**，
+ *      否则原文被重排成「身份：…／背景：…」，§1.5 的原文保真就破了。
+ *
+ * 所以判据是两条（都满足才写）：
+ *   - 该字段**没有** `imported.raw` 原文（外部卡永不被重排）；
+ *   - 该字段目前**是空的**，或者调用方明示 `overwrite: true`
+ *     （flow §5.2 的契约：「原生位你若自己写了，插件只在为空时覆盖」）。
+ *
+ * 哪些调用方该传 `overwrite`：**结构定义上就是权威**的那几条路径——
+ *   迁移（`migrateLegacyCard`）、面板保存（`fromLegacyView`，34 字段表单改了结构就必须刷投影）、
+ *   忘却（`forgetCardText`，否则被抹掉的文本会残留在原生位里）。
+ *   `normalizeCard`（落盘/读取归一）**不传**——它要保住模型或用户亲手写的原生描写。
+ */
+export function projectNative(data: CardData, opts: ProjectNativeOptions = {}): void {
   const aiwu = awiuOf(data)
   if (aiwu === undefined) return
+
+  const importedRaw = rec(aiwu.imported?.raw)
+  /** 该原生字段能不能写：外部原文让路 + （空字段 或 明示覆盖）。 */
+  const mayWrite = (field: string): boolean => {
+    if (str(importedRaw[field]).trim() !== '') return false
+    if (opts.overwrite === true) return true
+    return str((data as unknown as Record<string, unknown>)[field]).trim() === ''
+  }
 
   const basic = aiwu.basic ?? {}
   const descriptionParts: string[] = []
   if (!isEmptyText(basic.identity)) descriptionParts.push(`身份：${str(basic.identity).trim()}`)
   if (!isEmptyText(basic.background)) descriptionParts.push(`背景：${str(basic.background).trim()}`)
-  if (descriptionParts.length > 0) data.description = descriptionParts.join('\n\n')
+  if (descriptionParts.length > 0 && mayWrite('description')) data.description = descriptionParts.join('\n\n')
 
   const personality = aiwu.personality ?? {}
   const personaParts: string[] = []
   if (list(personality.keywords).length > 0) personaParts.push(`关键词：${list(personality.keywords).join('、')}`)
   if (!isEmptyText(personality.contradiction)) personaParts.push(`内在矛盾：${str(personality.contradiction).trim()}`)
   if (!isEmptyText(personality.towardClose)) personaParts.push(`对待亲近之人：${str(personality.towardClose).trim()}`)
-  if (personaParts.length > 0) data.personality = personaParts.join('\n')
+  if (personaParts.length > 0 && mayWrite('personality')) data.personality = personaParts.join('\n')
 
   const world = aiwu.world ?? {}
   const worldParts: string[] = []
@@ -766,13 +812,13 @@ export function projectNative(data: CardData): void {
   if (!isEmptyText(world.gap)) worldParts.push(`落差：${str(world.gap).trim()}`)
   if (!isEmptyText(world.nowadays)) worldParts.push(`如今的日子：${str(world.nowadays).trim()}`)
   if (!isEmptyText(world.sharedPast)) worldParts.push(`你与他的旧：${str(world.sharedPast).trim()}`)
-  if (worldParts.length > 0) data.scenario = worldParts.join('\n')
+  if (worldParts.length > 0 && mayWrite('scenario')) data.scenario = worldParts.join('\n')
 
   const systemPrompt = buildSystemPromptText(aiwu)
-  if (systemPrompt !== '') data.system_prompt = systemPrompt
+  if (systemPrompt !== '' && mayWrite('system_prompt')) data.system_prompt = systemPrompt
 
   const postHistory = buildPostHistoryText(aiwu)
-  if (postHistory !== '') data.post_history_instructions = postHistory
+  if (postHistory !== '' && mayWrite('post_history_instructions')) data.post_history_instructions = postHistory
 }
 
 /** 声线 + 互动偏好 → `system_prompt` 的投影文本（与 L1 的「声线/互动偏好」两段内容一致，避免双份）。 */
@@ -1003,7 +1049,10 @@ export function fromLegacyView(view: LegacyCardView, base?: CharacterCardV3 | Js
   // 用户在面板改了某个原生投影段 → 该段不再用外部原文（转结构权威）
   clearImportedForChangedSections(aiwu, before, view)
 
-  projectNative(data)
+  // 面板保存：34 字段表单就是结构权威，改了结构必须重刷投影（否则 desc 会停在旧值）。
+  // 注意 `clearImportedForChangedSections` 已把「用户在面板手改的那一段」的 raw 清掉，
+  // 但这里仍要 overwrite——用户改的是**结构**，投影要跟着变。
+  projectNative(data, { overwrite: true })
   return { spec: CARD_SPEC, spec_version: CARD_SPEC_VERSION, data }
 }
 
@@ -1755,7 +1804,8 @@ export function forgetCardText(card: CharacterCardV3, keywords: string[]): Forge
     warnings.push('角色卡里没有可扫描的字段，可能格式未识别——本次只清理了日记与会话。')
   }
 
-  projectNative(data)
+  // 忘却：被抹掉的文本必须同步从原生位消失，否则会从投影位漏回来
+  projectNative(data, { overwrite: true })
   return { card: next, removed, scanned, warnings }
 }
 

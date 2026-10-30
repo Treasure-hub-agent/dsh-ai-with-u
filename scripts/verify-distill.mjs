@@ -380,6 +380,52 @@ section('10. 端到端：arm → save 最小卡 → readCardView 能读到')
   check(arm.snapshot().lastSaved?.name === NAME, 'lastSaved 供面板提示「新卡已保存」')
 }
 
+// ================================================================ 11. P0-8 原生投影
+
+section('11. P0-8：蒸馏落盘的 CCv3 必须带齐五处原生投影（否则导出到别的酒馆前端是空卡）')
+{
+  const { arm, registry } = makeArm()
+  arm.arm()
+  const NAME = '投影角色'
+  // 只给结构、原生位一个字都不给 —— 这正是模型蒸输出来的形状
+  const outcome = await registry.get('awu_card_save').execute({
+    name: NAME,
+    data: {
+      name: NAME,
+      first_mes: '（她把伞收好）久等了。',
+      extensions: {
+        aiwu: {
+          schema: 1,
+          basic: { identity: '羽丘的女子高中生', background: '从大小姐变成了打零工的人' },
+          voice: { pace: '短，一到两句就收', catchphrases: ['不必了，谢谢。'], selfRef: '我', callsUser: '你', emotes: ['被问住时「……嗯。」'], forbidden: '不解释、不诉苦', gestures: ['（把手套摘下来叠齐）'] },
+          personality: { keywords: ['端整', '决断'], contradiction: '越客气说明越远', towardClose: '替你把决定做完' },
+          world: { origin: '丰川家的女儿', gap: '父亲被逐出家门', nowadays: '白天上课晚上打工' },
+          interactionPref: { length: '短', emoji: '不用', comfortZone: '曲子、书', taboo: '别问「你还好吗」' },
+        },
+      },
+    },
+  }, {})
+  check(outcome.ok === true, '投影自检卡保存成功')
+
+  // 直接读**盘上**的 CCv3 —— 这才是外部前端看见的东西
+  const onDisk = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'card.json'), 'utf8'))
+  const d = onDisk.data
+  check(onDisk.spec === 'chara_card_v3', '盘上 spec 是 chara_card_v3')
+  check(typeof d.description === 'string' && d.description.includes('身份：羽丘的女子高中生'),
+    'P0-8 盘上 description 非空且是投影', `实际：${JSON.stringify(String(d.description).slice(0, 40))}`)
+  check(typeof d.personality === 'string' && d.personality.includes('关键词：端整'),
+    'P0-8 盘上 personality 非空且是投影', `实际：${JSON.stringify(String(d.personality).slice(0, 40))}`)
+  check(typeof d.scenario === 'string' && d.scenario.includes('来处：丰川家的女儿'),
+    'P0-8 盘上 scenario 非空且是投影', `实际：${JSON.stringify(String(d.scenario).slice(0, 40))}`)
+  check(typeof d.system_prompt === 'string' && d.system_prompt.includes('声线基因'),
+    'P0-8 盘上 system_prompt 非空且是投影', `实际：${JSON.stringify(String(d.system_prompt).slice(0, 40))}`)
+  check(typeof d.post_history_instructions === 'string' && d.post_history_instructions.includes('收尾提醒'),
+    'P0-8 盘上 post_history_instructions 非空且是投影', `实际：${JSON.stringify(String(d.post_history_instructions).slice(0, 40))}`)
+  // 结构性内容不能被投影顺手洗掉
+  check(d.extensions?.aiwu?.voice?.catchphrases?.[0] === '不必了，谢谢。', '投影后结构里的声线原样还在')
+  check(d.extensions?.aiwu?.imported === undefined, '自制卡不该产生 imported.raw（否则 L1 会走原文保真分支）')
+}
+
 // ================================================================ 汇总
 
 await rm(sandbox, { recursive: true, force: true })

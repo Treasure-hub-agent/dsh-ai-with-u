@@ -292,10 +292,12 @@ for (const name of PRESETS) {
   check(a === b, `${name}：renderL1 两次输出完全一致（random/pick 不抖）`)
 }
 {
-  const card = migrated['虞照'].card
+  // 宏要放在**外部导入卡**的 description 里（无 `aiwu` 结构 → 原文进 imported.raw → 投影让路）。
+  // 带结构的卡上 description 是投影，直接改它会在归一化时被重算掉（§1.5 / P0-8）。
   const withRandom = normalizeCard({
-    ...card,
-    data: { ...card.data, description: '{{random:甲,乙}} 和 {{pick:丙,丁}} 和 {{roll:20}}' },
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: { name: '虞照', description: '{{random:甲,乙}} 和 {{pick:丙,丁}} 和 {{roll:20}}', tags: [], extensions: {} },
   })
   const twice = [renderL1Static(withRandom), renderL1Static(withRandom)]
   check(twice[0] === twice[1] && twice[0].includes('甲') && twice[0].includes('丙') && twice[0].includes('d20'),
@@ -321,9 +323,13 @@ section('V20 · 宏健壮性（宿主会抛错的那几种，这里必须不崩�
   // 中文不会被当成分隔符（不能用 \W 边界）
   const zh = T.selectLoreEntries(bookOf([entry({ id: 'zh', keys: ['便利贴'], content: '中文关键词' })]), ['他贴了便利贴'])
   check(zh.entries.length === 1, '中文关键词用包含匹配命中（不加 \\W 边界）')
-  // L1 渲染里 char/user 必须已展开，认识不了的保留
-  const card = migrated['虞照'].card
-  const withMacros = normalizeCard({ ...card, data: { ...card.data, description: '{{char}} 对 {{user}} 说：{{未知}}' } })
+  // L1 渲染里 char/user 必须已展开，认识不了的保留。
+  // 同上：宏放外部导入卡的 description（原文保真路径），不放带结构卡片的投影位。
+  const withMacros = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: { name: '虞照', description: '{{char}} 对 {{user}} 说：{{未知}}', tags: [], extensions: {} },
+  })
   const text = renderL1Static(withMacros)
   check(text.includes('虞照 对 你 说') && text.includes('{{未知}}'), 'L1 展开认识宏、保留不认识宏')
 }
@@ -503,9 +509,65 @@ section('附 · 装饰器解析 / 长度统计 / 关系档位')
   check(warnCodes.includes('lore-selective'), '预警：selective + 次级关键词（配错会静默永不命中）')
   check(warnCodes.includes('lore-keys'), '预警：世界书条目没有关键词')
 
-  const long = normalizeCard({ ...card, data: { ...card.data, description: '长'.repeat(1300) } })
+  // 「长 description」必须走**外部导入**形态构造：带 `aiwu` 结构的卡里，description 是投影
+  // （结构权威，§1.5 / P0-8），直接改它会在归一化时被重算掉。
+  // 原生卡没有结构 → 原文进 `imported.raw` → 投影让路 → 长描述原样保留。
+  const long = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: { name: '长描述卡', description: '长'.repeat(1300), tags: [], extensions: {} },
+  })
+  check(long.data.description.length === 1300, '外部导入卡的长 description 原样保真（投影让路）')
   check(lengthWarnings(long).some(w => w.code === 'description'), 'description 超阈值触发软警告')
-  check(!lengthWarnings(long)[0].message.includes('错误'), '警告是"建议"措辞，不是拒绝')
+  check(!lengthWarnings(long).some(w => w.message.includes('错误')), '警告是"建议"措辞，不是拒绝')
+
+  // P0-8：自制卡（有 aiwu 结构、原生位为空）归一化后必须带上投影，
+  // 否则落盘的 CCv3 在别的酒馆前端里是空卡——插件自己读结构渲染，从外面看不出来。
+  const selfMade = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+      name: '投影自检卡',
+      first_mes: '（抬头）',
+      extensions: {
+        aiwu: {
+          schema: 1,
+          basic: { identity: '自检身份', background: '自检背景' },
+          voice: { pace: '快', catchphrases: ['甲'], selfRef: '我', callsUser: '你', emotes: ['乙'], forbidden: '丙', gestures: ['丁'] },
+          personality: { keywords: ['冷静'], contradiction: '矛盾', towardClose: '亲近' },
+          world: { origin: '来处', gap: '落差', nowadays: '如今' },
+        },
+      },
+    },
+  })
+  check(selfMade.data.description.includes('身份：自检身份'), 'P0-8 自制卡：description 投影已生成')
+  check(selfMade.data.personality.includes('关键词：冷静'), 'P0-8 自制卡：personality 投影已生成')
+  check(selfMade.data.scenario.includes('来处：来处'), 'P0-8 自制卡：scenario 投影已生成')
+  check(selfMade.data.system_prompt.includes('声线基因'), 'P0-8 自制卡：system_prompt 投影已生成')
+  check(selfMade.data.post_history_instructions.includes('收尾提醒'), 'P0-8 自制卡：post_history_instructions 投影已生成')
+
+  // 投影有两种模式，别混：**默认只补空位**（保住模型/用户亲手写的原生描写），
+  // `overwrite` 才重写（面板改结构、迁移、忘却这三条结构权威路径）。
+  const supplied = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+      name: '自带原生描写的卡',
+      description: '模型亲手写的描述',
+      personality: '模型亲手写的性格',
+      extensions: { aiwu: { schema: 1, basic: { identity: '结构身份' }, personality: { keywords: ['结构词'] } } },
+    },
+  })
+  check(supplied.data.description === '模型亲手写的描述', 'P0-8 默认模式：有结构的卡，模型自带 description 不被改写')
+  check(supplied.data.personality === '模型亲手写的性格', 'P0-8 默认模式：有结构的卡，模型自带 personality 不被改写')
+
+  const forced = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: JSON.parse(JSON.stringify(supplied.data)),
+  })
+  T.projectNative(forced.data, { overwrite: true })
+  check(forced.data.description === '身份：结构身份', 'P0-8 overwrite 模式：投影重写（面板/迁移/忘却走这条）')
 
   check(T.relationBaseline('三年前家里安排你们结婚') === '亲密', '关系起点档：夫妻 → 亲密')
   check(T.relationBaseline('合租室友，他搬进来两个月') === '亲近', '关系起点档：室友 → 亲近')
