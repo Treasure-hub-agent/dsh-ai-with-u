@@ -42,10 +42,15 @@ export const LENGTH_LIMITS = {
  * 现在给的是「保守可用」的临时值，只改这里，不改调用方。
  */
 export const LORE_DEFAULTS = {
+  /** 扫最近几条角色消息（近似 D0..Dn 槽位；`dsh-tavern` 默认 4、universal-worldbook 默认 3 槽）。 */
   scanDepth: 4,
-  budgetChars: 1500,
+  /** 单轮最多注入几条（`dsh-bard` 默认 12）。 */
+  maxEntries: 12,
+  /** 单轮字符预算（`dsh-bard` 默认 maxChars=6000；我们没有 tokenizer，按字符算）。 */
+  budgetChars: 6000,
+  /** 递归激活：第一版**明确不做**（报告 §4.3.3：收益低、放大预算风险）。 */
   recursive: false,
-  /** 没有 tokenizer，`token_budget`（token）按这个系数换算成字符上界（中文保守估计 1 token ≈ 1.5 字）。 */
+  /** `token_budget`（token）→ 字符的换算系数（中文保守估计 1 token ≈ 1.5 字）。 */
   charsPerToken: 1.5,
 } as const
 
@@ -178,8 +183,13 @@ export interface AiwuInteractionPref {
 
 export interface AiwuLoreConfig {
   enabled?: boolean
+  /** 扫最近几条角色消息（null = 用默认 4）。 */
   scanDepth?: number | null
+  /** 单轮字符预算（null = 用默认 6000）。 */
   budgetChars?: number | null
+  /** 单轮最多注入几条（null = 用默认 12）。 */
+  maxEntries?: number | null
+  /** 递归激活（未实现；留字段是为了将来不用改卡）。 */
   recursive?: boolean | null
 }
 
@@ -1065,6 +1075,9 @@ export interface LoreSelectionDiagnostics {
   constantCount: number
   usedChars: number
   budgetChars: number
+  maxEntries: number
+  /** 首条超预算仍被注入（保证"命中了却什么都没给"不会发生）。 */
+  forcedOverBudget: boolean
   droppedByBudget: string[]
   deduped: string[]
 }
@@ -1078,10 +1091,14 @@ export interface LoreSelection {
 export interface LoreSelectOptions {
   scanDepth?: number
   budgetChars?: number
+  maxEntries?: number
+  /** 递归激活（未实现，占位；调用方传 true 会在实现里被忽略并留注释）。 */
   recursive?: boolean
   enabled?: boolean
   charName?: string
   userName?: string
+  /** 本轮哨兵（`agentId:turn`）：probability 稳定哈希的种子，同轮结果固定。 */
+  turnSeed?: string
 }
 
 interface ScoredEntry {
@@ -1104,28 +1121,100 @@ function entryIdentity(entry: CharacterBookEntry): string {
   return `content:${str(entry.content).trim().slice(0, 64)}`
 }
 
+function entryExtensions(entry: CharacterBookEntry): Json {
+  return isRecord(entry.extensions) ? entry.extensions : {}
+}
+
+/**
+ * Unicode 整词边界匹配。
+ *
+ * ⚠️ 绝不能用 `\W` / `\b`：汉字属于 `\W`，`\b便利贴\b` 在中文里几乎永远不命中
+ * （调研报告 §4.4 坑 6，`dsh-tavern` 就踩了）。
+ */
+function wholeWordHit(needle: string, haystack: string, caseSensitive: boolean): boolean {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  try {
+    const flags = caseSensitive ? 'u' : 'iu'
+    return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, flags).test(haystack)
+  } catch {
+    return caseSensitive ? haystack.includes(needle) : haystack.toLowerCase().includes(needle.toLowerCase())
+  }
+}
+
 function matchesKey(key: string, text: string, entry: CharacterBookEntry): boolean {
   const needle = key.trim()
   if (needle === '') return false
+  const caseSensitive = entry.case_sensitive === true
   if (entry.use_regex === true) {
     try {
-      const flags = entry.case_sensitive === true ? 'u' : 'iu'
-      return new RegExp(needle, flags).test(text)
+      return new RegExp(needle, caseSensitive ? 'u' : 'iu').test(text)
     } catch {
-      // 用户写坏正则：退化成字面量匹配（不抛、不吞——diag 里看不到，但不会中断）
-      return text.includes(needle)
+      // 用户写坏正则：退化成字面量匹配（不抛错，否则整轮对话进不去）
+      return caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
     }
   }
-  if (entry.case_sensitive === true) return text.includes(needle)
-  return text.toLowerCase().includes(needle.toLowerCase())
+  const extensions = entryExtensions(entry)
+  const wholeWord = extensions['match_whole_words'] === true || extensions['matchWholeWords'] === true
+  if (wholeWord) return wholeWordHit(needle, text, caseSensitive)
+  return caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
+}
+
+/** FNV-1a 稳定哈希：`probability` 用它，**绝不用 `Math.random`**（那会让系统提示每轮变化、KV 缓存全废）。 */
+function fnv1a(input: string): number {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash >>> 0
+}
+
+/**
+ * 次级关键词逻辑（四值，与 `dsh-bard` / `dsh-universal-worldbook` 对齐）：
+ * `{0: AND_ANY, 1: NOT_ALL, 2: NOT_ANY, 3: AND_ALL}`。
+ */
+const SELECTIVE_LOGIC = { AND_ANY: 0, NOT_ALL: 1, NOT_ANY: 2, AND_ALL: 3 } as const
+
+function selectiveLogicOf(entry: CharacterBookEntry): number {
+  const raw = entryExtensions(entry)['selectiveLogic'] ?? entryExtensions(entry)['selective_logic']
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.trunc(raw)
+  if (typeof raw === 'string') {
+    const upper = raw.trim().toUpperCase()
+    const mapped: Record<string, number> = {
+      AND_ANY: 0, NOT_ALL: 1, NOT_ANY: 2, AND_ALL: 3, ANY: 0, NOTALL: 1, NOTANY: 2, ALL: 3,
+    }
+    if (mapped[upper] !== undefined) return mapped[upper] ?? 0
+  }
+  return SELECTIVE_LOGIC.AND_ANY
+}
+
+function secondaryPasses(entry: CharacterBookEntry, scanned: string): boolean {
+  const secondary = list(entry.secondary_keys)
+  if (secondary.length === 0) return true
+  const hits = secondary.filter(key => matchesKey(key, scanned, entry)).length
+  switch (selectiveLogicOf(entry)) {
+    case SELECTIVE_LOGIC.NOT_ALL: return hits < secondary.length
+    case SELECTIVE_LOGIC.NOT_ANY: return hits === 0
+    case SELECTIVE_LOGIC.AND_ALL: return hits === secondary.length
+    default: return hits > 0
+  }
 }
 
 /**
  * 选世界书条目（纯函数）。
  *
- * 规则（设计文档 §4）：`enabled` 过滤 → `constant` 无条件 → 关键词匹配（可 `use_regex`、大小写）
- * → `selective` 时要求 `secondary_keys` 至少命中一个 → 排序（priority desc, insertion_order asc, id）
- * → 去重（id/name/内容）→ 预算打包（constant 优先，超预算的记入 `droppedByBudget`）。
+ * 规则（已按调研报告 §4.3 定稿）：
+ * - `enabled === false` 或 `disable === true` 过滤（**两个字段反义，不能混用**——报告 §4.4 坑 8）；
+ * - `constant` 无条件激活；`@@dont_activate` 装饰器只靠 constant；
+ * - 关键词匹配：包含匹配（默认忽略大小写）→ `use_regex` → `match_whole_words`（Unicode 边界）；
+ * - `secondary_keys` 按 `selectiveLogic` 四值判定；
+ * - `probability` 用 FNV-1a 稳定哈希（种子 = 本轮 turnSeed + 条目 id），不破坏缓存；
+ * - 排序：`constant` 优先 → `priority` 降序 → `insertion_order` 降序 → 名字；
+ * - 去重：id / 名字 / 渲染后内容三选一，同一轮同一条只出现一次；
+ * - 预算：`maxEntries`（默认 12）与 `budgetChars`（默认 6000 字，`token_budget` 按 1.5 字/token 换算）；
+ *   **首条超预算也注入**（保证"命中了却什么都没注入"不会发生）。
+ *
+ * 不做：递归激活（第一版明确不做——报告 §4.3.3 第 4 条：收益低、放大预算风险，留 TODO）。
  */
 export function selectLoreEntries(
   book: CharacterBook | undefined,
@@ -1141,6 +1230,8 @@ export function selectLoreEntries(
       constantCount: 0,
       usedChars: 0,
       budgetChars: 0,
+      maxEntries: 0,
+      forcedOverBudget: false,
       droppedByBudget: [],
       deduped: [],
     },
@@ -1150,16 +1241,20 @@ export function selectLoreEntries(
   const scanDepth = positiveInt(options.scanDepth)
     ?? positiveInt(typeof book.scan_depth === 'number' ? book.scan_depth : undefined)
     ?? LORE_DEFAULTS.scanDepth
+  // 按轮滚动：只扫最近 scanDepth 条角色消息（近似 D0..Dn 槽位，工具轮不额外占槽）
   const texts = recentTexts.filter(t => typeof t === 'string' && t.trim() !== '').slice(-scanDepth)
   const scanned = texts.join('\n')
+  const turnSeed = options.turnSeed ?? `${texts.length}:${scanned.slice(0, 24)}`
   const tokenBudget = typeof book.token_budget === 'number' && book.token_budget > 0
     ? Math.floor(book.token_budget * LORE_DEFAULTS.charsPerToken)
     : undefined
+  const explicitBudget = positiveInt(options.budgetChars)
   const budgetChars = Math.max(0, Math.min(
-    positiveInt(options.budgetChars) ?? Number.MAX_SAFE_INTEGER,
+    explicitBudget ?? Number.MAX_SAFE_INTEGER,
     tokenBudget ?? Number.MAX_SAFE_INTEGER,
-    positiveInt(options.budgetChars) === undefined && tokenBudget === undefined ? LORE_DEFAULTS.budgetChars : Number.MAX_SAFE_INTEGER,
+    explicitBudget === undefined && tokenBudget === undefined ? LORE_DEFAULTS.budgetChars : Number.MAX_SAFE_INTEGER,
   ))
+  const maxEntries = positiveInt(options.maxEntries) ?? LORE_DEFAULTS.maxEntries
 
   const seen = new Set<string>()
   const seenContent = new Set<string>()
@@ -1171,7 +1266,10 @@ export function selectLoreEntries(
   for (const rawEntry of book.entries) {
     if (!isRecord(rawEntry)) continue
     const entry = rawEntry as unknown as CharacterBookEntry
+    // enabled / disable 反义：卡内 book 用 enabled；防御性地也认 disable（独立 .json 世界书的心智）
     if (entry.enabled === false) continue
+    if (entryExtensions(entry)['disable'] === true) continue
+
     const parsed = parseDecorators(str(entry.content))
     const text = expandMacros(parsed.content, {
       char: options.charName ?? '',
@@ -1189,10 +1287,15 @@ export function selectLoreEntries(
 
     // 装饰器覆盖：@@dont_activate = 不参与关键词激活，只靠 constant
     const blocked = parsed.decorators['dont_activate'] !== undefined
-    const hit = !blocked && list(entry.keys).some(key => matchesKey(key, scanned, entry))
-    let active = isConstant || hit
-    if (active && entry.selective === true && list(entry.secondary_keys).length > 0) {
-      active = list(entry.secondary_keys).some(key => matchesKey(key, scanned, entry))
+    const keysHit = !blocked && list(entry.keys).some(key => matchesKey(key, scanned, entry))
+    let active = isConstant || (keysHit && secondaryPasses(entry, scanned))
+
+    // probability：稳定哈希，同一轮内结果固定（Math.random 会毁缓存）
+    if (active) {
+      const probability = Number(entryExtensions(entry)['probability'])
+      if (Number.isFinite(probability) && probability > 0 && probability < 100) {
+        active = fnv1a(`${turnSeed}:${identity}`) % 100 < probability
+      }
     }
     if (!active) continue
 
@@ -1221,15 +1324,27 @@ export function selectLoreEntries(
   scored.sort((a, b) => {
     if (a.constant !== b.constant) return a.constant ? -1 : 1
     if (a.priority !== b.priority) return b.priority - a.priority
-    if (a.order !== b.order) return a.order - b.order
-    return a.id.localeCompare(b.id)
+    if (a.order !== b.order) return b.order - a.order
+    return a.name.localeCompare(b.name)
   })
 
   const kept: ScoredEntry[] = []
   const dropped: string[] = []
   let used = 0
+  let forcedOverBudget = false
   for (const item of scored) {
-    if (used + item.text.length > budgetChars) { dropped.push(item.id); continue }
+    if (kept.length >= maxEntries) { dropped.push(item.id); continue }
+    if (used + item.text.length > budgetChars) {
+      // 首条超预算也注入：宁可超一点，也不能"命中了却什么都没给模型"
+      if (kept.length === 0) {
+        kept.push(item)
+        used += item.text.length
+        forcedOverBudget = true
+        continue
+      }
+      dropped.push(item.id)
+      continue
+    }
     used += item.text.length
     kept.push(item)
   }
@@ -1253,6 +1368,8 @@ export function selectLoreEntries(
       constantCount,
       usedChars: used,
       budgetChars,
+      maxEntries,
+      forcedOverBudget,
       droppedByBudget: dropped,
       deduped,
     },
@@ -1605,7 +1722,7 @@ export interface CardLengthStats {
 }
 
 export interface LengthWarning {
-  code: 'description' | 'l1' | 'lore-entry' | 'lore-total' | 'lore-keys' | 'card-size'
+  code: 'description' | 'l1' | 'lore-entry' | 'lore-total' | 'lore-keys' | 'lore-selective' | 'card-size'
   chars: number
   message: string
 }
@@ -1664,6 +1781,15 @@ export function lengthWarnings(card: CharacterCardV3): LengthWarning[] {
       code: 'lore-keys',
       chars: 0,
       message: `世界书有 ${keyless.length} 条没有关键词，永远不会被命中（除非标记为常驻）。`,
+    })
+  }
+  const selective = (card.data.character_book?.entries ?? []).filter(e => e.selective === true && list(e.secondary_keys).length > 0)
+  if (selective.length > 0) {
+    // 真实踩坑点：selective 只是"再要求次级关键词命中"，配错 secondary_keys 会让条目**静默永不命中**
+    warnings.push({
+      code: 'lore-selective',
+      chars: 0,
+      message: `世界书有 ${selective.length} 条设了 selective + 次级关键词：只有主关键词和次级关键词同时命中才注入。如果它们老不出现，先检查 secondary_keys。`,
     })
   }
   if (stats.cardChars > LENGTH_LIMITS.cardFile) {

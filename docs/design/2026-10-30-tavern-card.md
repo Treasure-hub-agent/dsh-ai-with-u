@@ -1,14 +1,15 @@
-# 酒馆卡 CCv3 格式 + 「常规人设常驻 / 世界书按需注入」设计（v0.2.0 核心）
-
-> 状态：**设计稿（第一批）**。作者：tavern-architect。日期：2026-10-30。
-> 依据：官方 `SPEC_V3`（Character Card V3）、现有代码逐行读过的结果（`src/prompt.ts` 420 行 / `src/store.ts` 951 行 / `src/index.ts` 328 行 / `client/card-schema.ts` 318 行）、
-> `docs/DEVELOPMENT.md` §二/§三/§九、`06-tmp\aiwu-survey\host.md`（31 条风险）。
+> 状态：**已实现并合入 v0.2.0（2026-10-30）**。作者：tavern-architect。
+> 依据：官方 `SPEC_V3`（Character Card V3）；现有代码逐行读过的结果（`src/prompt.ts` / `src/store.ts` / `src/index.ts` / `client/card-schema.ts`）；
+> `docs/DEVELOPMENT.md` §二/§三/§九；`06-tmp/aiwu-survey/host.md`（31 条风险）；
+> `06-tmp/tavern-study/REPORT.md`（四家社区实现源码对照 + 宿主实跑，1320 行）。
 >
-> **本文分两批交付**：
-> - **第一批（本文，可拍板）**：§1 存储形态、§2 旧格式迁移、§3 L1 组装、§3.5 宏、§5 长度策略、§6 风险回归、§7 验收清单、§8 实现清单、§9 待拍板。
-> - **第二批（等 `tavern-researcher` 的 `06-tmp\tavern-study\REPORT.md`）**：**§4 世界书注入算法**——这一节目前只有**结构与待定清单**，明确标了 `⏳待调研`。
->   原因：`dsh-universal-worldbook` 主打的「请求级一次性注入、不污染上下文」说明那里有真坑，不能想当然定死。
+> **本文两批都已交付**：
+> - **第一批**：§1 存储形态、§2 旧格式迁移、§3 L1 组装、§3.5 宏、§3.8 宿主插值、§5 长度策略、§6 风险回归、§7 验收清单、§8 实现清单、§9 决策记录。
+> - **第二批**：§4 世界书注入算法——已按 `REPORT.md` §4.3 定稿（13 个待定点全部收口，含 `selectiveLogic` 四值、稳定哈希 `probability`、Unicode 整词边界、预算 12 条 / 6000 字）。
 >
+> **落地后的自检**：`verify-tavern` 171 项 + `verify-import` 47 + `verify-session` 94 + `verify-host` 19，全部串在 `npm run build` 里。
+>
+> **硬约束（全文遵守，已达成）**：零新依赖；宿主侧改动只碰 `src/tavern.ts`（新）、`src/prompt.ts`、`src/store.ts`、`src/web.ts`、`src/index.ts` 钩子接线、`scripts/verify-tavern.mjs`；**没碰 `client/**`、没碰 `presets/**`（旧格式保留）、没碰 `distill/`**；**未改任何 DSH 宿主行为**。
 > **硬约束（全文遵守）**：零新依赖；只动宿主侧（`src/tavern.ts` 新建、`src/prompt.ts`、`src/store.ts`、`src/index.ts` 钩子接线、`presets/**`、`scripts/verify-tavern.mjs`）；不碰 `client/**`、不碰 `distill/`；**不设计任何需要改 DSH 宿主的方案**。
 
 ---
@@ -26,7 +27,7 @@
 | D7 | `system_prompt` / `post_history_instructions` 在 DSH 里**没有对应通道** → 降级为 L1 内两段**明确标注**的文本块（「角色自带指令」「收尾提醒」） | 不改宿主系统提示词，只能"追加",不能"替换" |
 | D8 | `mes_example` **默认开**，但受 1200 字符预算与 `<START>` 分块约束 | 示例对话是声线最强的锚；迁移卡没有就为空，不编造 |
 | D9 | 长度**不设硬上限**，只给 4 档软警告（阈值见 §5.1） | 主人明确要「不设上限」；警告是可忽略的建议 |
-| D10 | 世界书走**独立 section `aiwu:lore`（order 5150）**，未命中时返回 `''`（DSH 过滤空段） | 倾向方案，但**保留到第二批定稿**（§4） |
+| D10 | 世界书走**独立 section `aiwu:lore`（order 10300，垫底）**，未命中时返回 `'`（宿主过滤空段） | 已定案：调研确认宿主缓存失效范围按系统提示内部顺序算，易变段必须垫底（§3.8 / §4） |
 | D11 | 「忘却」的搜索面 = **卡内全部可注入文本**（`awiu` 所有字符串叶子 + `character_book.entries[].content` + `imported.raw` + 开场白），删完**重投影**；返回体带 `scanned` 计数，扫过 0 处不允许报成功 | 旧代码只认 `memory_anchor`/`dynamic_state` 两个键，迁移后会"提示成功、一个字没删"（Lead P0-1）。**规则见 §2.7** |
 | D12 | **`presets/*/card.json` 保持旧格式不动** | Lead 决定（P0-2）：全新安装时真的跑一遍迁移逻辑 = 迁移代码每天都在跑回归。改 §2.5/§8 |
 | D13 | **删除 `prompt.ts` 的 `renderCharacterCard`**，L1 只走 `renderL1` | Lead 发现（P0-3）：留着就是两套渲染并联，token 翻倍。`toLegacyView` 是**数据视图**，不是渲染器 |
@@ -707,6 +708,9 @@ Copy-Item "$env:USERPROFILE\.dsh\ai-with-u\characters\虞照\card.v1.bak.json" `
 | `{{random:A,B}}` | **取首项 A**（稳定求值） | 真随机 |
 | `{{pick:A,B}}` | **取首项 A**（稳定求值） | 真随机 |
 | `{{roll:N}}` | 渲染为 `dN`（不投骰，静态块里没有"这一轮"的语义） | 投 `1..N` |
+| 任何不认识的 `{{xxx}}` | **原样保留**（绝不抛错；宿主会抛，所以我们全程 `interpolate:false`） | 同左 |
+| `{{Char}}`（大写变体） | **不展开**（大小写敏感、只认规范写法），原样保留 | 同左 |
+| `{{roll:20}}` / `{{roll:d20}}` / `{{roll:1d20}}` | 统一识别为 d20（静态块渲染 `d20`） | 投 1..20 |
 | `@@depth/@position/@scan_depth/@activate/@dont_activate` | 世界书条目的**行首装饰器**：已知项解析成行为，**未知 `@@` 行整行丢弃**（不作为正文注入） | 同左 |
 
 **`{{random}}` / `{{pick}}` 为什么静态块取首项**：它们是给开场白准备的（"换一句开场"时真随机才有意义）。
@@ -758,7 +762,46 @@ export function renderL1(card: CharacterCardV3, extras: L1Extras): string
 
 ---
 
-## 4. 世界书注入（⏳ 第二批：结构先行，算法待调研定稿）
+### 3.8 🔴 宿主插值必须关掉（`interpolate: false`）——「导入即崩」级
+
+宿主 `dsh-system-prompt` 的组装代码（调研提取原文）会对每个 section 做 `{{var}}` 插值：
+
+```js
+// lib/index.js:118
+return assembly.sections.map((section) =>
+  section.interpolate === false ? section.text : interpolate(section, assembly.variables, "section"))
+
+// lib/index.js:158
+if (!Object.hasOwn(variables, name)) {
+  throw new Error(`unknown prompt variable "{{${name}}}" in ${kind} "${input.name}"; ...`)
+}
+```
+
+**后果**：CCv3 卡的 `description` / `character_book` 里几乎必然有 `{{char}}` / `{{user}}`（酒馆通用写法）。
+不关插值 → 启用该角色的**整轮对话失败**（不是显示错字，是这一轮进不去）。`{{` 未闭合同样会抛 `malformed prompt variable reference`。
+
+**做法（已实现，且有回归网）**：
+
+1. 我们注册的**每一段**都带 `interpolate: false`（`aiwu:baseline` / `aiwu:active-character` / `aiwu:lore` / `aiwu:clock`）。
+2. 由 `tavern.expandMacros` 自己处理：认识的展开（char/user/random/pick/roll/注释），**不认识的 `{{xxx}}` 原样保留**、未闭合也不抛。
+3. `verify-host.mjs` 断言：任何 `aiwu:*` 段只要漏了 `interpolate:false` 就红（这条是防回归的关键，不是可选检查）。
+
+**段位与顺序（缓存失效范围）**：
+
+| order | 段名 | 内容 | 易变度 |
+|---|---|---|---|
+| 5000 | `aiwu:baseline` | L0 底线 | 恒定 |
+| 5100 | `aiwu:active-character` | 酒馆卡 + 会话摘要 + 日记 + 交互模式 + 关系口径 + 收尾提醒 | 每轮（会话写盘后） |
+| 10300 | `aiwu:lore` | 世界书命中 | 命中集合变才变 |
+| 10350 | `aiwu:clock` | 距上次互动 + 当前时间 | **每分钟** |
+
+> 反例（调研）：`dsh-tavern` 把每轮都变的段放在 **-999999（最前）**，等于每轮把后面全部缓存烧掉；
+> `dsh-lorebooklike-prompt-tool` 专门写了「缓存安全改道」来绕这件事。我们不重复这个错。
+>
+> 也不使用 `systemPrompt.context()`：它确实能落到消息数组末尾，但会以 `source.kind='runtime-context'` 的 **user 消息**
+> 落进会话表面——"不累积"但"不留痕"做不到，与 L0 的「零系统痕迹」冲突。
+
+## 4. 世界书注入（✅ 已按调研报告定稿）
 
 > **本节现在只定"骨架与硬约束"，算法细节一律 `⏳待调研`。**
 > 等 `tavern-researcher` 的 `06-tmp\tavern-study\REPORT.md`（四家社区插件源码阅读）到位后补完。
@@ -768,8 +811,8 @@ export function renderL1(card: CharacterCardV3, extras: L1Extras): string
 
 | # | 约束 | 含义 |
 |---|---|---|
-| C1 | **通道只有一个** | 只能走 `ctx.systemPrompt.section()`（动态文本函数）+ `agent/pre-step` + 现有 REST。**不新增工具、不改宿主** |
-| C2 | **没有"历史之后"的注入位** | 所以世界书只能进系统提示词的一侧；`before_char` / `after_char` 只能映射成"系统提示词内的相对位置"（§4.6） |
+| C1 | **通道只有 section** | 只能走 `ctx.systemPrompt.section()`（动态文本函数，**必须 `interpolate: false`**，§3.8）+ `agent/pre-step` + 现有 REST。**不新增工具、不改宿主** |
+| C2 | **没有「历史之后」的注入位** | `systemPrompt.context()` 也不行：它会以 `runtime-context` 的 **user 消息**落进会话表面，违背「零系统痕迹」。所以世界书只能进系统提示词一侧；`before_char` / `after_char` 退化为「系统提示词内的相对位置」（§4.6） |
 | C3 | **不常驻工具** | 主人已否掉"常驻查询工具"。"主动读取"若要保留，只能是"按需注入一段可读清单"或未来的一次性查询形态，**本轮不实现** |
 | C4 | **零依赖** | 没有 tokenizer，预算只能按字符近似（§4.5） |
 | C5 | **防抖** | 同一轮内多次 `pre-step`（工具循环会重复触发）**绝不能**导致同一批条目被"追加两次" |
@@ -813,71 +856,103 @@ export function selectLoreEntries(
 **为什么先定签名**：世界书是"卡的能力"，`selectLoreEntries` 是纯函数，可以和 `prompt.ts` 解耦；
 调研结论只影响**默认值与匹配细节**，不影响这条缝。真到要改算法，改实现不改接口。
 
-### 4.3 待定决策点清单（⏳每一条都要调研后填）
+### 4.3 决策点（✅ 已按调研报告 §4.3 定稿）
 
-| # | 决策点 | 候选 | 评估标准 | 我现在的倾向（未定稿） |
-|---|---|---|---|---|
-| W1 | `scan_depth` 默认几 | 2 / 4 / 6 / 摘要+原文混合 | 命中率 vs 误命中 vs 成本；我们只有 `session.recent`（5 条 × 120 字） | 4（最近 4 条） |
-| W2 | `constant` 条目 | 无条件全部注入 / 受预算约束 / 只注入 `enabled && constant` | 预算是硬约束，constant 也不能例外 | 全部注入但**会计入预算**，超预算按 `insertion_order` 截断 |
-| W3 | `selective` + `secondary_keys` | ①有 `selective` 才要 secondary 全中 ②只要任一 ③忽略 selective | 酒馆口径 vs 实现复杂度 | ①（语义正确），`secondary_keys` 为空则退化为只看主 keys |
-| W4 | 大小写 | 统一 `toLowerCase()` / 尊重 `case_sensitive` | 中文无大小写，只影响英文 | 默认忽略大小写；`case_sensitive: true` 时严格 |
-| W5 | `use_regex` | 支持 / 不支持（按字面量处理） | 零依赖下 `new RegExp` 可用，但用户写坏正则会抛 | 支持，但 `try/catch` 包住，失败按字面量匹配并记 `diag` |
-| W6 | 预算单位 | `token_budget`（token） / 字符预算 / 双轨 | 无 tokenizer；酒馆卡里写的是 token | **字符预算为主**，`token_budget` 按 `×1.5`（中文保守）换算成字符上界，取两者更小 |
-| W7 | 预算默认值 | 800 / 1500 / 2500 字符 | 每轮常驻成本；L1 静态块已经 ~3000 字符 | 1500 字符 |
-| W8 | 命中后放哪个 section | ①L1 内（第 13 位）②独立 section `aiwu:lore` | 可观察性 / 前缀缓存 / 未来能否单独开关 | **独立 section**（D10）为最终形态；**实现暂用 L1 内联第 13 位**（`renderL1` 的 `extras.loreText`）——两者对调用方契约相同，调研定稿后拆 section 不用改接口 |
-| W9 | `before_char` / `after_char` 落点 | before → L1 开头之前 / after → 静态块之后 | 语义近似度；`before_char` 会顶掉"身份标题"的锚定效果 | `after_char` → 静态块之后（第 13 位）；`before_char` → 身份标题之前，加小标题区分 |
-| W10 | 递归扫描 | 做 / 不做 | 酒馆 `recursive_scanning` 的收益主要在"一条命中带出另一条" | **v1 不做**（复杂 + 易失控），写进文档"不支持" |
-| W11 | 匹配素材 | `session.recent` / 本轮用户原文 / `topic` / `mood` | 摘要 120 字截断会丢关键词 | `recent` + `topic` + **本轮用户原文**（pre-step 从会话事件取最后一条 user），三者拼接 |
-| W12 | 同一 entry 多 key 命中 | 只注入一次 | 显然 | 按 entry 去重（`id` 优先，无 `id` 用 `name`，都无用内容哈希） |
-| W13 | `insertion_order` 冲突（同值） | 稳定排序 / 按 `priority` | 可预测性 | 先 `priority` 降序，再 `insertion_order` 升序，再 `id` 字典序（稳定） |
+报告落盘：`06-tmp/tavern-study/REPORT.md`（1320 行，四家源码逐读 + 宿主实跑）。
 
-### 4.4 防抖与去重（可以现在定，因为这是通道性质决定的）
+| # | 决策点 | 定稿 | 依据 |
+|---|---|---|---|
+| W1 | `scan_depth` | **默认 4**，按轮滚动（只扫最近 4 条角色消息，近似 D0..Dn 槽位；工具轮不额外占槽）。卡的 `character_book.scan_depth` 可覆盖，卡的 `awiu.prompt.lore.scanDepth` 优先 | `dsh-tavern` 默认 4（`worldbook.js:411`）；`universal-worldbook` 用 3 个**角色槽位**而非消息数 |
+| W2 | `constant` 条目 | **无条件注入**，且**计入预算**（预算吃紧时 constant 优先保留） | 各家一致；`@@activate` 装饰器等价于 constant |
+| W3 | `selective` + `secondary_keys` | 实现**四值** `selectiveLogic`：`0 AND_ANY / 1 NOT_ALL / 2 NOT_ANY / 3 AND_ALL`（读 `extensions.selectiveLogic`，数字或名字都认，缺省 0） | `universal-worldbook/matcher.js:81-91` 与 `dsh-bard/lorebook.js:55` 两家一致 ⇒ 可信 |
+| W4 | 大小写 | 默认忽略大小写；`case_sensitive: true` 严格 | ST 口径 |
+| W5 | `use_regex` | 支持；**写坏的正则退化成字面量匹配**，不抛错（宿主铁律：任何卡都不许让整轮请求失败） | 本项目的「导入即崩」教训 |
+| W6 | 预算单位 | **字符预算为主**；卡里的 `token_budget`（token）按 **×1.5** 换算成字符上界，两者取小 | 零依赖没有 tokenizer；中文保守估计 1 token ≈ 1.5 字 |
+| W7 | 预算默认值 | **`maxEntries = 12` / `budgetChars = 6000`** | `dsh-bard` 默认 `maxEntries=12 / maxChars=6000` |
+| W8 | 段位 | ✅ **独立 section `aiwu:lore`，order 10300**（易变段垫底）；时间差另立 `aiwu:clock`（10350） | 宿主文档：头节点重写会从首个变化的 token 起失去前缀复用（`dsh-system-prompt/README.zh.md:152-154`） |
+| W9 | `before_char` / `after_char` | `before_char` → 段内先出一组（标题「▎先读这些设定」）；`after_char` → 后一组（「▎相关设定」）。两者都在 `aiwu:lore` 段内 | 我们只有系统提示词一侧，做不到真正的"角色定义前/后"；位置语义降级为段内相对顺序 |
+| W10 | 递归激活 | ✅ **不做**（`recursive: false`）。理由：CCv3 卡一般 20~100 条，递归收益低但会放大预算风险；留字段 `awiu.prompt.lore.recursive` 供将来 | 报告 §4.3.3 第 4 条 |
+| W11 | 匹配素材 | `session.recent` + `topic` + **本轮用户原文**（`agent/pre-step` 从会话事件取最近几条），按 `scanDepth` 截断；**不读全量历史、不读日记** | 摘要 120 字会被截断，原文更准；全量 IO 与隐私成本不划算 |
+| W12 | 同 entry 多 key 命中 | 按 `id` → `name` → 渲染后内容哈希去重，一轮内只出现一次 | 各家一致 |
+| W13 | 排序 | `constant` 优先 → `priority` ↓ → `insertion_order` ↓ → 名字 | 报告 §4.3.3 第 1 条（`dsh-bard` 口径） |
 
-**先说清一件事**：因为走 `systemPrompt.section`，每次组装都是**重新求值、整段重生成**，没有"往历史里追加一条 context 消息"的通道。
-所以"同一轮多次 pre-step 重复注入"在我们的形态里**不可能表现为"追加"**——重放是纯函数，天然幂等。
+**额外落地的三条（报告新增，不在原 13 条里）**
 
-真正要防的是三件事：
+| 项 | 定稿 | 为什么 |
+|---|---|---|
+| `probability` | 支持，但用 **FNV-1a 稳定哈希**（种子 = `turnSeed + 条目 id`），**绝不用 `Math.random`** | `Math.random` 会让系统提示每轮变化 → KV 缓存全废（报告 §4.4 坑 5） |
+| `match_whole_words` | 支持，用 **Unicode 边界** `(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` + `u`；**不用 `\W`/`\b`** | 汉字属于 `\W`，`\b便利贴\b` 在中文里几乎永不命中（报告 §4.4 坑 6） |
+| `enabled` vs `disable` | 卡内 `character_book` 认 `enabled`，同时**防御性**认 `extensions.disable: true`（反义坑） | 独立 `.json` 世界书用 `disable`，混用会"整本失效/全部生效"（报告 §4.4 坑 8） |
+
+**首条超预算也注入**：预算装不下第一条时仍然注入它，并置 `diag.forcedOverBudget`。
+理由：宁可超一点，也不能出现「命中了却什么都没给模型」——那会让用户以为世界书没生效。
+
+**宏层的大小写口径（Lead 提问，已定）**：**大小写敏感，只认规范小写写法**（`{{char}}` / `{{user}}` / `{{random}}` / `{{pick}}` / `{{roll}}`）。
+理由：酒馆卡的规范写法就是小写；宽松匹配（`{{Char}}` 也展开）会误伤正文里的 `{{...}}` 字面量，而 `{{Char}}` 在宿主那里本来就会抛 `malformed`——我们保持"认识规范写法、其余原样保留"这一条边界最干净。
+
+### 4.4 防抖与去重（已实现）
 
 | 风险 | 场景 | 处置 |
 |---|---|---|
-| **轮次串味** | 同一轮内工具循环多次 `pre-step`，每次都 `refresh`，A 轮的素材没写完 B 轮又进来（`prompt.refresh` 串行化本身是坏的，P0-6） | ① 修 `prompt.refresh` 的串行化（一起修 P0-6）；② cache 里带 `loreForTurn: turnKey`，渲染时 turnKey 不匹配就**沿用上一次的文本**（不返回空、不阻塞），并记一次 debug 日志 |
-| **同一条目重复** | `constant` 与关键词同时命中同一条；或两条内容完全一样 | 先按 `id/name/内容哈希` 去重（W12），再拼文本时对段落级 `Set` 去重 |
-| **同一段文本重复** | 卡里 `memoryAnchors` 与世界书某条内容相同（用户从世界书抄了一份） | 渲染后对**整段**做一次"相邻重复段落折叠"（保守：只折叠完全相等的段落，不做模糊） |
+| **同轮重复** | 同一轮内工具循环多次 `pre-step`，每次都 `refresh` | `refresh` 串行链（P0-6 已修）+ 缓存里带 `loreTurnKey = agentId:turn`：同一轮**直接复用**上一次的命中集合，不重算也不叠加 |
+| **跨轮累积** | 上一轮的命中"粘"到这一轮 | 命中集合是**纯函数**：每轮按"最近 `scanDepth` 条消息"重新算，不存在跨轮状态。关键词掉出窗口就不再注入 |
+| **同一 entry 重复** | constant 与关键词同时命中同一条；两条内容一样 | 按 `id`/`name`/渲染后内容哈希去重，`diag.deduped` 记录 |
+| **同段文本重复** | 卡里 `memoryAnchors` 与世界书某条内容雷同 | 渲染后按段落去重（只折叠完全相等的段落） |
 
-**turnKey 从哪来**：`agent/pre-step` 的 payload 有 `agent.id` 与 `turn`（`index.ts` 已在用），拼 `${agentId}:${turn}` 即可；
-`turn` 缺失时退化为 `session.id` + 时间窗。
+> 「同一轮多次 pre-step 重复注入」在我们的通道里**不可能表现为追加**：走 `systemPrompt.section()` 每次组装都是整段重生成，没有"往历史里追加 ctx"的通道。真正要防的是"同一轮内命中集合抖动"和"跨轮粘连"，上面两条已经堵住。
 
-### 4.5 预算换算（无 tokenizer）
-
-```
-字符预算 = min( options.budgetChars, token_budget × 1.5 )
-```
-
-- 中文保守估计 **1 token ≈ 1.5 汉字**（宁少不多，超预算比欠预算更危险——每轮重复付费）。
-- `token_budget` 缺失 → 只用字符预算。
-- 超预算时：先丢"关键词命中"里排名靠后的（按 W13 排序后从尾丢），`constant` 条目**最后丢**（记 `diag.droppedByBudget`）。
-
-### 4.6 `before_char` / `after_char` 落点（候选，⏳待调研）
+### 4.5 预算换算与实测（无 tokenizer）
 
 ```
-[before_char 条目]（加小标题「▎先读这些设定」）
-## 你现在的身份：{name}
-...静态块 1–12...
-[after_char 条目]（加小标题「▎相关设定」）
-...易变块 14–19...
+字符预算 = min( maxEntries 上限, budgetChars, token_budget × 1.5 )
 ```
 
-- 语义近似：酒馆的 `before_char` = 角色定义之前，`after_char` = 角色定义之后。我们映射到"身份标题前 / 静态块后"。
-- `after_char` 是主流（默认 `position` 在酒馆里也是 `after_char`），所以绝大多数条目会落在静态块后面。
-- 风险：`before_char` 排在"身份标题"之前，可能削弱身份锚；只有当条目确实需要先读时才用。
+**实测（虞照 + 手工塞 10 条世界书，默认 4 / 12 / 6000，2026-10-30）**
 
-### 4.7 拿到调研报告后要补的三件事
+| 场景 | 命中 | 注入字数 | L1 总字数 | ≈token/轮 |
+|---|---|---|---|---|
+| 不启用世界书 | 0 | 0 | 1377 | 918 |
+| 保守（只提到便利贴） | 3 条（constant+drum+supermarket） | 112 | 1491 | 994 |
+| 典型（提到颜色/鼓/超市） | 4 条 | 168 | 1547 | 1031 |
+| 关键词密集 | 6 条 | 204 | 1583 | 1055 |
 
-1. **填 §4.3 的 13 个决策点**（每个都要写"选了哪个 + 一句为什么 + 是否与社区一致/为什么不一致"）。
-2. **对比四家的注入形态**：一次性注入 / 每轮注入 / 工具读取，各自的上下文污染与成本结论，落成 §4.8「社区对照表」。
-3. **列出"我们抄不了的部分"**：任何需要"往会话里追加消息"或"改宿主提示词"的做法 → 明确标注"DSH 无此通道，放弃"。
+> 结论：**默认预算 6000 字远没有用满**——10 条真实世界书在典型对话下只注入 168 字（占 L1 的 11%）。
+> 预算上限的作用是"防爆炸"（比如一次提到十个关键词），不是常态成本。
+>
+> ⚠️ 实测发现一个**真实卡设计坑**：`selective: true` + `secondary_keys` 配错时会**静默永不命中**（第一轮测试里"便利贴颜色规则"就因为聊天没提「颜色」而没进）。
+> 已在 `lengthWarnings` 加 `lore-selective` 提示（UI 侧显示），不阻断保存。
+
+### 4.6 `before_char` / `after_char` 落点（已实现）
+
+```
+▎先读这些设定（世界书 · before_char）
+…（before_char 条目）
+
+▎相关设定（世界书命中）
+…（after_char 条目）
+```
+
+两段都在 `aiwu:lore` 段内、按 `priority`/`insertion_order` 排序后的相对顺序。
+酒馆的 `before_char` / `after_char` 指的是"角色定义之前/之后"，我们只有系统提示词这一侧，
+所以在段内用两组标题表达，语义等价、位置降级（设计约束 C2）。
+
+### 4.7 社区对照与我方取舍（`REPORT.md` §2 / §4.2 的浓缩）
+
+| 做法 | 谁在做 | 我们 | 为什么 |
+|---|---|---|---|
+| `llm/stream` 请求级改写消息数组 | `dsh-universal-worldbook` | ❌ | 我们没有这条通道，而且要改宿主 |
+| 两段/三段 `systemPrompt.section()` 分层 | `dsh-universal-worldbook`（两段）、我们 | ✅ | 现有通道，零宿主改动 |
+| `order: -999999` 抢最前 | `dsh-tavern` | ❌ | 每轮把后面的缓存全烧掉；我们让易变段垫底 |
+| `systemPrompt.context()` 落到消息末尾 | 部分实现 | ❌ | 会以 `runtime-context` 的 **user 消息**落进会话表面，违背「零系统痕迹」 |
+| 整本世界书全量注入 | 简单实现 | ❌ | 预算失控；我们用关键词 + 预算 |
+| `lore_lookup` 查询工具 | `dsh-universal-worldbook` | ❌（本轮） | 需要挂常驻工具（主人已否）；且维护剥离层/回合台账的成本高。条目涨到几百条时值得重谈 |
+| 递归激活（3 层） | `dsh-bard` | ❌（第一版） | 收益低、放大预算风险 |
+
+**抄不了的部分（写清楚免得后人重试）**：任何"往会话里追加消息"或"整体替换系统提示"的做法都要改宿主；
+我们只有 `section()` 一条路，所以世界书只能进系统提示词一侧。
 
 ---
+
 
 ## 5. 长度策略（"不设上限 + 软警告"）
 
@@ -935,7 +1010,7 @@ export function selectLoreEntries(
 | ↳ `mes_example` | 0（迁移卡）/ ≤1200 字 ≈ ≤800 token | 迁移卡**没有就不编**；外部/蒸馏卡才有 |
 | 时间差 + 会话 + 日记 | ~800 字 ≈ 530 token | 不变 |
 | 交互模式 + 关系口径 | ~290 字 ≈ 190 token | 不变 |
-| 世界书命中 | 0 / ≤1500 字 ≈ ≤1000 token | 默认预算 1500 字（⏳待调研定稿） |
+| 世界书命中 | 0 / ≤6000 字（**实测典型 112~204 字**，见 §4.5） | 默认 12 条 / 6000 字预算；超预算按 priority 裁 |
 | **合计 / 轮** | **~1900 token**（迁移卡、无命中）→ **~3300 token**（外部卡 + 示例 + 命中） | v0.1 实测同口径约 **1850 token** |
 
 累计成本（100 轮会话，全部当输入重算）：
@@ -959,7 +1034,7 @@ export function selectLoreEntries(
   - ✅ 卡不变 → 第 1–12 段字节稳定 → 前缀命中；
   - ❌ 第 14 段的"当前时间"**每分钟都在变** → 它后面的所有内容（会话/日记/模式/关系口径）每轮都重新计费；
   - ⚠️ 第 13 段（世界书）位于"稳定前缀"和"易变块"之间：**未命中时 `''`（等于不存在，前缀不受影响）；命中且下一轮仍命中同一批条目时，前缀仍稳定**。只有"命中集合变化"的那一轮会失一次缓存。
-- 结论：**世界书段必须放在时间差之前**（即第 13 位），否则它会跟着时间一起每轮失效。
+- 结论（按宿主文档，不是猜测）：**易变段垫底**是失效范围最小的摆法（`aiwu:lore` 10300、`aiwu:clock` 10350）。
 - 另一个已存在的浪费：`renderActiveSection` 每次都输出"当前时间"，哪怕没有时间差档位。这一条保留（时间感知是产品价值），但要在文档里写清"这是刻意用缓存换体验"。
 
 ### 6.3 「5 分钟以上长会话会不会反复注入」
@@ -1061,7 +1136,7 @@ node scripts/verify-tavern.mjs
 # 期望最后一行：全部通过（N 项），exit code 0
 ```
 
-`scripts/verify-tavern.mjs` 至少断言（纯函数 + 临时目录，不碰真实存档）：
+至少断言（纯函数 + 临时目录 + 路由 handler，不碰真实存档）：**171 项**
 
 | # | 断言 | 方法 |
 |---|---|---|
@@ -1085,6 +1160,10 @@ node scripts/verify-tavern.mjs
 | V17 | **L1 不双渲染**（P0-3） | `renderL1` 输出里，`description` 的正文只出现 **1 次**（旧 `renderCharacterCard` 若并存会把 `basic.一句话背景` 再吐一遍）；并断言 `prompt.ts` 的导出里不再有 `renderCharacterCard` |
 | V18 | §1.7 的 golden 样例即期望输出 | `JSON.parse(样例)` 与 `migrateLegacyCard(presets/虞照/card.json)` 深比较相等（时间戳字段白名单跳过） |
 | V19 | `web.ts` 双入口不洗数据（Q1 风险 B） | 只改一个字段走 `fromLegacyView` → `extensions.aiwu` 其余部分字节不变，`character_book` 条目数不变 |
+| V20 | 宏抗崩（宿主会抛错的那几种） | 未知 `{{foo}}` 原样保留、未闭合 `{{` 不抛、单独 `}}` 原样、`\,` 转义、`roll:20`/`roll:d20`/`roll:1d20` 都成 `d20`、中文关键词不加 `\W` 边界 |
+| V21 | REST 三键保存 + 导入预览（C7 全链路） | 只给 `card` → `character_book`/`extensions.aiwu` 原样；只给 `ccv3` → 生效；都给 → 以 ccv3 为底；都不给 → 400；导入预览不写盘；野生卡缺 `tags` 也能归一 |
+| V22 | 世界书注入规范（报告 §4.3 定稿） | `selectiveLogic` 四值、中文整词边界（不用 `\W`）、`probability` 稳定哈希同轮固定、`enabled`/`disable` 双语义、`maxEntries=12`、首条超预算仍注入、默认 4/12/6000、`scanDepth` 之外不命中 |
+| V23 | 宿主插值必须关闭（P0-5 的防回归） | `verify-host` 里断言：任何 `aiwu:*` 段 `interpolate !== false` 就红；`aiwu:lore` order = 10300、`aiwu:clock` > lore |
 
 ### 7.3 重启 DSH 后的 REST 探活
 
@@ -1147,7 +1226,7 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | `src/store.ts` | `readCard` 读时归一；`writeCard` 接受 CCv3 / 旧视图并做投影 + 备份；`ensureIndex`/`seedPresets`/`listCharacters` 改读 `data.name`；按角色串行队列；`readJson` 损坏备份；`forget`/`rotateOpening`/`relationState` 改路径 | ~250 行改动 | 我 |
 | `src/index.ts` | 仅钩子接线：`pre-step` 把 `recentTexts` + `turnKey` 传给 `prompt.refresh` | ~20 行 | 我 |
 | `presets/*/card.json`（×3） | **不改**（保持旧格式，当迁移回归样本，Lead P0-2） | 0 行 | 我 |
-| `scripts/verify-tavern.mjs` | **新建**：V1–V19 断言 | ~450 行 | 我 |
+| `scripts/verify-tavern.mjs` | **新建**：V1–V22 断言（**171 项**，已串进 `npm run build`） | ~700 行 | 我 |
 | `src/web.ts` | **C7 三键 + 导入接口**：`/character` 与 `/characters` 带 `card`+`ccv3`；`/character/save` 收 `{name,card?,ccv3?}`；新增 `POST /character/import`（16 MB 上限，解析→归一→预览，不落盘）；`readBody(req, limit)` 默认仍 4 MB | ~70 行 | **我** |
 | `client/**` | 编辑器读 `ccv3`/`fields`、世界书编辑 UI、长度警告 UI | — | ui-designer |
 | `distill/flow.md` + 契约 | 蒸馏输出改成 CCv3 JSON（见 §8.1） | — | distill-designer |
@@ -1213,8 +1292,10 @@ Copy-Item "$d\card.v1.bak.json" "$d\card.json" -Force
 | **P0-2** | 预置卡 | ✅ **保持旧格式**，全新安装时真跑迁移 = 天天回归（§2.5） |
 | **P0-3** | 旧 `renderCharacterCard` | ✅ **删除**，不并存（附录 A） |
 | **P0-4** | store 两个 P0（无互斥 / 损坏当不存在） | ✅ 本轮一起修（§6.6） |
+| **P0-5** | 宿主 interpolate 会抛错（调研） | ✅ 四段全 interpolate:false + 自写宏层（未知宏原样保留）；erify-host 加防回归断言（§3.8） |
+| **P0-6** | 世界书/时间差段位 | ✅ iwu:lore=10300、iwu:clock=10350，易变段垫底 |
 
-**仍未定的只剩 §4.3 的 13 个世界书决策点**——等 `06-tmp\tavern-study\REPORT.md`。实现上先把它们集中成 `src/tavern.ts` 顶部的一组 `LORE_DEFAULTS` 常量，报告到位只改常量与匹配细节，不改接口。
+**世界书 13 个决策点已在 §4.3 定稿**（依据 `06-tmp/tavern-study/REPORT.md`）。实现上全部集中在 `src/tavern.ts` 的 `LORE_DEFAULTS` 与 `selectLoreEntries`，改默认值只改一处。
 
 ---
 

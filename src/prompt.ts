@@ -171,6 +171,13 @@ export interface PromptHost {
 }
 
 /** 每轮 pre-step 带进来的上下文（世界书命中用）。 */
+/** 刷新时用的宿主日志接口（只用到 info/warn/error 三档，全部可选，方便测试注入）。 */
+export interface RefreshHost {
+  info?(msg: string, ...args: unknown[]): void
+  warn?(msg: string, ...args: unknown[]): void
+  error(msg: string, ...args: unknown[]): void
+}
+
 export interface RefreshContext {
   /** 最近的对话文本（按时间升序）；不给时退回 session.recent + topic。 */
   recentTexts?: string[]
@@ -190,6 +197,8 @@ interface L1Cache {
   lastTs?: string
   /** 世界书命中结果（含 diag，便于日志排查）。 */
   lore?: LoreSelection
+  /** 这一批命中属于哪一轮（`agentId:turn`）：同一轮多次 pre-step 直接复用，不重算也不叠加。 */
+  loreTurnKey?: string
   /** 本轮的关键词素材（给下一次 refresh 的主题匹配用）。 */
   recentTexts: string[]
   loadedAt: number
@@ -319,7 +328,7 @@ export class PromptController {
    *
    * 失败只记日志，绝不让钩子抛错打断对话。
    */
-  async refresh(host?: { error(msg: string, ...args: unknown[]): void }, context?: RefreshContext): Promise<void> {
+  async refresh(host?: RefreshHost, context?: RefreshContext): Promise<void> {
     const run = async (): Promise<void> => {
       try {
         await this.refreshCache(host, context)
@@ -356,7 +365,7 @@ export class PromptController {
    * 读盘期间旧的 cache 仍然可用（只在末尾一次性赋值），所以不会出现
    * 「人设段落短暂变空/变成占位文本」的那一轮（host.md P0-7）。
    */
-  private async refreshCache(host: { error(msg: string, ...args: unknown[]): void } | undefined, context: RefreshContext | undefined): Promise<void> {
+  private async refreshCache(host: RefreshHost | undefined, context: RefreshContext | undefined): Promise<void> {
     const name = this.characterName
     if (name === undefined) { this.cache = undefined; return }
     const generation = this.generation
@@ -374,14 +383,24 @@ export class PromptController {
       : [...(session?.recent ?? []), session?.topic ?? ''].filter(text => text.trim() !== '')
 
     const aiwu = awiuOf(card)
-    const lore = selectLoreEntries(card.data.character_book, recentTexts, {
-      enabled: aiwu?.prompt?.lore?.enabled !== false,
-      charName: cardName(card),
-      userName: typeof aiwu?.userPersona?.displayName === 'string' && aiwu.userPersona.displayName.trim() !== ''
-        ? aiwu.userPersona.displayName.trim()
-        : '你',
-      // ⏳ scanDepth / budgetChars / recursive 的默认值等调研报告定稿后才写死（见 tavern.LORE_DEFAULTS）
-    })
+    const loreConfig = aiwu?.prompt?.lore
+    const turnKey = context?.turnKey
+    // 防粘 / 防抖：同一轮内多次 pre-step（工具循环）直接复用上一次的命中集合，不重算、不叠加。
+    // 跨轮则整批重算——命中集合永远是"本轮最近几条消息"的函数，不会跨轮累积。
+    const reuse = turnKey !== undefined && this.cache?.character === name && this.cache.loreTurnKey === turnKey
+    const lore = reuse && this.cache?.lore !== undefined
+      ? this.cache.lore
+      : selectLoreEntries(card.data.character_book, recentTexts, {
+        enabled: loreConfig?.enabled !== false,
+        scanDepth: typeof loreConfig?.scanDepth === 'number' ? loreConfig.scanDepth : undefined,
+        budgetChars: typeof loreConfig?.budgetChars === 'number' ? loreConfig.budgetChars : undefined,
+        maxEntries: typeof loreConfig?.maxEntries === 'number' ? loreConfig.maxEntries : undefined,
+        charName: cardName(card),
+        userName: typeof aiwu?.userPersona?.displayName === 'string' && aiwu.userPersona.displayName.trim() !== ''
+          ? aiwu.userPersona.displayName.trim()
+          : '你',
+        turnSeed: turnKey,
+      })
 
     const next: L1Cache = {
       character: name,
@@ -392,14 +411,17 @@ export class PromptController {
       session: sessionText,
       lastTs,
       lore,
+      loreTurnKey: turnKey,
       recentTexts,
       loadedAt: Date.now(),
     }
     // 只有最新一代的刷新才提交（invalidate 之后开工的旧任务直接丢弃）
     if (generation === this.generation) this.cache = next
-    if (lore.diag.constantCount + lore.diag.hitCount > 0) {
-      host?.error('世界书命中 %d 条（常驻 %d / 关键词 %d），占用 %d/%d 字',
-        lore.entries.length, lore.diag.constantCount, lore.diag.hitCount, lore.diag.usedChars, lore.diag.budgetChars)
+    if (!reuse && lore.entries.length > 0) {
+      // 只记条数与**条目名**，绝不记正文（正文进日志 = 把卡的内容泄露到可分享的地方）
+      const names = lore.entries.map(item => item.name).join('、')
+      const line = `世界书命中 ${lore.entries.length} 条（常驻 ${lore.diag.constantCount} / 关键词 ${lore.diag.hitCount}），占用 ${lore.diag.usedChars}/${lore.diag.budgetChars} 字：${names}`
+      ;(host?.info ?? host?.warn ?? host?.error)?.call(host, line)
     }
   }
 

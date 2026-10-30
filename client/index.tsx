@@ -1192,12 +1192,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 居中大窗，尺寸对齐 dsh-context 的**主面板**（.lc-ov-card）：
   //   width: min(1120px, 100vw - 32px)  height: calc(100vh - 80px)
   // 数值仍由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H（这里当上下留白用）统一给出。
+  //
+  // ⚠️ 居中**不能用 transform**：面板有入场动画 `awu-panel-in`，动画运行期间 keyframes 里的
+  // transform 会覆盖内联 transform —— 窗口会先出现在右半边，动画结束才「跳」回正中（主人实测到过）。
+  // 改用 left/right:0 + margin:0 auto + 固定宽度居中，transform 就完整留给动画用。
   // `bottom: auto` 必须写：旧样式里 .awu-panel 是贴底定位的，不覆盖会和 top 同时生效把窗口拉长。
   const panelStyle: CSSProperties = {
-    left: '50%',
+    left: 0,
+    right: 0,
+    marginLeft: 'auto',
+    marginRight: 'auto',
     top: `${PANEL_MAX_H / 2}px`,
     bottom: 'auto',
-    transform: 'translateX(-50%)',
     width: `min(${PANEL_WIDTH}px, calc(100vw - 32px))`,
     height: `calc(100vh - ${PANEL_MAX_H}px)`,
     maxHeight: 'none',
@@ -1379,74 +1385,53 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             </div>
           )}
 
-          <StatStrip stats={stats} t={t} />
+          {/*
+            两栏骨架（iOS Split View）：左栏是「选谁」，右栏是「看什么」。
+            head 与状态带全宽；工具行/分段器归左栏（它们操作的对象就是左栏那张列表），
+            统计条归右栏顶部当仪表行。窄屏（<900px）由 CSS 断点自动收成单栏。
+          */}
+          <div className="awu-workspace">
+            <aside className="awu-rail">
+              <div className="awu-toolbar">
+                <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
+                  {t('roster.count', { n: roster.length })}
+                </span>
+                <button
+                  type="button"
+                  className="awu-btn"
+                  data-size="sm"
+                  data-kind="primary"
+                  style={{ marginLeft: 'auto' }}
+                  onClick={() => openDialog('new')}
+                >
+                  <IconPlus size={12} />
+                  {t('roster.new')}
+                </button>
+              </div>
 
-          {/* 分段器 */}
-          <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
-            {TAB_IDS.map(item => (
-              <button
-                key={item.id}
-                id={item.node}
-                type="button"
-                role="tab"
-                className="awu-tab"
-                data-on={tab === item.id ? 'true' : 'false'}
-                aria-selected={tab === item.id}
-                aria-controls="awu-tabpanel"
-                tabIndex={tab === item.id ? 0 : -1}
-                onClick={() => setTab(item.id)}
-              >
-                {t(`panel.tab.${item.id}`)}
-              </button>
-            ))}
-          </div>
+              {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
+              <DistillEntry t={t} />
 
-          {/* 主体 */}
-          <div
-            className="awu-body"
-            id="awu-tabpanel"
-            role="tabpanel"
-            aria-labelledby={tabNode}
-            tabIndex={0}
-            aria-busy={busy}
-          >
-            {tab === 'roster' && (detailName !== '' ? (
-              <CharacterDetailView
-                detail={currentDetail}
-                loading={detailLoading}
-                error={detailError}
-                live={live && liveName === detailName}
-                busy={busy}
-                t={t}
-                onBack={() => { setDetailName(''); setDetail(undefined); setDetailError('') }}
-                onRetry={() => { void loadDetail(detailName) }}
-                onActivate={() => onActivate(detailName)}
-                onDeactivate={onDeactivate}
-                onDelete={() => openDelete(detailName)}
-                onEdit={() => { setEditError(''); setEditing(true) }}
-              />
-            ) : (
-              <>
-                <div className="awu-toolbar">
-                  <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
-                    {t('roster.count', { n: roster.length })}
-                  </span>
+              <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
+                {TAB_IDS.map(item => (
                   <button
+                    key={item.id}
+                    id={item.node}
                     type="button"
-                    className="awu-btn"
-                    data-size="sm"
-                    data-kind="primary"
-                    style={{ marginLeft: 'auto' }}
-                    onClick={() => openDialog('new')}
+                    role="tab"
+                    className="awu-tab"
+                    data-on={tab === item.id ? 'true' : 'false'}
+                    aria-selected={tab === item.id}
+                    aria-controls="awu-tabpanel"
+                    tabIndex={tab === item.id ? 0 : -1}
+                    onClick={() => setTab(item.id)}
                   >
-                    <IconPlus size={12} />
-                    {t('roster.new')}
+                    {t(`panel.tab.${item.id}`)}
                   </button>
-                </div>
+                ))}
+              </div>
 
-                {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
-                <DistillEntry t={t} />
-
+              <div className="awu-pane">
                 {loading && <Skeleton shape="cards" />}
 
                 {!loading && roster.length === 0 && (
@@ -1472,8 +1457,41 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     ))}
                   </div>
                 )}
-              </>
-            ))}
+              </div>
+            </aside>
+
+            <main className="awu-main">
+              <StatStrip stats={stats} t={t} />
+
+              <div
+                className="awu-pane"
+                id="awu-tabpanel"
+                role="tabpanel"
+                aria-labelledby={tabNode}
+                tabIndex={0}
+                aria-busy={busy}
+              >
+                {tab === 'roster' && (detailName !== '' ? (
+                  <CharacterDetailView
+                    detail={currentDetail}
+                    loading={detailLoading}
+                    error={detailError}
+                    live={live && liveName === detailName}
+                    busy={busy}
+                    t={t}
+                    onBack={() => { setDetailName(''); setDetail(undefined); setDetailError('') }}
+                    onRetry={() => { void loadDetail(detailName) }}
+                    onActivate={() => onActivate(detailName)}
+                    onDeactivate={onDeactivate}
+                    onDelete={() => openDelete(detailName)}
+                    onEdit={() => { setEditError(''); setEditing(true) }}
+                  />
+                ) : (
+                  <div className="awu-empty">
+                    <span className="awu-emptyMark"><IconBook size={20} /></span>
+                    <span className="awu-emptyHint">{t('roster.pick')}</span>
+                  </div>
+                ))}
 
             {tab === 'diary' && (liveDetail !== undefined ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
@@ -1592,7 +1610,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               </div>
             )}
 
-            {tab === 'guide' && <GuideView t={t} />}
+                {tab === 'guide' && <GuideView t={t} />}
+              </div>
+            </main>
           </div>
 
           {/* 弹层 */}

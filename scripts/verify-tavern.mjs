@@ -492,6 +492,17 @@ section('附 · 装饰器解析 / 长度统计 / 关系档位')
   check(stats.l1StaticChars > 500 && stats.l1StaticChars === renderL1Static(card).length, 'l1StaticChars 与渲染一致')
   check(Array.isArray(lengthWarnings(card)), '长度警告返回数组（不抛）')
 
+  const withBook = normalizeCard({
+    ...card,
+    data: { ...card.data, character_book: bookOf([
+      entry({ id: 's', keys: ['便利贴'], secondary_keys: ['颜色'], selective: true, content: '选择性条目' }),
+      entry({ id: 'n', keys: [], content: '没关键词' }),
+    ]) },
+  })
+  const warnCodes = lengthWarnings(withBook).map(w => w.code)
+  check(warnCodes.includes('lore-selective'), '预警：selective + 次级关键词（配错会静默永不命中）')
+  check(warnCodes.includes('lore-keys'), '预警：世界书条目没有关键词')
+
   const long = normalizeCard({ ...card, data: { ...card.data, description: '长'.repeat(1300) } })
   check(lengthWarnings(long).some(w => w.code === 'description'), 'description 超阈值触发软警告')
   check(!lengthWarnings(long)[0].message.includes('错误'), '警告是"建议"措辞，不是拒绝')
@@ -568,6 +579,63 @@ async function exists(path) {
   } catch {
     return false
   }
+}
+
+// ================================================================ 世界书规范 V22
+
+section('V22 · 世界书注入规范（调研报告 §4.3 定稿后的 8 条）')
+{
+  // 1) selectiveLogic 四值（0 AND_ANY / 1 NOT_ALL / 2 NOT_ANY / 3 AND_ALL）
+  const sec = (logic, over = {}) => entry({
+    id: `sel${logic}`, keys: ['便利贴'], secondary_keys: ['黄色', '蓝色'],
+    extensions: { selectiveLogic: logic }, ...over,
+  })
+  const run = (logic, text) => selectLoreEntries(bookOf([sec(logic)]), [text]).entries.length
+  check(run(0, '便利贴 黄色') === 1 && run(0, '便利贴 只提到颜色') === 0, 'AND_ANY(0)：至少一个次级关键词')
+  check(run(1, '便利贴 黄色 蓝色') === 0 && run(1, '便利贴 黄色') === 1, 'NOT_ALL(1)：不是全部命中才注入')
+  check(run(2, '便利贴 无关内容') === 1 && run(2, '便利贴 黄色') === 0, 'NOT_ANY(2)：一个都没命中才注入')
+  check(run(3, '便利贴 黄色 蓝色') === 1 && run(3, '便利贴 黄色') === 0, 'AND_ALL(3)：全部命中才注入')
+
+  // 2) 中文整词边界（绝不能用 \W / \b）
+  const whole = entry({ id: 'w', keys: ['贴'], content: '整词', extensions: { match_whole_words: true } })
+  check(selectLoreEntries(bookOf([whole]), ['便利贴']).entries.length === 0, '整词匹配：汉字里的子串不算命中（\W 在这里会失效）')
+  check(selectLoreEntries(bookOf([whole]), ['单独一个 贴 字']).entries.length === 1, '整词匹配：独立成词才算命中')
+
+  // 3) probability 用稳定哈希（同一轮结果固定，绝不 Math.random）
+  const prob = entry({ id: 'p', keys: ['便利贴'], content: '概率条目', extensions: { probability: 50 } })
+  const sameSeed = [0, 1, 2, 3, 4].map(() => selectLoreEntries(bookOf([prob]), ['便利贴'], { turnSeed: 't:1' }).entries.length)
+  check(new Set(sameSeed).size === 1, `probability：同一 turnSeed 连算 5 次结果一致（${sameSeed.join(',')}）`)
+
+  // 4) enabled / disable 反义（两个字段都要认）
+  check(selectLoreEntries(bookOf([entry({ id: 'd', keys: ['便利贴'], content: 'x', extensions: { disable: true } })]), ['便利贴']).entries.length === 0,
+    'extensions.disable:true 视为停用（独立世界书的心智）')
+  check(selectLoreEntries(bookOf([entry({ id: 'e', keys: ['便利贴'], content: 'y', enabled: false })]), ['便利贴']).entries.length === 0,
+    'enabled:false 视为停用（卡内 book 的心智）')
+
+  // 5) maxEntries（默认 12）
+  const many = Array.from({ length: 20 }, (_, i) =>
+    entry({ id: `m${i}`, keys: ['便利贴'], content: `第${i}条`.padEnd(40, '长'), insertion_order: i }))
+  const capped = selectLoreEntries(bookOf(many), ['便利贴'])
+  check(capped.entries.length === LORE_DEFAULTS.maxEntries, `默认最多 ${LORE_DEFAULTS.maxEntries} 条（实际 ${capped.entries.length}）`)
+  check(capped.diag.droppedByBudget.length === 20 - LORE_DEFAULTS.maxEntries, '超条数进 droppedByBudget')
+  const custom = selectLoreEntries(bookOf(many), ['便利贴'], { maxEntries: 3 })
+  check(custom.entries.length === 3, 'maxEntries 可覆盖')
+
+  // 6) 首条超预算也注入（宁可超一点，也不能命中了却啥都没给）
+  const huge = selectLoreEntries(bookOf([entry({ id: 'huge', keys: ['便利贴'], content: '长'.repeat(500) })]), ['便利贴'], { budgetChars: 50 })
+  check(huge.entries.length === 1 && huge.diag.forcedOverBudget, '首条超预算仍注入，并标记 forcedOverBudget')
+
+  // 7) 默认值定稿
+  check(LORE_DEFAULTS.scanDepth === 4 && LORE_DEFAULTS.maxEntries === 12 && LORE_DEFAULTS.budgetChars === 6000,
+    `默认值：scanDepth ${LORE_DEFAULTS.scanDepth} / maxEntries ${LORE_DEFAULTS.maxEntries} / budgetChars ${LORE_DEFAULTS.budgetChars}`)
+  check(LORE_DEFAULTS.recursive === false, '递归激活默认关闭（第一版不做，有理由）')
+
+  // 8) 按轮滚动：scanDepth 之外的老词不命中，且不跨轮累积
+  const book = bookOf([entry({ id: 'old', keys: ['旧话题'], content: '旧的' })])
+  check(selectLoreEntries(book, ['旧话题', 'a', 'b', 'c', 'd'], { scanDepth: 3 }).entries.length === 0,
+    '超出 scanDepth 的旧消息不参与命中')
+  const blocked = entry({ id: 'blk', keys: ['便利贴'], content: '@@dont_activate\n常驻才注入', constant: true, extensions: {} })
+  check(selectLoreEntries(bookOf([blocked]), ['便利贴']).entries.length === 1, '@@dont_activate 仍可被 constant 注入')
 }
 
 // ================================================================ REST 全链路 V21
@@ -676,6 +744,95 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
     }, res7)
     check(res7.out.body?.card?.['basic']?.['身份'] !== undefined && res7.out.body?.ccv3?.spec === 'chara_card_v3',
       'GET /character 同时给 card（旧视图）与 ccv3')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+  }
+}
+
+// ================================================================ 段装配 V24
+
+section('V24 · PromptController 四段装配（激活 → L1/世界书/时间差 → 拔出）')
+{
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-tavern-prompt-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  const { Store } = await import(lib('store.js'))
+  const { PromptController } = await import(lib('prompt.js'))
+  const store = new Store(sandbox)
+  const NAME = '装配角色'
+  const logs = []
+  const sections = new Map()
+  const host = {
+    sys: {
+      section(input) {
+        sections.set(input.name, input)
+        return () => { sections.delete(input.name) }
+      },
+    },
+    logger: {
+      info: (...args) => logs.push(['info', ...args]),
+      warn: (...args) => logs.push(['warn', ...args]),
+      error: (...args) => logs.push(['error', ...args]),
+    },
+  }
+  try {
+    // 沙箱里放一张**旧格式**卡（预置卡原样）
+    const legacy = await readPreset('虞照')
+    await mkdir(join(sandbox, 'characters', NAME), { recursive: true })
+    await writeFile(join(sandbox, 'characters', NAME, 'card.json'), `${JSON.stringify({ ...legacy, name: NAME }, null, 2)}\n`, 'utf8')
+
+    const pc = new PromptController(store, host)
+    pc.install()
+    const render = () => Object.fromEntries([...sections.entries()].map(([name, input]) =>
+      [name, typeof input.text === 'function' ? input.text({}) : input.text]))
+
+    // 1) 未启用：除 L0 外全部空串
+    const idle = render()
+    check(idle['aiwu:baseline']?.includes('AI WITH U'), 'L0 段恒在')
+    check(idle['aiwu:active-character'] === '' && idle['aiwu:lore'] === '' && idle['aiwu:clock'] === '',
+      '未启用：L1 / 世界书 / 时间差都是空串（宿主过滤空段 = 干净拔出）')
+    check([...sections.values()].every(s => s.interpolate === false), '四段都带 interpolate:false')
+
+    // 2) 启用（旧格式卡 → 内存归一 → L1 渲染）
+    await pc.activate(NAME)
+    const active = render()
+    check(active['aiwu:active-character']?.includes(`你现在的身份：${NAME}`), '启用后 L1 有身份标题')
+    check(active['aiwu:active-character']?.includes('声线基因'), '启用后 L1 有声线段（旧卡迁过来的）')
+    check(!active['aiwu:active-character']?.includes('{{'), 'L1 里没有残留的 `{{`（宏已展开或原样保留的未知宏另计）')
+    check(active['aiwu:clock']?.length > 0, '时间差段非空')
+    check(active['aiwu:lore'] === '', '没有世界观书时，世界书段仍是空串')
+
+    // 3) 给卡加世界书 + 刷新素材 → 世界书段出现内容
+    const card = await store.readCcV3(NAME)
+    await store.saveCard({
+      name: NAME,
+      ccv3: {
+        ...card,
+        data: {
+          ...card.data,
+          character_book: bookOf([entry({ id: 'hit', keys: ['便利贴'], content: '黄色的便利贴是今晚吃什么。' })]),
+        },
+      },
+    })
+    await pc.refresh({ error: (...a) => logs.push(['error', ...a]), info: (...a) => logs.push(['info', ...a]) },
+      { recentTexts: ['TA：你贴的便利贴我看到了'], turnKey: 'agent:1' })
+    const withLore = render()
+    check(withLore['aiwu:lore']?.includes('黄色的便利贴'), '命中后世界书段有内容')
+    check(!withLore['aiwu:active-character']?.includes('黄色的便利贴'), '世界书内容不在 L1 段里（分段隔离）')
+    check(logs.some(([level, msg]) => level === 'info' && String(msg).includes('世界书命中 1 条')), '日志记录命中条数（不记正文）')
+    check(!logs.some(([, msg]) => String(msg).includes('今晚吃什么')), '日志里没有世界书正文')
+
+    // 4) 同一轮再刷新一次：命中集合复用，不重复计算（防抖）
+    const before = logs.length
+    await pc.refresh({ error: () => {} }, { recentTexts: ['TA：完全无关的一句'], turnKey: 'agent:1' })
+    check(logs.length === before, '同一 turnKey 的重复刷新不再记日志（说明走了复用，不重算）')
+
+    // 5) 拔出
+    await pc.deactivate()
+    const off = render()
+    check(off['aiwu:active-character'] === '' && off['aiwu:lore'] === '' && off['aiwu:clock'] === '',
+      '退出后三段全部清空（L0 常驻不动）')
+    pc.uninstall()
+    check(sections.size === 0, 'uninstall 后段全部释放')
   } finally {
     await rm(sandbox, { recursive: true, force: true })
   }
