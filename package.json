@@ -17,6 +17,7 @@
   "files": [
     "lib",
     "presets",
+    "distill",
     "cordis.patch.yml",
     "README.md"
   ],
