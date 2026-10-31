@@ -295,7 +295,12 @@ section('8. 路由：/distill/arm · /distill/state · /distill/disarm（含方�
       end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
     }
   }
-  const fakeReq = (method) => ({ method, url: '/', async *[Symbol.asyncIterator]() {} })
+  const fakeReq = (method) => ({
+    method,
+    url: '/',
+    headers: { host: '127.0.0.1:50143' },
+    async *[Symbol.asyncIterator]() {},
+  })
 
   const res1 = fakeRes()
   await route('/distill/arm').handler(fakeReq('POST'), res1)
@@ -312,7 +317,7 @@ section('8. 路由：/distill/arm · /distill/state · /distill/disarm（含方�
 
   const res3 = fakeRes()
   await route('/distill/arm').handler(fakeReq('GET'), res3)
-  check(res3.out.status === 400 && String(res3.out.body?.error).includes('POST'), `GET /distill/arm 被方法校验拒绝（${res3.out.status}）`)
+  check(res3.out.status === 405 && String(res3.out.body?.error).includes('POST'), `GET /distill/arm 被方法校验拒绝（${res3.out.status}）`)
 
   const res4 = fakeRes()
   await route('/distill/disarm').handler(fakeReq('POST'), res4)

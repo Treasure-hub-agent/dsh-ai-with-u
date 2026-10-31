@@ -17,6 +17,7 @@ import type { JSX } from 'react'
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 import type { Card } from './api'
 import { GROUPS, filledCount, isEmptyValue, isDirty, mergeCard, toDraft } from './card-schema'
+import { sourceLabelOf } from './text'
 import type { Draft, FieldSpec, GroupSpec } from './card-schema'
 import { IconChevron, IconPlus, IconQuill, IconTrash } from './icons'
 import type { Translate } from './text'
@@ -63,12 +64,14 @@ function TextField(props: {
 
 /** 字符串列表编辑器：逐条增删改。 */
 function ListField(props: {
+  /** 字段名：用来给每一条生成可区分的无障碍名称（读屏用户要知道在改第几条）。 */
+  label: string
   items: string[]
   itemPlaceholder: string
   onChange: (items: string[]) => void
   t: Translate
 }): JSX.Element {
-  const { items, itemPlaceholder, onChange, t } = props
+  const { label, items, itemPlaceholder, onChange, t } = props
 
   const update = (index: number, value: string): void => {
     const next = [...items]
@@ -95,13 +98,14 @@ function ListField(props: {
             value={item}
             placeholder={itemPlaceholder}
             rows={1}
+            aria-label={`${label} 第 ${index + 1} 条`}
             onChange={event => update(index, event.target.value)}
           />
           <button
             type="button"
             className="awu-editListRemove"
             title={t('edit.removeItem')}
-            aria-label={t('edit.removeItem')}
+            aria-label={`${t('edit.removeItem')}：${label} 第 ${index + 1} 条`}
             onClick={() => remove(index)}
           >
             <IconTrash size={12} />
@@ -168,6 +172,7 @@ function FieldGroup(props: {
               </span>
               {field.kind === 'list' ? (
                 <ListField
+                  label={field.key}
                   items={Array.isArray(values[field.key]) ? (values[field.key] as string[]) : []}
                   itemPlaceholder={field.itemPlaceholder ?? field.placeholder ?? ''}
                   onChange={next => onFieldChange(field.key, next)}
@@ -199,8 +204,12 @@ export function CardEditor(props: {
   onCancel: () => void
   onSave: (next: Card) => void
   t: Translate
+  /** 父级请求关闭（点侧栏入口 / 点遮罩）：走同一套未保存确认，别无声丢草稿。 */
+  closeSignal?: number
+  /** 草稿脏状态变化：面板据此在收起前先问一句。 */
+  onDirtyChange?: (dirty: boolean) => void
 }): JSX.Element {
-  const { card, name, source, busy, error, onCancel, onSave, t } = props
+  const { card, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
 
   const [draft, setDraft] = useState<Draft>(() => toDraft(card))
   // 默认展开：基本信息 + 声线（灵魂字段），其余折叠，避免一屏全是输入框
@@ -225,6 +234,8 @@ export function CardEditor(props: {
   useFocusTrap(confirmRef, confirmLeave)
 
   const dirty = useMemo(() => isDirty(card, draft), [card, draft])
+  // 把脏状态同步给面板：面板的入口按钮/遮罩/卸载都要先经过这里
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
   const progress = useMemo(() => {
     const merged = mergeCard(card, draft)
     return filledCount(merged)
@@ -246,6 +257,14 @@ export function CardEditor(props: {
     if (dirty) { setConfirmLeave(true); return }
     onCancel()
   }
+
+  // 父级请求关闭（点侧栏入口 / 点遮罩收起面板）：不直接卸载，先走同一套未保存确认
+  useEffect(() => {
+    if (closeSignal === undefined || closeSignal <= 0) return
+    requestClose()
+    // 只认信号变化：requestClose 每次 render 都是新函数，放进依赖会循环触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeSignal])
 
   // Esc 关闭：有改动时先弹确认，别让人手一滑丢掉一屏编辑
   useEffect(() => {
@@ -273,7 +292,7 @@ export function CardEditor(props: {
           <div className="awu-editorKicker">{t('edit.kicker')}</div>
           <div className="awu-editorName">
             {name}
-            <span className="awu-editorSource">{source !== '' ? source : t('common.unknown')}</span>
+            <span className="awu-editorSource">{sourceLabelOf(source, t)}</span>
           </div>
         </div>
         <div className="awu-editorHeadRight">

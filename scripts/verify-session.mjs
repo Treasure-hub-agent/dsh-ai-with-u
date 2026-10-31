@@ -353,6 +353,10 @@ section('9. 宿主钩子：agent/turn-stopping 真正写盘')
   const sections = new Map()
   const disposers = []
   const logs = []
+  const rootAgent = { id: 'session-test', session: undefined }
+  const childAgent = { id: 'child-agent', session: { id: 'child-agent' } }
+  // 宿主 registry 的 roots() = 没有 owner 的顶层 agent（用户主会话）
+  const fakeAgents = { roots: () => [rootAgent] }
   const fakeCtx = {
     systemPrompt: { section: (input) => { sections.set(input.name, input); return () => sections.delete(input.name) } },
     logger: {
@@ -360,7 +364,7 @@ section('9. 宿主钩子：agent/turn-stopping 真正写盘')
       warn: (m, ...a) => logs.push(['warn', m, ...a]),
       error: (m, ...a) => logs.push(['error', m, ...a]),
     },
-    get: (n) => (n === 'tools' || n === 'webServer' ? undefined : undefined),
+    get: (n) => (n === 'agents' ? fakeAgents : undefined),
     on: (event, listener) => {
       handlers.set(event, listener)
       const dispose = () => handlers.delete(event)
@@ -385,9 +389,10 @@ section('9. 宿主钩子：agent/turn-stopping 真正写盘')
     ],
   }
   // 先清空 session 以便验证写入
+  rootAgent.session = fakeSession
   await store.writeSession(NAME, { recent: [], turn_count: 0, mode: 'text+action' })
   const turnHandler = handlers.get('agent/turn-stopping')
-  turnHandler({ agent: { id: 'session-test', session: fakeSession }, turn: 1 })
+  turnHandler({ agent: rootAgent, turn: 1 })
   await new Promise(r => setTimeout(r, 300))
 
   const written = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'session.json'), 'utf8'))
@@ -410,6 +415,13 @@ section('9. 宿主钩子：agent/turn-stopping 真正写盘')
   const written2 = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'session.json'), 'utf8'))
   check(written2.turn_count === 1, `同一轮不重复计数（turn_count=${written2.turn_count}）`)
 
+  // 子代理的一轮不该写进角色会话（P2-2 方案 A：只认根 agent）
+  turnHandler({ agent: childAgent, turn: 2 })
+  await new Promise(r => setTimeout(r, 300))
+  const written3 = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'session.json'), 'utf8'))
+  check(written3.turn_count === 1, `子代理的轮次不写进角色 session（turn_count=${written3.turn_count}）`)
+  check(!(written3.recent ?? []).some(item => String(item).includes('child')), '子代理内容没进 recent')
+
   // 没有错误日志
   const errors = logs.filter(l => l[0] === 'error')
   check(errors.length === 0, `钩子运行期间无错误日志${errors.length > 0 ? '：' + JSON.stringify(errors) : ''}`)
@@ -417,6 +429,100 @@ section('9. 宿主钩子：agent/turn-stopping 真正写盘')
   // 卸载会释放钩子
   disposeAll()
   check(!handlers.has('agent/turn-stopping'), '卸载后钩子已释放')
+}
+
+// ---------------------------------------------------------------- 10. 日记往返（P1-2）
+
+section('10. 日记往返：日期写法与手写札记都不许丢')
+{
+  await store.resetStory(NAME)
+  // 模型常写连字符日期：写入侧必须先规范化，否则解析器永远读不回来
+  await store.appendDiary(NAME, '2026-10-05', ['[事实] 连字符日期'], ['心里记着'])
+  const afterWrite = await store.readDiary(NAME)
+  check(afterWrite.length === 1 && afterWrite[0].date === '2026 10 05',
+    `连字符日期写入后规范化为 2026 10 05（实际 ${JSON.stringify(afterWrite.map(e => e.date))}）`)
+  check(afterWrite[0].timeline.length === 1 && afterWrite[0].notes.length === 1, '时间线与札记都读得回来')
+
+  // 手写没有 `>` 的札记行：读得到，且下一次写入不会被整段重写删掉
+  const diaryPath = join(sandbox, 'characters', NAME, 'diary.md')
+  await writeFile(diaryPath, '# 手写日记\n\n## 2026 10 08\n**时间线**\n  手写一条\n\n**心情札记**\n没有引用符号的一行\n', 'utf8')
+  const hand = await store.readDiary(NAME)
+  check(hand.length === 1 && hand[0].notes[0] === '没有引用符号的一行',
+    `手写札记读得回来（实际 ${JSON.stringify(hand[0]?.notes)}）`)
+  await store.appendDiary(NAME, '2026 10 09', ['新的一天'], [])
+  const merged = await readFile(diaryPath, 'utf8')
+  check(merged.includes('没有引用符号的一行'), '再写一天后，手写札记仍在（不会被整段重写删掉）')
+
+  // 非法日期必须显式报错，而不是写出读不回来的块
+  let dateErr = ''
+  try { await store.appendDiary(NAME, '2026-13-40', ['坏的'], []) } catch (e) { dateErr = e.message }
+  check(dateErr.includes('日期'), `非法日期被拒绝：${dateErr}`)
+
+  // 条目内换行会被拍平，避免写出破坏「一行一条」的文件
+  await store.appendDiary(NAME, '2026 10 10', ['第一行\n第二行'], [])
+  const flat = await store.readDiary(NAME)
+  check(flat.find(e => e.date === '2026 10 10')?.timeline[0] === '第一行 第二行', '多行条目写入时拍平成一行')
+  await store.resetStory(NAME)
+}
+
+// ---------------------------------------------------------------- 11. REST 来源栅栏（P1-1）
+
+section('11. REST 来源栅栏：跨站写/删与 DNS rebinding 都要挡住')
+{
+  const fakePrompt = {
+    characterName: NAME,
+    snapshot: () => ({ enabled: true, character: NAME, mode: 'text+action' }),
+    invalidate: () => {},
+    refresh: async () => {},
+  }
+  const routes = buildRoutes(store, fakePrompt)
+  const routeOf = (suffix) => routes.find(r => r.path === `/_dsh/ai-with-u${suffix}`)
+  const makeRes = () => {
+    const out = { status: 0, body: '' }
+    return {
+      out,
+      res: { setHeader: () => {}, writeHead: s => { out.status = s }, end: b => { out.body = String(b ?? '') } },
+    }
+  }
+  const makeReq = (opts = {}) => {
+    const body = opts.body ?? ''
+    const headers = { host: '127.0.0.1:50143', ...(opts.headers ?? {}) }
+    return {
+      method: opts.method ?? 'POST',
+      url: '/x',
+      headers,
+      socket: { localAddress: '127.0.0.1' },
+      async *[Symbol.asyncIterator]() { if (body !== '') yield Buffer.from(body) },
+    }
+  }
+  const call = async (method, suffix, opts = {}) => {
+    const route = routeOf(suffix)
+    if (route === undefined) return { status: -1, body: '' }
+    const { out, res } = makeRes()
+    await route.handler(makeReq({ method, ...opts }), res)
+    return out
+  }
+
+  check((await call('GET', '/distill/state')).status === 200, '同源本机请求放行')
+  check((await call('GET', '/distill/state', { headers: { host: 'evil.example' } })).status === 403, '陌生 Host 被拒（DNS rebinding）')
+  check((await call('POST', '/distill/disarm', { headers: { origin: 'https://evil.example' } })).status === 403, '跨站 Origin 被拒（CSRF）')
+  check((await call('GET', '/distill/state', { headers: { 'sec-fetch-site': 'cross-site' } })).status === 403, 'Sec-Fetch-Site: cross-site 被拒')
+  check((await call('GET', '/deactivate')).status === 405, '写接口只收 POST（GET 不再有副作用）')
+  const plain = await call('POST', '/forget', { headers: { 'content-type': 'text/plain' }, body: '{"keyword":"x"}' })
+  check(plain.status === 400 || plain.status === 403, `text/plain 请求体被拒（${plain.status}）`)
+}
+
+// ---------------------------------------------------------------- 12. 彻底重置的备份（P2-10）
+
+section('12. 彻底重置前先备份日记（不可逆操作留退路）')
+{
+  await store.appendDiary(NAME, '2026 10 11', ['要保住的记忆'], [])
+  const result = await store.resetStory(NAME)
+  check(typeof result.diaryBackup === 'string' && result.diaryBackup.includes('.bak-'),
+    `彻底重置返回备份路径：${String(result.diaryBackup)}`)
+  const backupText = await readFile(String(result.diaryBackup), 'utf8')
+  check(backupText.includes('要保住的记忆'), '备份文件里确实有被删的日记')
+  check((await store.readDiary(NAME)).length === 0, '重置后日记已清空')
 }
 
 // ---------------------------------------------------------------- 清理

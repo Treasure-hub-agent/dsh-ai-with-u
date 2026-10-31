@@ -51,16 +51,27 @@ export class ApiUnavailableError extends Error {
   }
 }
 
+/** 单次请求超时：接口挂起时至少能让按钮从「忙」里恢复，而不是永远转圈。 */
+const REQUEST_TIMEOUT_MS = 20000
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
+  const timeout = new AbortController()
+  const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS)
   try {
     res = await fetch(`${API_PREFIX}${path}`, {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       ...init,
+      signal: init?.signal ?? timeout.signal,
     })
   } catch (error) {
+    if (timeout.signal.aborted) {
+      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒）：${path}`)
+    }
     throw new Error(`连不上宿主接口（${path}）：${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    clearTimeout(timer)
   }
 
   // 404 / 501 有两种截然不同的来源，必须分开：

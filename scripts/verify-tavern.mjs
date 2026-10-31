@@ -668,7 +668,7 @@ section('V22 · 世界书注入规范（调研报告 §4.3 定稿后的 8 条）
 {
   // 1) selectiveLogic 四值（0 AND_ANY / 1 NOT_ALL / 2 NOT_ANY / 3 AND_ALL）
   const sec = (logic, over = {}) => entry({
-    id: `sel${logic}`, keys: ['便利贴'], secondary_keys: ['黄色', '蓝色'],
+    id: `sel${logic}`, keys: ['便利贴'], secondary_keys: ['黄色', '蓝色'], selective: true,
     extensions: { selectiveLogic: logic }, ...over,
   })
   const run = (logic, text) => selectLoreEntries(bookOf([sec(logic)]), [text]).entries.length
@@ -676,6 +676,14 @@ section('V22 · 世界书注入规范（调研报告 §4.3 定稿后的 8 条）
   check(run(1, '便利贴 黄色 蓝色') === 0 && run(1, '便利贴 黄色') === 1, 'NOT_ALL(1)：不是全部命中才注入')
   check(run(2, '便利贴 无关内容') === 1 && run(2, '便利贴 黄色') === 0, 'NOT_ANY(2)：一个都没命中才注入')
   check(run(3, '便利贴 黄色 蓝色') === 1 && run(3, '便利贴 黄色') === 0, 'AND_ALL(3)：全部命中才注入')
+
+  // selective 开关：关掉时次级键只是备注（SillyTavern 语义，P2-14）
+  const noSel = entry({ id: 'nosel', keys: ['便利贴'], secondary_keys: ['黄色'], content: '无选择性', selective: false })
+  check(selectLoreEntries(bookOf([noSel]), ['便利贴 只提到主键']).entries.length === 1,
+    'selective=false：忽略次级键，主键命中就注入')
+  const withSel = entry({ id: 'withsel', keys: ['便利贴'], secondary_keys: ['黄色'], content: '有选择性', selective: true })
+  check(selectLoreEntries(bookOf([withSel]), ['便利贴 只提到主键']).entries.length === 0,
+    'selective=true：次级键没命中时不注入')
 
   // 2) 中文整词边界（绝不能用 \W / \b）
   const whole = entry({ id: 'w', keys: ['贴'], content: '整词', extensions: { match_whole_words: true } })
@@ -742,6 +750,8 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
   const fakeReq = (body, url = '/') => ({
     url,
     method: 'POST',
+    // 宿主真实请求一定带 Host；来源栅栏（web.ts）会校验它
+    headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
     async *[Symbol.asyncIterator]() {
       if (body !== undefined) yield Buffer.from(JSON.stringify(body))
     },
@@ -821,6 +831,7 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
     await route('/character').handler({
       url: `/_dsh/ai-with-u/character?name=${encodeURIComponent(NAME)}`,
       method: 'GET',
+      headers: { host: '127.0.0.1:50143' },
       async *[Symbol.asyncIterator]() {},
     }, res7)
     check(res7.out.body?.card?.['basic']?.['身份'] !== undefined && res7.out.body?.ccv3?.spec === 'chara_card_v3',
@@ -917,6 +928,107 @@ section('V24 · PromptController 四段装配（激活 → L1/世界书/时间�
     check(sections.size === 0, 'uninstall 后段全部释放')
   } finally {
     await rm(sandbox, { recursive: true, force: true })
+  }
+}
+
+// ================================================================ 清空字段 V26
+
+section('V26 · 清空字段 / 清空整组真的清空（P1-3：不许被 base 或原生兜底复活）')
+{
+  const card = migrated['虞照'].card
+  const view = toLegacyView(card)
+  check(Object.keys(view.world ?? {}).length > 0, '前置：这张卡本来有 world 分组可清')
+
+  // 模拟面板：清空单个字段（值为空串，键还在）+ 清空整个世界组
+  const cleared = {
+    ...view,
+    voice: { ...(view.voice ?? {}), 自称: '' },
+    world: { 来处: '', 落差: '', 如今的日子: '', 你与他的旧: '' },
+  }
+  const next = fromLegacyView(cleared, card)
+  const back = toLegacyView(next)
+
+  check(back.voice?.['自称'] === undefined, `清空 voice.自称 后不再复活（实际 ${JSON.stringify(back.voice?.['自称'])}）`)
+  check(next.data.extensions.aiwu.voice?.selfRef === undefined, '结构里 selfRef 已删除')
+  check(back.world === undefined, '整组清空后 world 分组消失（不留空对象）')
+  check(next.data.scenario === undefined || String(next.data.scenario).trim() === '', '原生 scenario 同步清空（不被兜底反解复活）')
+  check(eq(next.data.extensions.aiwu.basic, card.data.extensions.aiwu.basic), '没动的 basic 分组原样保留')
+  check(eq(next.data.extensions.aiwu.personality, card.data.extensions.aiwu.personality), '没动的 personality 原样保留')
+}
+
+// ================================================================ 存储硬化 V27
+
+section('V27 · 存储硬化：跨实例锁 / BOM / 旧卡备份 / 孤儿索引 / 重名 / 体量上限')
+{
+  const { Store } = await import(lib('store.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v27-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const a = new Store(sandbox)
+    const b = new Store(sandbox)
+    await a.writeCard('并发', { name: '并发', basic: { 姓名: '并发' } })
+
+    // 跨实例并发写同一角色：两个 Store（等价两个 DSH 实例）各写 10 轮
+    await Promise.all(Array.from({ length: 20 }, (_, i) => {
+      const store = i % 2 === 0 ? a : b
+      return store.commitTurn({ character: '并发', user: `u${i}`, assistant: `a${i}`, turnId: `t${i}` })
+    }))
+    const session = await a.readSession('并发')
+    check(session?.turn_count === 20, `跨实例并发 20 轮全部落盘（实际 ${session?.turn_count}；修复前会丢一半）`)
+
+    // UTF-8 BOM：记事本编辑过的卡不再被当损坏隔离
+    const bomDir = join(sandbox, 'characters', 'BOM卡')
+    await mkdir(bomDir, { recursive: true })
+    await writeFile(join(bomDir, 'card.json'),
+      '\uFEFF' + JSON.stringify({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: 'BOM卡', description: '带 BOM 的卡' } }), 'utf8')
+    check((await a.readCcV3('BOM卡')) !== undefined, 'UTF-8 BOM 的 card.json 能正常读')
+    const bomFiles = await readdir(bomDir)
+    check(bomFiles.includes('card.json'), 'BOM 卡没有被改名成 .corrupt-*')
+
+    // 旧格式卡被 forget 覆盖写时补写原件备份（以前只有 save 路径会备份）
+    const legacyDir = join(sandbox, 'characters', '旧卡')
+    await mkdir(legacyDir, { recursive: true })
+    await writeFile(join(legacyDir, 'card.json'), JSON.stringify(await readPreset('虞照')), 'utf8')
+    await a.forget('旧卡', '便利贴')
+    const legacyFiles = await readdir(legacyDir)
+    check(legacyFiles.includes('card.v1.bak.json'), 'forget 把旧格式卡升级成 CCv3 前补写了 card.v1.bak.json')
+
+    // 手动拷入的角色目录自动进索引
+    const orphanDir = join(sandbox, 'characters', '外部卡')
+    await mkdir(orphanDir, { recursive: true })
+    await writeFile(join(orphanDir, 'card.json'),
+      JSON.stringify({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: '外部卡', description: '手动拷进来的' } }), 'utf8')
+    const listed = await a.listCharacters()
+    check(listed.some(c => c.name === '外部卡'), '手动拷入 characters/ 的卡自动进索引（不再永远看不见）')
+
+    // 仅大小写不同：Windows 上会写进同一目录，必须拒绝
+    await a.writeCard('Alice', { name: 'Alice', basic: { 姓名: 'Alice' } })
+    let clash = ''
+    try { await a.writeCard('alice', { name: 'alice', basic: { 姓名: 'alice' } }) } catch (e) { clash = e.message }
+    check(clash.includes('大小写'), `仅大小写不同的重名被拒（${clash}）`)
+
+    // 体量硬上限
+    let tooBig = ''
+    try {
+      await a.writeCard('大卡', { name: '大卡', basic: { 姓名: '大卡', 一句话背景: 'x'.repeat(3000) } })
+    } catch (e) { tooBig = e.message }
+    check(tooBig.includes('上限'), `角色描述超限被拒（${tooBig}）`)
+
+    // 恶意正则不再指数回溯
+    const evilBook = { entries: [{ id: 'evil', keys: ['(a+)+$'], use_regex: true, content: '设定' }] }
+    const started = Date.now()
+    const sel = selectLoreEntries(evilBook, ['a'.repeat(30) + '!'])
+    const elapsed = Date.now() - started
+    check(elapsed < 500, `恶意正则退化成字面量：30 字符文本耗时 ${elapsed}ms（修复前 >600ms）`)
+    check(Array.isArray(sel.entries), '恶意正则不会抛错')
+
+    // 正常正则仍要能用
+    const okBook = { entries: [{ id: 'ok', keys: ['^你好'], use_regex: true, content: '问候设定' }] }
+    const okSel = selectLoreEntries(okBook, ['你好呀'])
+    check(okSel.entries.length === 1, '正常的 use_regex 仍然命中')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
   }
 }
 

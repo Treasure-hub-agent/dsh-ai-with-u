@@ -426,6 +426,49 @@ console.log('杂项：')
   throws('假 png', () => parseCardBuffer(Buffer.from('not a png at all', 'utf8'), 'fake.png'), '签名不对')
 }
 
+// ---------------------------------------------------------------- iTXt 解压炸弹
+
+console.log('\nPNG iTXt：解压上限（P2-6）')
+{
+  /** iTXt chunk：keyword \0 flag(1) method(1) lang \0 translated \0 text */
+  const itxtChunk = (keyword, payload, compressed) => pngChunk('iTXt', Buffer.concat([
+    Buffer.from(keyword, 'latin1'),
+    Buffer.from([0, compressed ? 1 : 0, 0]),
+    Buffer.from([0]), // language tag
+    Buffer.from([0]), // translated keyword
+    payload,
+  ]))
+
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(3, 0)
+  ihdr.writeUInt32BE(3, 4)
+  ihdr[8] = 8
+  ihdr[9] = 2
+  const idat = pngChunk('IDAT', deflateSync(Buffer.alloc(3 * 10)))
+
+  // 9 MB 的 'a' 压完只有 ~9 KB：旧代码会全量解出来，新代码必须拒绝
+  const bomb = deflateSync(Buffer.alloc(9 * 1024 * 1024, 0x61))
+  const png = Buffer.concat([
+    PNG_SIG,
+    pngChunk('IHDR', ihdr),
+    itxtChunk('ccv3', bomb, true),
+    idat,
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+  throws('iTXt 解压炸弹被拒', () => parseCardBuffer(png, 'bomb.png'), '超过上限')
+
+  // 正常的小 iTXt 仍要能读（ccv3 段的正文是 base64 的 JSON）
+  const okText = Buffer.from(Buffer.from(JSON.stringify(V3_CARD), 'utf8').toString('base64'), 'utf8')
+  const okPng = Buffer.concat([
+    PNG_SIG,
+    pngChunk('IHDR', ihdr),
+    itxtChunk('ccv3', deflateSync(okText), true),
+    idat,
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+  eq('压缩的 iTXt 正常卡仍可导入', parseCardBuffer(okPng, 'ok.png').format, 'png')
+}
+
 console.log('')
 if (failed > 0) {
   console.error(`酒馆卡导入自检未通过：失败 ${failed} 项，通过 ${pass} 项。`)

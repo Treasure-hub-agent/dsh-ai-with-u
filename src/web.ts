@@ -21,6 +21,86 @@ import { normalizeCard, cardName, toLegacyView } from './tavern.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
 
+/**
+ * 本机回环主机名白名单。
+ *
+ * 用途是挡 **DNS rebinding**：恶意域名解析到 127.0.0.1 时，浏览器仍会带
+ * `Host: evil.example`，这里直接拒。宿主自己的 `isTrustedApiRequest` 只保护
+ * `/api` RPC，**不覆盖插件注册的 exact 路由**，所以这层必须插件自己加。
+ */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/**
+ * 信任的额外主机名（逗号分隔，可选）。
+ *
+ * 默认只信本机回环。若确实要通过隧道/反代从别的域名访问本机 GUI，
+ * 用 `AIWU_TRUSTED_HOSTS=my.tunnel.example` 显式放行——默认拒绝，不靠猜。
+ */
+function trustedExtraHosts(): Set<string> {
+  const raw = process.env['AIWU_TRUSTED_HOSTS'] ?? ''
+  return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(s => s !== ''))
+}
+
+/** 来源校验不通过 → 403（与业务错误 400 区分开）。 */
+class OriginRejected extends Error {}
+/** HTTP 方法不符合路由声明 → 405。 */
+class MethodNotAllowed extends Error {}
+
+/** 取单值请求头（Node 可能给 string[]）。 */
+function headerOf(req: IncomingMessage, name: string): string {
+  const raw = req.headers[name]
+  if (Array.isArray(raw)) return (raw[0] ?? '').trim()
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+/** 从 Host 头里取主机名（兼容 `[::1]:50143` 这种 IPv6 写法）。 */
+function hostNameOf(host: string): string {
+  const value = host.trim().toLowerCase()
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']')
+    return end === -1 ? value : value.slice(0, end + 1)
+  }
+  return value.split(':')[0] ?? ''
+}
+
+/**
+ * 来源栅栏：只接受「本机面板自己发的请求」。
+ *
+ * 三条判据（任何一条不过都拒）：
+ *   1. `Host` 必须是本机回环 / 实际监听地址 / 显式放行的主机名；
+ *   2. 带 `Origin` 时，必须与 `Host` 同 authority（浏览器跨站请求一定带 Origin）；
+ *   3. `Sec-Fetch-Site: cross-site` 直接拒。
+ *
+ * 这不是 CSRF token 的替代品，但它把「任意网页 POST 删卡」和
+ * 「DNS rebinding 读全量卡/日记」两条路都堵死了。
+ */
+function assertTrustedRequest(req: IncomingMessage): void {
+  const host = headerOf(req, 'host')
+  if (host === '') throw new OriginRejected('缺少 Host 头，已拒绝')
+  const hostName = hostNameOf(host)
+  const localAddress = String(req.socket?.localAddress ?? '').toLowerCase()
+  const extra = trustedExtraHosts()
+  const allowed = hostName !== ''
+    && (LOOPBACK_HOSTS.has(hostName) || (localAddress !== '' && hostName === localAddress) || extra.has(hostName) || extra.has(host.toLowerCase()))
+  if (!allowed) throw new OriginRejected(`拒绝非本机来源：Host=${host}`)
+
+  const origin = headerOf(req, 'origin')
+  if (origin !== '') {
+    let parsed: URL
+    try {
+      parsed = new URL(origin)
+    } catch {
+      throw new OriginRejected(`拒绝非法 Origin：${origin}`)
+    }
+    if (parsed.host.toLowerCase() !== host.toLowerCase()) {
+      throw new OriginRejected(`拒绝跨站来源：Origin=${origin} Host=${host}`)
+    }
+  }
+  if (headerOf(req, 'sec-fetch-site').toLowerCase() === 'cross-site') {
+    throw new OriginRejected('拒绝跨站请求（Sec-Fetch-Site: cross-site）')
+  }
+}
+
 /** 普通请求体上限（4 MB）：面板的 JSON 请求远小于这个量。 */
 export const BODY_LIMIT = 4 * 1024 * 1024
 /**
@@ -51,6 +131,11 @@ async function readBody(req: IncomingMessage, limitBytes: number = BODY_LIMIT): 
     chunks.push(chunk as Buffer)
   }
   if (total === 0) return {}
+  // 写操作必须 JSON：`text/plain` 属于「简单请求」，能绕过 CORS 预检直接打进来。
+  // 面板自己一直带 application/json（见 client/api.ts），这里收紧不会误伤正常调用。
+  if (!headerOf(req, 'content-type').toLowerCase().includes('application/json')) {
+    throw new OriginRejected('写操作必须使用 Content-Type: application/json')
+  }
   const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('请求体必须是 JSON 对象')
   return parsed as JsonBody
@@ -101,7 +186,7 @@ export function buildRoutes(
     return active
   }
 
-  return [
+  const routes: Array<{ method: string; path: string; handler: RouteHandler }> = [
     // ------------------------------------------------------------ 总览 / 统计
     {
       method: 'GET',
@@ -259,9 +344,8 @@ export function buildRoutes(
         const name = prompt.characterName
         if (name === undefined) throw new Error('当前没有启用角色')
         const active = await prompt.setMode(mode)
-        // 会话里的 mode 同步落盘，跨客户端口径一致
-        const session = await store.readSession(name)
-        if (session !== undefined) await store.writeSession(name, { ...session, mode })
+        // 会话里的 mode 同步落盘，跨客户端口径一致（Store 内部持锁，避免与 commitTurn 抢写）
+        await store.setMode(name, mode)
         send(res, 200, { ok: true, active })
       }),
     },
@@ -448,4 +532,31 @@ export function buildRoutes(
       }),
     },
   ]
+
+  // 所有路由统一过一遍来源栅栏 + 方法校验。
+  // 宿主的 webServer.register 只吃 {kind, path, handler}，路由表里的 `method` 会被丢掉，
+  // 所以「GET 也能触发 deactivate」必须在这里自己接住，不能指望宿主。
+  return routes.map(route => ({
+    ...route,
+    handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      try {
+        assertTrustedRequest(req)
+        const actual = String(req.method ?? 'GET').toUpperCase()
+        if (actual !== route.method) {
+          throw new MethodNotAllowed(`该接口只接受 ${route.method}（收到 ${actual}）`)
+        }
+      } catch (error) {
+        if (error instanceof OriginRejected) {
+          send(res, 403, { ok: false, error: error.message })
+          return
+        }
+        if (error instanceof MethodNotAllowed) {
+          send(res, 405, { ok: false, error: error.message })
+          return
+        }
+        throw error
+      }
+      await route.handler(req, res)
+    },
+  }))
 }

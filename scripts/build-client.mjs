@@ -32,6 +32,8 @@ const result = await build({
   logLevel: 'warning',
   sourcemap: false,
   legalComments: 'none',
+  // 宿主直接加载这个文件，没人再做二次压缩：不 minify 就是白付 160KB 的读取与解析成本
+  minify: true,
   define: { 'process.env.NODE_ENV': '"production"' },
 })
 

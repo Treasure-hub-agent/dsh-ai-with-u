@@ -335,14 +335,5 @@ export async function saveCardFromModel(store: Store, input: SaveCardRequest): P
   }
 }
 
-/** 一张最小可用卡（自检与"我先占个坑"用；正常蒸馏不该走到这里）。 */
-export function minimalCardData(name: string): Record<string, unknown> {
-  return {
-    name,
-    description: `身份：${name}`,
-    first_mes: `（${name} 抬起头看了你一眼）`,
-  }
-}
-
 /** 便于测试：显式引用一下类型，避免 tsc 认为导入未使用。 */
 export type { CharacterCardV3 }

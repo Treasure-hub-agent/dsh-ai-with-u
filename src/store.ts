@@ -23,8 +23,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, parse, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
   type CharacterCardV3,
@@ -39,6 +39,7 @@ import {
   relationBaseline,
   removeSentences,
   stampCardTimes,
+  assertCardLimits,
   RELATION_BANDS,
   type RelationBand,
 } from './tavern.js'
@@ -58,6 +59,32 @@ export const CORRUPT_PREFIX = 'card.json.corrupt-'
 export const RECENT_WINDOW = 5
 /** 单条 recent 摘要长度上限，防一条长消息吃掉整个窗口的 token 预算。 */
 export const RECENT_ITEM_MAX_CHARS = 120
+
+/**
+ * 跨进程锁参数。
+ *
+ * `locked()` 的 Map 只在**单个 Store 实例**内互斥；两个 DSH 实例（桌面 + web profile、
+ * 或两个窗口）共用同一个数据根时仍会互相踩（实测 20 次并发只落 10 轮 + `EPERM rename`）。
+ * 所以临界区里再拿一把文件锁：`<root>/.locks/<key>.lock`，独占创建，用完即删。
+ */
+const LOCK_DIR = '.locks'
+/** 等锁上限：正常写盘是毫秒级，8 秒还没拿到基本是死锁/权限问题，宁可报错也别挂死。 */
+const LOCK_WAIT_MS = 8000
+/** 超过这个时间没释放的锁视为崩溃残留，直接清掉（避免一次崩溃永久锁死角色）。 */
+const LOCK_STALE_MS = 15000
+
+/** 锁文件名：可读前缀 + FNV 短哈希，避免中文/特殊字符在不同文件系统上出问题。 */
+function lockKeyOf(key: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < key.length; i += 1) {
+    hash ^= key.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  const prefix = key.replace(/[^\w.-]/gu, '_').slice(0, 24)
+  return `${prefix}-${hash.toString(16)}`
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
 type Json = Record<string, unknown>
 
@@ -93,7 +120,8 @@ export const NAME_MAX_CHARS = 64
  * 只做"能不能安全当目录名"的判断，不做任何语义猜测。
  */
 export function normalizeCharacterName(name: string): string {
-  const trimmed = String(name ?? '').trim()
+  // 先做 NFC 归一：macOS 导出的卡常是 NFD，`é` 两种写法会变成两个视觉相同、实际不同的目录
+  const trimmed = String(name ?? '').normalize('NFC').trim()
   if (trimmed === '') throw new Error('角色名不能为空')
   if (trimmed === '.' || trimmed === '..') throw new Error(`角色名不能是 ${trimmed}`)
   if (trimmed.includes('/') || trimmed.includes('\\')) {
@@ -129,10 +157,29 @@ function isRecord(value: unknown): value is Json {
 }
 
 /** 原子写：先写 .tmp 再 rename，避免读到半个文件。 */
+/** 拒绝把存储根指向盘符根或系统目录。 */
+function assertSafeRoot(root: string): void {
+  const parsed = parse(root)
+  if (parsed.root === root) throw new Error(`存储根不能是磁盘根目录：${root}`)
+  const lower = root.toLowerCase()
+  const systemRoot = parsed.root.toLowerCase()
+  const forbidden = ['\\windows', '\\program files', '\\program files (x86)', '\\programdata']
+  if (forbidden.some(dir => lower === `${systemRoot}${dir}` || lower.startsWith(`${systemRoot}${dir}\\`))) {
+    throw new Error(`存储根不能指向系统目录：${root}`)
+  }
+}
+
 async function atomicWrite(file: string, content: string): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`
-  await writeFile(tmp, content, 'utf8')
+  const handle = await open(tmp, 'w')
+  try {
+    await handle.writeFile(content, 'utf8')
+    // 先刷盘再 rename：断电时宁可慢一点，也不要出现「文件名换了、内容还是半截」
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
   try {
     await rename(tmp, file)
   } catch (error) {
@@ -162,7 +209,9 @@ async function readJson<T>(file: string): Promise<T | undefined> {
     return undefined
   }
   try {
-    return JSON.parse(text) as T
+    // 记事本 / 某些导出工具会写 UTF-8 BOM；JSON.parse 见到 BOM 直接抛，
+    // 旧行为会把整张卡当「损坏」改名隔离（用户视角=卡凭空消失）。这里统一剥掉。
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as T
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     const backup = `${file}.corrupt-${Date.now()}`
@@ -270,9 +319,12 @@ export class Store {
   private readonly queues = new Map<string, Promise<void>>()
 
   constructor(root?: string) {
-    this.root = resolve(expandHome(
+    const resolved = resolve(expandHome(
       root ?? process.env['AIWU_STORAGE_ROOT'] ?? join(homedir(), '.dsh', 'ai-with-u'),
     ))
+    // 删除角色是递归的：存储根指错一次就是系统级事故（盘符根 / Windows 目录直接拒绝）
+    assertSafeRoot(resolved)
+    this.root = resolved
   }
 
   private dir(name: string): string {
@@ -287,16 +339,61 @@ export class Store {
   /**
    * 按 key 串行执行（解决 `host.md` P0-2：读-改-写丢更新）。
    * 前一个任务失败不阻塞后一个；队尾结算后自动清理，避免 Map 无限增长。
+   *
+   * 实例内队列负责「同进程不并发」，文件锁负责「跨实例/跨进程不并发」——
+   * 两者缺一都会丢更新（实测量级：20 次并发丢 10 次）。
    */
   private async locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(key) ?? Promise.resolve()
-    const current = previous.then(fn, fn)
+    const run = async (): Promise<T> => {
+      const release = await this.acquireFileLock(key)
+      try {
+        return await fn()
+      } finally {
+        await release()
+      }
+    }
+    const current = previous.then(run, run)
     const tail = current.then(() => undefined, () => undefined)
     this.queues.set(key, tail)
     try {
       return await current
     } finally {
       if (this.queues.get(key) === tail) this.queues.delete(key)
+    }
+  }
+
+  /**
+   * 取一把跨进程锁（独占创建 lockfile）。
+   *
+   * 崩溃残留用 mtime 判定：超过 {@link LOCK_STALE_MS} 直接清掉，否则一次强杀会让该角色永远写不进去。
+   */
+  private async acquireFileLock(key: string): Promise<() => Promise<void>> {
+    const dir = join(this.root, LOCK_DIR)
+    await mkdir(dir, { recursive: true })
+    const file = join(dir, `${lockKeyOf(key)}.lock`)
+    const deadline = Date.now() + LOCK_WAIT_MS
+    for (;;) {
+      try {
+        const handle = await open(file, 'wx')
+        try { await handle.writeFile(`${process.pid} ${Date.now()}`, 'utf8') } finally { await handle.close() }
+        return async () => { await rm(file, { force: true }) }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code
+        if (code !== 'EEXIST') throw error
+        try {
+          const info = await stat(file)
+          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+            await rm(file, { force: true })
+            continue
+          }
+        } catch {
+          // 锁文件刚被别人删掉/还没建好：直接重试
+          continue
+        }
+        if (Date.now() > deadline) throw new Error(`等待存储锁超时（${key}），可能有另一个 DSH 实例正在写入`)
+        await sleep(15)
+      }
     }
   }
 
@@ -341,6 +438,14 @@ export class Store {
       const target = resolve(this.root, entry?.path ?? '')
       if (!existsSync(target)) needsRebuild = true
     }
+    // 反向对账：目录里多出来、索引里没有的卡（手动拷入 / 删除与保存交错产生的孤儿）
+    // 以前只有「索引为空 / 条目失效」才重建，于是这些卡永远看不见。
+    if (!needsRebuild) {
+      const known = new Set(Object.values(index).map(entry => entry?.path ?? ''))
+      for (const dirName of names) {
+        if (!known.has(`${CHARACTERS_DIR}/${dirName}/card.json`)) { needsRebuild = true; break }
+      }
+    }
 
     if (needsRebuild) {
       const rebuilt: Record<string, IndexEntry> = {}
@@ -364,9 +469,10 @@ export class Store {
           continue
         }
         const card = normalizeCard(raw, { fallbackName: dirName })
-        const name = cardName(card) !== '' ? cardName(card) : dirName
+        // 目录名是主键（saveCard 会把 data.name 对齐目录名）：旧实现用卡内名字当索引键，
+        // 一旦用户手改过 card.json 的 name，面板就会「索引里有、列表里没有」。
         const session = await readJson<SessionState>(join(dir, 'session.json'))
-        rebuilt[name] = {
+        rebuilt[dirName] = {
           path: `${CHARACTERS_DIR}/${dirName}/card.json`,
           last_active: session?.last_ts ?? '',
           source: cardSource(card),
@@ -458,6 +564,9 @@ export class Store {
   async saveCard(input: SaveCardInput): Promise<{ name: string; card: CharacterCardV3 }> {
     const safe = normalizeName(input.name)
     return this.locked(safe, async () => {
+      // Windows 文件系统大小写不敏感：`Alice` 与 `alice` 会写进同一目录、互相覆盖日记。
+      // 保存前挡住「仅大小写/编码不同」的重名，比事后修补便宜得多。
+      await this.assertNoCaseVariant(safe)
       const existingRaw = await readJson<Json>(this.cardPath(safe))
       const base = isRecord(input.ccv3) ? input.ccv3 : existingRaw
       const hasCard = input.card !== undefined && isRecord(input.card)
@@ -473,10 +582,29 @@ export class Store {
       // 目录名是主键：卡内名字跟目录名走（改卡名不在本轮范围，见设计文档 M3）
       next.data.name = safe
       if (!Array.isArray(next.data.tags)) next.data.tags = []
+      // 巨型卡会把每轮 system prompt 撑爆（请求失败 / 费用爆炸）：保存前硬拦
+      assertCardLimits(next)
       stampCardTimes(next, new Date())
       await this.writeCardUnlocked(safe, next, existingRaw)
       return { name: safe, card: next }
     })
+  }
+
+  /** 有没有「只有大小写/Unicode 归一不同」的既有目录（会落到同一个 Windows 目录）。 */
+  private async assertNoCaseVariant(name: string): Promise<void> {
+    const dirRoot = join(this.root, CHARACTERS_DIR)
+    let entries: string[] = []
+    try {
+      entries = await readdir(dirRoot)
+    } catch {
+      return
+    }
+    const fold = (value: string): string => value.normalize('NFC').toLowerCase()
+    const mine = fold(name)
+    const clash = entries.find(entry => entry !== name && fold(entry) === mine)
+    if (clash !== undefined) {
+      throw new Error(`已存在仅大小写/编码不同的角色「${clash}」：Windows 上两者会写进同一目录，请换一个名字`)
+    }
   }
 
   /**
@@ -494,11 +622,14 @@ export class Store {
 
   /** 真正落盘的一步：备份旧卡 → 原子写 → 更新索引。调用方必须已持锁。 */
   private async writeCardUnlocked(name: string, card: CharacterCardV3, existingRaw: Json | undefined): Promise<void> {
-    const legacyOnDisk = existingRaw !== undefined && existingRaw['spec'] !== 'chara_card_v3'
+    // 防御：forget / rotateOpening 等调用方可能没传 existingRaw。
+    // 不自己读一次就会漏写 card.v1.bak.json（旧格式卡被就地升级后无原件可回滚）。
+    const onDisk = existingRaw ?? await readJson<Json>(this.cardPath(name))
+    const legacyOnDisk = onDisk !== undefined && onDisk['spec'] !== 'chara_card_v3'
     if (legacyOnDisk) {
       const backup = this.backupPath(name)
       if (!existsSync(backup)) {
-        await atomicWrite(backup, `${JSON.stringify(existingRaw, null, 2)}\n`)
+        await atomicWrite(backup, `${JSON.stringify(onDisk, null, 2)}\n`)
       }
     }
     await atomicWrite(this.cardPath(name), `${JSON.stringify(card, null, 2)}\n`)
@@ -507,15 +638,18 @@ export class Store {
 
   async deleteCharacter(name: string, withMemory = false): Promise<void> {
     const safe = normalizeName(name)
-    if (withMemory) {
-      await rm(this.dir(safe), { recursive: true, force: true })
-    } else {
-      await rm(this.cardPath(safe), { force: true })
-    }
-    await this.locked('#index', async () => {
-      const index = await this.readIndex()
-      delete index[safe]
-      await atomicWrite(join(this.root, INDEX_FILE), `${JSON.stringify(index, null, 2)}\n`)
+    // 删除也走按角色锁：否则它与并发的 saveCard 交错，会留下「文件在、索引没了」的孤儿目录
+    await this.locked(safe, async () => {
+      if (withMemory) {
+        await rm(this.dir(safe), { recursive: true, force: true })
+      } else {
+        await rm(this.cardPath(safe), { force: true })
+      }
+      await this.locked('#index', async () => {
+        const index = await this.readIndex()
+        delete index[safe]
+        await atomicWrite(join(this.root, INDEX_FILE), `${JSON.stringify(index, null, 2)}\n`)
+      })
     })
   }
 
@@ -548,9 +682,16 @@ export class Store {
     let section: 'timeline' | 'notes' | undefined
     for (const raw of text.split(/\r?\n/u)) {
       const line = raw.trimEnd()
-      const dateMatch = /^##\s+(\d{4})\s+(\d{2})\s+(\d{2})\s*$/u.exec(line)
+      // 日期分隔符放宽：模型常写 `2026-10-05` / `2026/10/05`，旧解析器只认空格，
+      // 写进去就再也读不回来（下一次写入还会把它整段删掉）。
+      const dateMatch = /^##\s+(\d{4})\s*[-/. ]\s*(\d{1,2})\s*[-/. ]\s*(\d{1,2})\s*$/u.exec(line)
       if (dateMatch !== null) {
-        current = { date: `${dateMatch[1]} ${dateMatch[2]} ${dateMatch[3]}`, timeline: [], notes: [] }
+        const pad = (n: string): string => n.padStart(2, '0')
+        current = {
+          date: `${dateMatch[1]} ${pad(dateMatch[2] ?? '')} ${pad(dateMatch[3] ?? '')}`,
+          timeline: [],
+          notes: [],
+        }
         entries.push(current)
         section = undefined
         continue
@@ -561,7 +702,9 @@ export class Store {
       const body = line.replace(/^-\s+/u, '').trim()
       if (body === '') continue
       if (section === 'timeline') current.timeline.push(body)
-      else if (section === 'notes' && body.startsWith('>')) current.notes.push(body.replace(/^>\s*/u, '').trim())
+      // 札记段：`>` 只是写入器的装饰，用户/模型手写时常常没有它；
+      // 以前不带 `>` 的行会被静默丢弃、下一次重写就永久消失，这里一律收下。
+      else if (section === 'notes') current.notes.push(body.replace(/^>\s*/u, '').trim())
     }
     return entries
   }
@@ -569,14 +712,16 @@ export class Store {
   /** 追加式写入：同日追加到当天段落（同角色串行，防并发丢更新）。 */
   async appendDiary(name: string, date: string, timeline: string[], notes: string[]): Promise<void> {
     const safe = normalizeName(name)
+    // 写入侧必须先规范化：否则 `2026-10-05` 会落成解析器永远匹配不到的块
+    const canonical = normalizeDiaryDate(date)
     await this.locked(safe, async () => {
       const entries = await this.readDiary(safe)
-      const existing = entries.find(e => e.date === date)
+      const existing = entries.find(e => e.date === canonical)
       if (existing !== undefined) {
         existing.timeline.push(...timeline)
         existing.notes.push(...notes)
       } else {
-        entries.push({ date, timeline: [...timeline], notes: [...notes] })
+        entries.push({ date: canonical, timeline: [...timeline], notes: [...notes] })
       }
       await this.writeDiaryUnlocked(safe, entries)
     })
@@ -584,20 +729,26 @@ export class Store {
 
   async writeDiary(name: string, entries: DiaryEntry[]): Promise<void> {
     const safe = normalizeName(name)
-    await this.locked(safe, async () => { await this.writeDiaryUnlocked(safe, entries) })
+    // 面板整体覆盖写盘也走同一个规范化，别让一条脏日期毁掉整份日记
+    const normalized = entries.map(entry => ({ ...entry, date: normalizeDiaryDate(entry.date) }))
+    await this.locked(safe, async () => { await this.writeDiaryUnlocked(safe, normalized) })
   }
 
   private async writeDiaryUnlocked(name: string, entries: DiaryEntry[]): Promise<void> {
+    // 条目内换行会破坏「一行一条」的格式：写入前拍平，避免自己写出读不回来的文件
+    const flatten = (item: string): string => String(item ?? '').replace(/\s*\r?\n\s*/gu, ' ').trim()
     const blocks = [`# ${name}的日记`]
     for (const entry of entries) {
       blocks.push(`\n## ${entry.date}`)
-      if (entry.timeline.length > 0) {
+      const timeline = entry.timeline.map(flatten).filter(s => s !== '')
+      if (timeline.length > 0) {
         blocks.push('**时间线**')
-        for (const item of entry.timeline) blocks.push(`  ${item}`)
+        for (const item of timeline) blocks.push(`  ${item}`)
       }
-      if (entry.notes.length > 0) {
+      const notes = entry.notes.map(flatten).filter(s => s !== '')
+      if (notes.length > 0) {
         blocks.push('\n**心情札记**')
-        for (const item of entry.notes) blocks.push(`> ${item}`)
+        for (const item of notes) blocks.push(`> ${item}`)
       }
     }
     await atomicWrite(this.diaryPath(name), `${blocks.join('\n')}\n`)
@@ -612,6 +763,23 @@ export class Store {
   async writeSession(name: string, session: SessionState): Promise<void> {
     const safe = normalizeName(name)
     await this.locked(safe, async () => { await this.writeSessionUnlocked(safe, session) })
+  }
+
+  /**
+   * 带锁切换交互模式。
+   *
+   * 旧实现是「读 → 锁外写」，与并发的 `commitTurn` 撞上会丢一轮 recent；
+   * 统一收进 Store 后，读改写在同一个临界区里完成。
+   */
+  async setMode(name: string, mode: SessionState['mode']): Promise<SessionState | undefined> {
+    const safe = normalizeName(name)
+    return this.locked(safe, async () => {
+      const session = await this.readSession(safe)
+      if (session === undefined) return undefined
+      const next: SessionState = { ...session, mode }
+      await this.writeSessionUnlocked(safe, next)
+      return next
+    })
   }
 
   private async writeSessionUnlocked(name: string, session: SessionState): Promise<void> {
@@ -852,6 +1020,8 @@ export class Store {
       const previous = (await this.readSession(safe)) ?? {}
       const diary = await this.readDiary(safe)
       const removedDiary = diary.reduce((n, d) => n + d.timeline.length + d.notes.length, 0)
+      // 删日记前先留一份可回滚的备份：这是不可逆操作，宁可多一个文件也不让记忆直接蒸发
+      const diaryBackup = await this.backupDiary(safe)
       await rm(this.diaryPath(safe), { force: true })
       const next: SessionState = {
         recent: [],
@@ -865,8 +1035,24 @@ export class Store {
         scope: 'all',
         session: next,
         diaryRemoved: removedDiary,
+        ...(diaryBackup === undefined ? {} : { diaryBackup }),
       }
     })
+  }
+
+  /** 把 diary.md 复制成 `diary.md.bak-<时间戳>`；没有日记或读失败时返回 undefined。 */
+  private async backupDiary(name: string): Promise<string | undefined> {
+    const path = this.diaryPath(name)
+    try {
+      const text = await readFile(path, 'utf8')
+      if (text.trim() === '') return undefined
+      const stamp = localIsoTimestamp().replace(/[^\d]/gu, '')
+      const backup = `${path}.bak-${stamp}`
+      await atomicWrite(backup, text)
+      return backup
+    } catch {
+      return undefined
+    }
   }
 
   private async activeMode(): Promise<string | undefined> {
@@ -976,8 +1162,8 @@ export class Store {
   /**
    * 首次使用时幂等种入预置卡：仅当 characters/ 目录不存在时执行一次。
    *
-   * ⚠️ 预置卡**保持旧格式**写盘（Lead P0-2）：每次全新安装都会真的跑一遍迁移逻辑
-   * （读时归一 → 首次写盘落成 CCv3），等于迁移代码天天在跑回归。
+   * 预置卡现在本身就是 CCv3（2026-10-30 换过），种入用原子写直接落盘；
+   * 旧格式卡的迁移回归由 `scripts/fixtures/legacy-cards` 承担，不再依赖预置卡。
    */
   async seedPresets(presetRoot: string): Promise<number> {
     const dirRoot = join(this.root, CHARACTERS_DIR)
@@ -1071,6 +1257,8 @@ export interface ResetResult {
   session: SessionState
   diaryKept?: number
   diaryRemoved?: number
+  /** 「彻底重置」删日记前的备份文件（存在即有值，可据此提示用户去哪找回）。 */
+  diaryBackup?: string
 }
 
 export interface OpeningResult {
@@ -1103,12 +1291,15 @@ function normalizeSummary(input: TurnInput): string | undefined {
   return parts.length > 0 ? parts.join('／') : undefined
 }
 
-/** `YYYY MM DD` / `YYYY-MM-DD` / `YYYY/MM/DD` 统一成日记分组标题格式。 */
+/** `YYYY MM DD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` 统一成日记分组标题格式。 */
 function normalizeDiaryDate(input: string): string {
-  const m = /^(\d{4})[\s\-/](\d{1,2})[\s\-/](\d{1,2})$/u.exec(input.trim())
-  if (m === null) throw new Error(`日期格式应为 YYYY MM DD：${input}`)
-  const pad = (n: string): string => n.padStart(2, '0')
-  return `${m[1]} ${pad(m[2] ?? '')} ${pad(m[3] ?? '')}`
+  const m = /^(\d{4})[\s\-/.](\d{1,2})[\s\-/.](\d{1,2})$/u.exec(input.trim())
+  if (m === null) throw new Error(`日期格式应为 YYYY MM DD（也接受 - / . 分隔）：${input}`)
+  const month = Number(m[2])
+  const day = Number(m[3])
+  if (month < 1 || month > 12 || day < 1 || day > 31) throw new Error(`日期不合法：${input}`)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${m[1]} ${pad(month)} ${pad(day)}`
 }
 
 /**
@@ -1144,11 +1335,6 @@ export function expandHome(value: string): string {
   if (value === '~') return homedir()
   if (value.startsWith('~/') || value.startsWith('~\\')) return join(homedir(), value.slice(2))
   return value
-}
-
-/** 内部用：读取原始 JSON（不归一），供写盘时判断"盘上是不是旧格式"。 */
-export async function readRawCard(file: string): Promise<Json | undefined> {
-  return readJson<Json>(file)
 }
 
 /** 重新导出，方便其它模块不需要再 import tavern。 */

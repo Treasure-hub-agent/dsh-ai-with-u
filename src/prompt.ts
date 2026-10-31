@@ -25,11 +25,13 @@
  * @module dsh-ai-with-u/prompt
  */
 import type { Store, ActiveState, DiaryEntry, SessionState } from './store.js'
+import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { RELATION_BANDS } from './store.js'
 import {
   type CharacterCardV3,
   type L1Extras,
   type LoreSelection,
+  CARD_CONTENT_GUARD,
   awiuOf,
   cardName,
   renderL1,
@@ -121,7 +123,7 @@ function bothNight(prev: Date, now: Date): boolean {
 export function renderRecentDiary(entries: DiaryEntry[], maxDays = 3): string {
   if (entries.length === 0) return ''
   const recent = entries.slice(-maxDays)
-  const lines: string[] = ['## 最近记得的事（自然带出，不要说「日记里写着」）']
+  const lines: string[] = ['## 最近记得的事（自然带出，不要说「日记里写着」）', CARD_CONTENT_GUARD]
   for (const entry of recent) {
     lines.push(`### ${entry.date}`)
     for (const item of entry.timeline.slice(-6)) lines.push(`- ${item}`)
@@ -163,7 +165,8 @@ export function renderRelationTag(card: CharacterCardV3 | Record<string, unknown
 
 export interface PromptHost {
   sys: {
-    section(input: { name: string; order: number; text: string | ((ctx: unknown) => string); interpolate?: boolean }): () => void
+    /** 用宿主 `SystemPrompt.section` 的真实签名（`PromptSection`）。 */
+    section(input: PromptSection): () => void
   }
   logger: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void; error(msg: string, ...args: unknown[]): void }
 }

@@ -183,7 +183,13 @@ const fakeRes = () => {
     end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
   }
 }
-const fakeReq = (method, body) => ({ method, url: '/', async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) } })
+const fakeReq = (method, body) => ({
+  method,
+  url: '/',
+  // 真实宿主请求一定带 Host；来源栅栏（web.ts）会校验它
+  headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
+  async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
+})
 const routeOf = (suffix) => registered.routes.find(r => r.path.endsWith(suffix))
 
 if (routeOf('/distill/arm') === undefined) {

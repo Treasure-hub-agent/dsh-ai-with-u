@@ -193,8 +193,13 @@ function parseItxt(data: Buffer): PngTextChunk | undefined {
   const body = data.subarray(cursor)
   if (flag === 1) {
     try {
-      return { keyword, text: inflateSync(body).toString('utf8') }
-    } catch {
+      // maxOutputLength 是必须的：iTXt 也接受 deflate，无上限时一张 65KB 的 PNG
+      // 能解出 64MB+ 文本把宿主内存打爆（zip 路径早有这道闸，PNG 路径漏了）。
+      return { keyword, text: inflateSync(body, { maxOutputLength: IMPORT_LIMITS.maxCardBytes }).toString('utf8') }
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new Error(`PNG 的 ${keyword} 段解压后超过上限（${Math.round(IMPORT_LIMITS.maxCardBytes / 1024 / 1024)} MB），已拒绝`)
+      }
       // 压缩流坏了：当作这条 chunk 没有，交给上层报「没找到卡片文本」
       return undefined
     }
@@ -212,6 +217,9 @@ function decodeBase64Json(text: string, label: string): string {
   }
   const decoded = Buffer.from(raw, 'base64')
   if (decoded.length === 0) throw new Error(`${label} 的 base64 解出来是空的`)
+  if (decoded.length > IMPORT_LIMITS.maxCardBytes) {
+    throw new Error(`${label} 解出 ${mb(decoded.length)}，超过上限 ${mb(IMPORT_LIMITS.maxCardBytes)}`)
+  }
   return decodeUtf8(decoded)
 }
 

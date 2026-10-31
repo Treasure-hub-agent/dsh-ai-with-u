@@ -28,9 +28,16 @@
   #root { position: relative; z-index: 2; }
 </style>
 <script>
-  /* 深色态自检：地址带 #dark 时给 html 打上宿主的深色标记（插件样式只认这个属性）。
-     加这一行是为了能在沙盒里同时验收深浅两态，不需要去改活着的 DSH 主题。 */
-  if (location.hash === '#dark' || location.search.indexOf('dark') >= 0) document.documentElement.setAttribute('data-ds-dark-theme', '');
+  /* 深色态自检：地址带 #dark 时按**宿主真实行为**给 body 打上深色标记。
+     宿主（dsh-client-ui-theme）用的是 `body[data-ds-dark-theme]`，不是 html；
+     沙盒以前打在 html 上，所以「深色态」QA 一直是假绿。 */
+  (function () {
+    var dark = location.hash === '#dark' || location.search.indexOf('dark') >= 0
+    if (!dark) return
+    var mark = function () { document.body.setAttribute('data-ds-dark-theme', '') }
+    if (document.body) mark()
+    else document.addEventListener('DOMContentLoaded', mark)
+  })()
 </script>
 </head>
 <body>

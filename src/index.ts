@@ -25,6 +25,8 @@
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import type { Context, Inject } from '@deepseek-ai/cordis'
+import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { Store } from './store.js'
 import { PromptController } from './prompt.js'
 import { createTools, createCardSaveTool } from './tools.js'
@@ -36,18 +38,15 @@ export const name = 'ai-with-u'
 /**
  * 硬依赖只有 systemPrompt —— 没有人设注入，这个插件就失去意义。
  * tools / webServer / agents 走 ctx.get / ctx.inject 可选等待。
- * 注意：Cordis 的 Inject 类型是 `(keyof M)[] | {name: interceptConfig}`，
- * 写成 {required, optional} 会被误解析成服务名，导致插件挂起。
+ *
+ * 类型直接来自宿主真实包（`@deepseek-ai/cordis` 的 `Inject`），所以「写成对象形式」
+ * 或「把 mixin 方法当服务名」这两类历史错误现在会在 tsc 阶段直接报错，
+ * 而不是等到插件 failed 却不给原因。
  */
-export const inject: string[] = ['systemPrompt']
+export const inject: Inject = ['systemPrompt']
 
-interface SectionInput {
-  name: string
-  order: number
-  text: string | ((ctx: unknown) => string)
-  /** 必须显式 false：宿主默认会插值 `{{var}}`，遇到未知变量直接抛错。 */
-  interpolate?: boolean
-}
+/** 复用宿主 `PromptSection` 的真实形状（name / order / text / interpolate）。 */
+type SectionInput = PromptSection
 
 interface AnyCtx {
   systemPrompt: { section: (input: SectionInput) => () => void }
@@ -69,8 +68,9 @@ interface AnyCtx {
    * 里声明的服务会直接抛 `cannot get property "x" without inject`，所以可选服务
    * 一律走 ctx.get() 探测。
    *
-   * 注意：ctx.get(name, strict=true) 对「还没激活」的服务返回 undefined，
-   * 这也是探测「服务是否就绪」的可靠方式。
+   * 语义（cordis `reflect.ts` 源码核实）：`get()` 只查 isolate 映射与 store，
+   * **不看 inject 声明**；未激活的服务返回 undefined。所以它能用来探测「就绪没」，
+   * 但声明式 `ctx.inject([...], cb)` 仍然更稳（宿主会等依赖，不需要轮询）。
    */
   get?: (name: string, strict?: boolean) => unknown
   inject?: (deps: string[], callback: (ctx: AnyCtx) => void | (() => void)) => void
@@ -178,7 +178,10 @@ export function extractTurnTexts(session: SessionLike | undefined): { user: stri
   return { user, assistant }
 }
 
-export function apply(ctx: AnyCtx): () => void {
+export function apply(context: Context): () => void {
+  // 内部仍用宽松 duck type：服务是可选的、宿主版本会漂移；
+  // 入口签名用真实 Context 已经能挡住「apply 形状不对」这类契约错误。
+  const ctx = context as unknown as AnyCtx
   const log = makeLogger(ctx)
   const store = new Store()
   const presetRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'presets')
@@ -350,6 +353,20 @@ export function apply(ctx: AnyCtx): () => void {
       log.warn('宿主没有 ctx.on，会话状态不会自动写盘（面板手动接口仍可用）')
       return
     }
+    // 子代理 / 任务看板 / 定时会话都是独立 agent；它们的一轮对话不该写进
+    // 用户角色的 session.json（否则 L1 的「上次聊到哪」会被无关内容污染）。
+    // 宿主 registry 用 `roots()` 明确给出「没有 owner 的顶层 agent」，直接用它判定。
+    const agents = ctx.get?.('agents') as { roots?: () => AgentLike[] } | undefined
+    const isSubAgent = (agent: AgentLike | undefined): boolean => {
+      if (agent === undefined || typeof agents?.roots !== 'function') return false
+      try {
+        const roots = agents.roots()
+        // 取不到根列表时按「不是子代理」处理：宁可多写一轮，也不静默丢掉主会话
+        return roots.length > 0 && !roots.includes(agent)
+      } catch {
+        return false
+      }
+    }
     const safe = (label: string, fn: () => Promise<void>): void => {
       // 事件回调里绝不抛出：Cordis 的 hooks 是同步派发的，抛错会被宿主吞成一条 warn，
       // 这里自己兜住并把原因打全，便于排查。
@@ -361,18 +378,21 @@ export function apply(ctx: AnyCtx): () => void {
     // pre-step 是 waterfall：必须调用 next() 把控制权交下去，否则这一轮就进不去了。
     // 刷新只是「尽力而为」，不 await 它的结果也能保证 next() 被调用。
     const disposePre = on('agent/pre-step', ((payload: PreStepPayload, next: () => unknown) => {
-      safe('agent/pre-step', () => refreshBeforeStep(payload?.agent, payload?.turn))
+      if (!isSubAgent(payload?.agent)) {
+        safe('agent/pre-step', () => refreshBeforeStep(payload?.agent, payload?.turn))
+      }
       return next()
     }) as never)
     if (typeof disposePre === 'function') disposers.push(disposePre)
 
     // turn-stopping 是 serial：一轮真正收尾时触发，只在这里计数（pre-step 每步都会触发）
     const disposeStop = on('agent/turn-stopping', ((payload: TurnStoppingPayload) => {
+      if (isSubAgent(payload?.agent)) return
       safe('agent/turn-stopping', () => commitTurnFromAgent(payload?.agent, payload?.turn))
     }) as never)
     if (typeof disposeStop === 'function') disposers.push(disposeStop)
 
-    log.info('已挂载会话钩子：agent/pre-step（轮前刷新）+ agent/turn-stopping（轮后写盘）')
+    log.info('已挂载会话钩子：agent/pre-step（轮前刷新）+ agent/turn-stopping（轮后写盘），仅根 agent 生效')
   }
 
   // 等服务就绪后再挂：初始化是异步的，必须等 prompt 构造好

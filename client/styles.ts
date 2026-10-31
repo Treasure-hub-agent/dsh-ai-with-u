@@ -207,11 +207,10 @@ const CSS = `
 }
 
 /* 浅色：晨光玻璃。液态玻璃在浅色下是「白色半透明 + 白色高光」，不是把深色反相。
-   选择器必须与上面变量块逐字一致。 */
-html:not([data-ds-dark-theme]) .awu-scope,
-html:not([data-ds-dark-theme]) .awu-layer,
-html:not([data-ds-dark-theme]) .awu-scrim,
-html:not([data-ds-dark-theme]) .awu-dialog {
+   判定必须同时看 html 与 body：宿主把 data-ds-dark-theme 打在 **body** 上
+   （dsh-client-ui-theme 里是 body[data-ds-dark-theme]{…}），而预览沙盒历史上打在 html 上。
+   只判 html 会让 :not() 恒真 → 深色皮肤下浅色令牌永远生效，暗色态根本出不来。 */
+html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
   --awu-glass-1: rgba(255, 255, 255, .54);
   --awu-glass-2: rgba(255, 255, 255, .68);
   /* 卡面 hover 档：比静息更白（卡浮起来 = 挡住更多背景） */
@@ -2657,6 +2656,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   .awu-card,
   .awu-detail,
   .awu-dialog,
+  .awu-editor,
+  .awu-editorConfirm,
   .awu-scrim,
   .awu-focus,
   .awu-skRow,
@@ -2670,7 +2671,8 @@ html:not([data-ds-dark-theme]) .awu-dialog {
   .awu-iconBtn[data-spin="true"] svg {
     animation: none !important;
   }
-  .awu-card, .awu-trigger, .awu-btn { transition-duration: .01ms !important; }
+  .awu-card, .awu-trigger, .awu-btn,
+  .awu-tab, .awu-input, .awu-line, .awu-iconBtn, .awu-navBack { transition-duration: .01ms !important; }
   .awu-card:hover { transform: none; }
 }
 ${GUIDE_CSS}

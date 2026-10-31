@@ -28,7 +28,6 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-ui-settings"
       ]
@@ -50,18 +49,23 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-system-prompt": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "cordis": "^4.0.0-rc.7",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-distill.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify-bundle.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-distill.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "prepack": "npm run build",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "verify": "node scripts/verify.mjs",
+    "verify:bundle": "node scripts/verify-bundle.mjs",
     "verify:import": "node scripts/verify-import.mjs",
     "verify:session": "node scripts/verify-session.mjs",
     "verify:host": "node scripts/verify-host.mjs",

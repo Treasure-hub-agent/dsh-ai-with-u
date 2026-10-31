@@ -12,6 +12,7 @@
  * @module dsh-ai-with-u/tools
  */
 import type { Store } from './store.js'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { localDiaryDate, RELATION_BANDS } from './store.js'
 import type { PromptController } from './prompt.js'
 import type { DistillArm } from './distill.js'
@@ -27,6 +28,15 @@ export interface ToolDef {
   output: { schema: Record<string, unknown>; render: (args: unknown, value: unknown) => Array<{ type: 'text'; text: string }> }
   execute: (args: Record<string, unknown>, exec: ToolExec) => Promise<unknown>
 }
+
+/**
+ * 编译期契约校验：我们的工具形状必须能被宿主 `tools.register` 接受。
+ * 宿主改了 ToolDefinition（例如 output.render 签名、execute 参数）时，
+ * 这里会在 tsc 阶段直接报错，而不是等到运行时工具悄悄失效。
+ */
+type ToolShapeConforms = ToolDef extends ToolDefinition ? true : false
+const toolShapeConforms: ToolShapeConforms = true
+void toolShapeConforms
 
 /** 只把执行结果当 JSON 回给模型，不额外解释。 */
 const json = {
@@ -55,12 +65,12 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
       parameters: {
         timeline: {
           type: 'array',
-          item: { type: 'string' },
+          items: { type: 'string' },
           description: '客观事实条目，如「下午 · [在推进] TA 说下周三要考试」。行首可带 [事实] / [在推进] / [完结] 标注。',
         },
         notes: {
           type: 'array',
-          item: { type: 'string' },
+          items: { type: 'string' },
           description: '角色口吻的心情札记，每条 1-3 句，如「她今天看起来好累，想让她早点休息」。',
         },
         date: {
@@ -219,7 +229,7 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
       parameters: {
         candidates: {
           type: 'array',
-          item: { type: 'string' },
+          items: { type: 'string' },
           description: '可选：openings 缺失时你现生成的候选开场（2-3 句，风格锚点互不相同）。给了就追加写入 openings 并采用第一句。',
         },
       },
@@ -246,8 +256,8 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
  *   2. 这份"能写卡的权力"必须是**临时**的：`POST /distill/arm` 挂上，成功保存一次后自动卸下，
  *      TTL（2 小时）到期也自动卸下。常驻 = 模型在任何会话里都能写卡，那是事故面。
  *
- * 参数 schema 里数组元素一律用 `items`（本文件里 `awu_diary_write` / `awu_opening_next`
- * 的 `item` 是历史错法，属于 host.md P0-3，未在本轮改动范围内一并修）。
+ * 参数 schema 里数组元素一律用 `items`（JSON Schema 的正确写法）。
+ * 历史错法 `item` 已在 2026-10-31 的 P2 批次统一改正。
  */
 export function createCardSaveTool(store: Store, arm: DistillArm): ToolDef {
   return {

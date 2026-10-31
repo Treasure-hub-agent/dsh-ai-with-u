@@ -1,100 +1,94 @@
-# dsh-ai-with-u · 角色扮演管理器
+# dsh-ai-with-u
 
-> 由 [AI-WITH-U](https://github.com/Treasure-hub-agent/ai-with-u)（原 skill 形态）改造而来的 **DeepSeek Harness 插件**。
->
-> **选一张角色卡点「启用」，人设即插即用；点「退出」干净拔出，完全不影响正常工作。**
+**给 DeepSeek Harness 的角色扮演插件。** 选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
+
+![version](https://img.shields.io/badge/version-0.2.0-d97706)
+![license](https://img.shields.io/badge/license-MIT-2563eb)
+![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
+![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
+![self-checks](https://img.shields.io/badge/self--checks-511%20passed-16a34a)
 
 ---
 
-## 它解决什么问题
+## 它是什么
 
-原 `ai-with-u` 是个 skill，所有确定性逻辑都让模型自己干——建目录、读写 JSON、追加 markdown、算索引。模型得「扮演」一个文件系统，不稳定。
+一个 DSH 插件，负责三件事：**把角色卡注入系统提示词、维护角色的日记记忆、提供一个管理面板**。
 
-这个插件把**确定性逻辑收进代码**，只把「怎么写台词」留给模型。同时把 13 KB 的提示词压缩到启用态约 1.8 KB。
+聊天本身仍然走 DSH 自己的会话——不做自定义聊天界面，不劫持消息流。插件只在「人设从哪来、记忆写到哪」这两个环节介入。
+
+```
+启用前：和普通 DSH 会话没有区别
+启用后：模型以角色身份说话，但该跑测试跑测试、该读代码读代码
+退出后：系统提示词里一个字都不留，和没装过一样
+```
+
+---
+
+## 为什么会有它
+
+原项目 [ai-with-u](https://github.com/Treasure-hub-agent/ai-with-u) 是一个 skill：角色卡、日记、时间差全有，但所有确定性逻辑都交给模型——建目录、读写 JSON、追加 markdown、算索引。模型得同时扮演角色和文件系统，出岔子是早晚的事。
+
+这个插件把确定性部分收进代码，只把「怎么写台词」留给模型。
 
 | | 原 skill | 本插件 |
 |---|---|---|
-| 提示词 | `SKILL.md` 13 060 字节，**每轮全量注入** | L0 底线 ≈0.37K（仅启用时）+ L1 角色 ≈1.1K + 世界书命中（典型 ≈0.2K） |
-| 文件读写 | 模型自己做 | 插件代码保证 |
-| 角色管理 | 对话里说指令 | **可视化面板** |
-| 时机控制 | 一直生效 | **可插拔** |
+| 提示词 | `SKILL.md` 13 KB，每轮全量注入 | 启用态约 2.4 KB，不启用时为 0 |
+| 文件读写 | 模型自己动手 | 插件代码保证，原子写 + 跨进程锁 |
+| 角色管理 | 在对话里说指令 | 可视化面板 |
+| 生效时机 | 一直生效 | 可插拔，退出即卸载 |
 
 ---
 
-## 核心特性
+## 它是怎么工作的
 
-### 🔌 真·插拔
+```mermaid
+flowchart LR
+    U[你的消息] --> S[DSH 会话]
+    S --> A{每轮组装系统提示词}
+    A --> L0[L0 底线]
+    A --> L1[L1 角色卡]
+    A --> W[世界书命中]
+    A --> D[日记与会话摘要]
+    L0 --> M[模型]
+    L1 --> M
+    W --> M
+    D --> M
+    M --> R[角色口吻的回复]
+    R --> DB[(写回日记 / 会话状态)]
+    DB -. 下一轮 .-> A
+```
 
-启用 → 人设注入 system prompt，**全局生效，新开旧会话都算**；退出 → 干净拔出，零残留。
+### 分层注入
 
-- 启用状态落盘，**重启 DSH 自动恢复**
-- `awu_*` 工具与角色**同进同出**：启用才挂载，退出即全部卸下
-- 退出后**系统提示词里一个字都不留**（连 L0 底线一起撤），和没装插件一样
+| 层级 | 什么时候在 | 内容 | 体积 |
+|---|---|---|---|
+| **L0 底线** | 启用期间 | 优先级声明 + 扮演底线 | 约 365 字符 |
+| **L1 角色** | 启用期间 | CCv3 角色卡（声线优先）+ 时间差 + 最近日记 | 约 1.9–2.4K，随卡增长 |
+| **世界书** | 命中才注入 | 关键词 / 常驻条目，预算 12 条 · 6000 字符 | 典型约 0.2K |
+| **L2 长流程** | 工具按需 | 蒸馏、建卡向导 | 不进系统提示词 |
 
-### 🎭 分层按需注入
+退出时四段全部返回空串，宿主会过滤掉——这是「干净拔出」的实现方式，不是靠删文件。
 
-| 级别 | 何时 | 内容 |
-|---|---|---|
-| **L0 底线** | 启用时 | 零系统痕迹铁律 + 优先级声明（约 370 字符，退出即消失）|
-| **L1 角色** | 启用时 | 酒馆卡 CCv3 渲染（声线优先）+ 时间差档位 + 最近日记（实测 ≈1.05–1.15K 字符）|
-| **世界书** | 命中时 | `character_book` 条目按关键词命中注入；常量条每轮都在，其余未命中零成本（典型 ≈0.2K 字符）|
-| **L2 长流程** | 工具按需 | 蒸馏/建卡向导等长文档，不进系统提示词 |
+### 插拔
 
-### 📖 世界书按需注入
-
-- **常规人设常驻**（`description` / `personality` / `scenario`），详细设定放世界书
-- 命中才注入：关键词（含 `use_regex`）、`constant` 常驻、`selective` + 次级关键词
-- 默认预算 **12 条 / 6000 字符**——实测常态根本用不满（典型只注入 168 字符，约 L1 的 11%），它的作用是防爆炸而不是常态成本
-- 同一轮多次组装复用结果，**不重复注入、不跨轮累积**
-- 易变内容排在系统提示**最后一段**，把缓存失效率降到最小
-
-### ⚖️ 与 AGENTS.md 共存，不冲突
-
-DSH 的 `AGENTS.md` 是以 **user 角色消息**注入的，插件用的是 **system prompt**，层级上天然更高。因此插件**不需要修改用户任何文件**，新装用户开箱即用。
-
-L0 里显式声明了边界：
-
-- **让位的**：AGENTS.md 里的人设、自称、语气、口癖、性格设定
-- **照常生效的**：代码规范、项目约定、工程流程、安全约束
-- **判据**：只让「我是谁、我怎么说话」，不让「我怎么做事」
-
-### 🎨 「夜繭 / Night Cocoon」设计语言
-
-不是 DSH 皮肤的换色，是独立视觉体系：
-
-- 深夜褐黑画布 + 琥珀金 → 玫瑰金 → 烟霞粉渐变
-- 衬线体承担人物感（名字/日记）、无衬线体承担工具感（按钮/数字）、等宽体只用于日期
-- 一档缓动贯穿全部动效，卡片错峰升起、启用态呼吸辉光
-- 支持浅色模式与 `prefers-reduced-motion`
-
-### 📔 日记无感记忆
-
-- 模型静默把值得记的事追加进日记，正文零痕迹
-- 「忘记某事」= 角色卡 + 日记 + 会话摘要**三处同步清理**，角色真的不再提
-- 「改日记」就地改写，不动同段其他条目
+- 启用状态落盘，重启 DSH 自动恢复
+- `awu_*` 工具与角色同进同出：启用才挂载，退出即卸下
+- 世界书按关键词命中，同一轮复用结果，不重复注入、不跨轮累积
 
 ---
 
 ## 界面
 
-入口在**左侧栏底部**（与用量统计插件同席位）：
+入口在左侧栏底部（与用量统计插件同席位）。展开态显示「角色管理 + 当前角色名」，收起态收成 36px 圆徽，点击弹出悬浮面板。
 
-- **展开态**：`角色管理` + 当前角色名 + 呼吸状态灯
-- **收起态**：自动收成 36px 圆徽
-- 点击弹出**悬浮面板**
+四个分区：
 
-三个分区：**角色簿**（卡片墙 / 详情 / 直接编辑）、**日记**（时间线 / 逐条改写 / 危险区）、**统计**。
+- **角色簿** — 卡片墙、详情页、完整编辑（10 组 34 字段）
+- **日记** — 时间线、逐条改写、危险区
+- **统计** — 角色数、记忆条数、对话轮次
+- **指南** — 首次打开时的使用说明
 
-### 角色卡编辑器
-
-详情页可直接编辑**全部 10 个分组、34 个字段**：
-
-- 字段是中文键名，原样保留
-- **声线基因**有金色描边 +「灵魂字段」徽记（原 skill 标记的灵魂字段）
-- 6 个数组字段配了增删改列表编辑器
-- 以原卡为底**浅合并**，schema 之外的键原样保留
-- 清空字段 = 删键，不写空串污染卡片
-- 有改动关闭会二次确认
+编辑器里「声线基因」是灵魂字段：说话节奏、自称、口头禅、禁忌词、小动作。这些决定「听起来像不像他」，所以给了金色描边和独立徽记。
 
 ---
 
@@ -102,26 +96,26 @@ L0 里显式声明了边界：
 
 ### 前提
 
-- DeepSeek Harness（desktop profile）
-- desktop profile 由 Electron 独占，**不能用 `dsh plugin` CLI**（会报 `managed exclusively by the Electron application`）
+- DeepSeek Harness 桌面版（desktop profile）
+- Node 22.19+ 或 24+
+- 不需要编译 C++，零原生依赖
 
 ### 步骤
 
 ```bash
-# 1. 克隆与构建
-git clone <repo> dsh-ai-with-u
+git clone https://github.com/Treasure-hub-agent/dsh-ai-with-u.git
 cd dsh-ai-with-u
 npm install && npm run build
 ```
 
 ```powershell
-# 2. 建 junction（Windows 上不要用 ln -sfn，它会静默退化成目录拷贝）
+# 建 junction（Windows 上不要用 ln -sfn，它会静默退化成目录拷贝）
 New-Item -ItemType Junction `
   -Path "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-ai-with-u" `
   -Target "<你的克隆路径>"
 ```
 
-3. 编辑 `~/.dsh/profiles/desktop/package.json`：
+然后编辑 `~/.dsh/profiles/desktop/package.json`：
 
 ```jsonc
 {
@@ -139,9 +133,9 @@ New-Item -ItemType Junction `
 }
 ```
 
-4. **重启 DSH**（宿主不会热加载 `lib/index.js`）
+最后重启 DSH。宿主不会热加载 `lib/index.js`。
 
-> ⚠️ 不要在 profile 的 `cordis.patch.yml` 里手写插件行——包内 `cordis.patch.yml` 的 `bundle.patch` 会自动挂载，重复写反而干扰故障定位。
+> ⚠️ 不要在 profile 的 `cordis.patch.yml` 里手写插件行——包内 `cordis.patch.yml` 的 `bundle.patch` 会自动挂载，重复写只会干扰故障定位。
 
 ---
 
@@ -150,34 +144,45 @@ New-Item -ItemType Junction `
 1. 左侧栏底部点「角色管理」
 2. 选一张卡点「启用」
 3. 开个新会话，像给老朋友发消息一样聊
-4. 不想玩了点「退出」，一切恢复原样
+4. 不想玩了点「退出」
 
-**开箱自带 3 张范例角色卡**（丰川祥子 / 阿米娅 / 昔涟，均由插件自己的蒸馏流程产出），首次启用时幂等种入（`characters/` 已存在则跳过，绝不复活你删掉的卡）。
+开箱自带三张范例卡（丰川祥子 / 阿米娅 / 昔涟，都由插件自己的蒸馏流程产出）。首次启用时幂等种入：`characters/` 已存在就跳过，不会复活你删掉的卡。
 
 ### 兼容旧卡与酒馆卡
 
-- **旧 34 字段卡**：直接放进 `characters/<名>/card.json` 即可，插件**读时自动归一**成酒馆卡 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`（回滚就是拷回来）
-- **酒馆卡导入**：支持 `.png`（`tEXt` 的 `ccv3` / `chara` chunk）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 会自动升到 V3）
-- ⚠️ 已有角色时**纯拷目录**不会自动进索引（未做一键导入），可以用面板的导入入口
+- **旧 34 字段卡**：直接放进 `characters/<名>/card.json`，读时自动归一成 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`
+- **酒馆卡导入**：支持 `.png`（`tEXt` / `iTXt` 的 `ccv3`、`chara` 段）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 自动升到 V3）
 
 ---
 
 ## 数据存储
 
-默认 `~/.dsh/ai-with-u/`（可用环境变量 `AIWU_STORAGE_ROOT` 覆盖）：
+默认 `~/.dsh/ai-with-u/`，可用 `AIWU_STORAGE_ROOT` 覆盖：
 
 ```
 ~/.dsh/ai-with-u/
 ├── _index.json                # 角色索引
 ├── _active.json               # 当前启用状态
 └── characters/<角色名>/
-    ├── card.json              # 酒馆卡 CCv3（旧 34 字段卡读时自动归一）
-    ├── card.v1.bak.json       # 迁移前的原件（回滚用，只在首次落盘后出现）
-    ├── diary.md               # 日记（按天分组）
-    └── session.json           # 会话状态
+    ├── card.json              # CCv3 角色卡
+    ├── card.v1.bak.json       # 迁移前原件，回滚就拷回来
+    ├── diary.md               # 日记，按天分组
+    └── session.json           # 会话状态与滚动摘要
 ```
 
-**记忆是你的**：纯 markdown / JSON，可读、可改、可备份、可迁移，不上云不注册。
+纯 markdown / JSON，可读、可改、可备份、可迁移。不联网、不注册、不收藏数据。
+
+### 接口安全
+
+面板接口 `/_dsh/ai-with-u/*` 只接受本机来源：Host 必须是回环或实际监听地址，Origin 必须同源，`Sec-Fetch-Site: cross-site` 直接拒绝；写接口强制 `POST + application/json`。浏览器里任何网页都无法跨站触发删除或读取卡片。
+
+如果确实要通过隧道/反代从别的域名访问本机 GUI，用环境变量显式放行：
+
+```bash
+AIWU_TRUSTED_HOSTS=my.tunnel.example
+```
+
+默认拒绝，不靠猜。
 
 ---
 
@@ -188,50 +193,103 @@ New-Item -ItemType Junction `
 | 工具 | 用途 |
 |---|---|
 | `awu_diary_write` | 追加日记 |
-| `awu_diary_read` | 读取/筛选日记 |
+| `awu_diary_read` | 读取 / 筛选日记 |
 | `awu_whoami` | 查询当前身份 |
-| `awu_forget` | 忘记某事（三处同步清理）|
+| `awu_forget` | 忘记某事（日记 + 会话 + 角色卡三处同步） |
 | `awu_diary_edit` | 就地改写日记条目 |
 | `awu_session_reset` | 全新开始 / 彻底重置 |
 | `awu_relation` | 查询关系档位依据 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（18 条，`/_dsh/ai-with-u/`）
+另有一个**条件挂载**的 `awu_card_save`：只在点「蒸馏角色卡」后的两小时内、且保存一次后自动失效。平时模型拿不到写卡能力。
 
-`overview` `characters` `character` `character/save` `character/delete` `character/import`
-`activate` `deactivate` `mode` `diary/save` `forget` `diary/edit`
-`session/reset` `relation` `opening/next` `opening/state` `session/commit` `distill/flow`
+### REST 接口（21 条，`/_dsh/ai-with-u/`）
 
-> `/character` 与 `/characters` 同时返回 `card`（旧 34 字段视图，编辑器用它）与 `ccv3`（完整酒馆卡）；
-> `/character/save` 收 `{ name, card?, ccv3? }` —— 只给 `card` 时保留既有世界书与 `extensions`，只给 `ccv3` 时反推结构。
+```
+overview  characters  character  character/save  character/import  character/delete
+activate  deactivate  mode  relation  opening/next  opening/state
+diary/save  diary/edit  forget  session/reset  session/commit
+distill/flow  distill/arm  distill/disarm  distill/state
+```
+
+`/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
 ---
 
 ## 开发
 
 ```bash
-npm install
-npm run build            # tsc(宿主) + tsc(前端类型) + 打包 + 五套自检
-npm run verify           # 产物自检（导出形状 / inject 形式 / 产物新鲜度）
-npm run verify:tavern    # 酒馆卡格式 / 迁移幂等 / 世界书命中与预算（186 项）
-npm run verify:import    # PNG / CHARX / JSON 导入解析（47 项）
-npm run verify:session   # 会话与指令自检（94 项）
-npm run verify:host      # 真实 cordis 宿主验证（19 项）
-npm run typecheck:client # 只查浏览器侧类型（tsconfig.client.json，noEmit）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 七套自检
+npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 忘却（218 项）
+npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
+npm run verify:session   # 会话、指令与来源栅栏（111 项）
+npm run verify:host      # 真实 cordis 宿主装配（34 项）
+npm run verify:distill   # 蒸馏武装与 TTL（90 项）
+npm run verify:bundle    # 客户端产物加载（9 项）
+npm run typecheck:client # 只查浏览器侧类型
 ```
 
-**详细开发记录与踩坑大全见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)**——包含 9 个真实踩过的坑、架构决策理由、以及给未来维护者的忠告。
+宿主 API 的类型直接来自 `@deepseek-ai/dsh-system-prompt` / `dsh-tools` / `cordis` 的 devDependencies，`inject`、`PromptSection`、`ToolDefinition` 都有编译期校验——契约漂移会在构建阶段报错，而不是运行时「failed 但不给原因」。
+
+### 目录结构
+
+```
+src/            宿主侧：存储、提示词、工具、路由、格式层、导入、蒸馏
+client/         浏览器侧：面板、编辑器、日记、指南、统计
+scripts/        构建与自检
+docs/           设计文档与开发记录（含踩坑大全）
+presets/        开箱角色卡
+tools/preview/  脱离宿主的面板预览沙盒
+```
 
 ---
 
-## 技术栈
+## 常见问题
 
-- **宿主侧**：TypeScript / Node 22+ / Cordis 4 插件框架
-- **浏览器侧**：React 18/19（宿主提供）/ esbuild 打包为 `window.__ModuleLoader__` 格式
-- **零原生依赖**（无 C++ 编译需求）
+<details>
+<summary>会不会覆盖我 AGENTS.md 里的人设？</summary>
+
+AGENTS.md 是以 user 角色消息注入的，插件用的是 system prompt，层级更高。L0 里显式写了边界：只让「我是谁、我怎么说话」，不让「我怎么做事」——代码规范、工程流程、安全约束照常生效。
+
+</details>
+
+<details>
+<summary>退出后真的什么都不留吗？</summary>
+
+四段（L0 / L1 / 世界书 / 时间差）在退出后都返回空串，宿主会过滤空段。`awu_*` 工具同时全部卸载。数据文件仍然在磁盘上，但不参与任何提示词组装。
+
+</details>
+
+<details>
+<summary>为什么不能用 <code>dsh plugin</code> CLI 安装？</summary>
+
+desktop profile 由 Electron 独占管理，CLI 会直接报 `managed exclusively by the Electron application`。按上面的 junction + profile 配置方式装。
+
+</details>
+
+<details>
+<summary>删了角色，日记还在吗？</summary>
+
+删除时可以选「只删卡」或「连记忆一起删」。只删卡时 `diary.md` 留在磁盘上，重新创建同名角色还能接上。
+
+</details>
+
+<details>
+<summary>提示词到底占多少 token？</summary>
+
+启用态约 2.4 KB 字符量级（中文按字计），未启用 0。世界书常态只注入一两百字符。重内容（卡里的详细设定、长日记）不会无条件进提示词。
+
+</details>
 
 ---
+
+## 致谢
+
+- 原项目：[ai-with-u](https://github.com/Treasure-hub-agent/ai-with-u)
+- 角色卡格式：[Character Card V3](https://github.com/malfoyslastname/character-card-spec-v2)
+- 宿主：[DeepSeek Harness](https://harness.deepseek.com)
 
 ## License
 
-MIT · 原项目 © 2026 [Treasure-hub-agent](https://github.com/Treasure-hub-agent/ai-with-u)
+MIT

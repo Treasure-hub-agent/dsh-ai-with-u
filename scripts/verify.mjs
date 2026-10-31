@@ -11,7 +11,7 @@
  *
  * 所以这里做三件事：校验导出形状、校验 inject 是数组、校验产物比源码新。
  */
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -50,14 +50,12 @@ if (!Array.isArray(inject)) {
 
 // ---------------------------------------------------------------- 3. 产物新鲜度
 console.log('产物检查：')
-const pairs = [
-  ['src/index.ts', 'lib/index.js'],
-  ['src/prompt.ts', 'lib/prompt.js'],
-  ['src/store.ts', 'lib/store.js'],
-  ['src/tools.ts', 'lib/tools.js'],
-  ['src/web.ts', 'lib/web.js'],
-  ['client/index.tsx', 'lib/client.js'],
-]
+// 动态生成映射：src/*.ts → lib/*.js。写死列表会漏掉后加的模块
+// （tavern / import-card / distill 就是这样长期没被新鲜度检查覆盖的）。
+const pairs = (await readdir(join(root, 'src')))
+  .filter(name => name.endsWith('.ts'))
+  .map(name => [`src/${name}`, `lib/${name.replace(/\.ts$/u, '.js')}`])
+pairs.push(['client/index.tsx', 'lib/client.js'])
 for (const [src, out] of pairs) {
   try {
     const [a, b] = await Promise.all([stat(join(root, src)), stat(join(root, out))])
@@ -65,6 +63,14 @@ for (const [src, out] of pairs) {
     else ok(`${out} 已是最新`)
   } catch {
     fail(`${out} 不存在`)
+  }
+}
+// 孤儿产物：lib 里有 .js，但 src 里没有同名 .ts（多半是改完没清干净的旧模块）
+{
+  const expected = new Set(pairs.map(([, out]) => out))
+  const libFiles = (await readdir(join(root, 'lib'))).filter(name => name.endsWith('.js'))
+  for (const name of libFiles) {
+    if (!expected.has(`lib/${name}`)) fail(`lib/${name} 没有对应的源文件（孤儿产物，删掉或补回 src）`)
   }
 }
 

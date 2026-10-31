@@ -239,7 +239,9 @@ export function isEmptyValue(value: string | string[]): boolean {
  *
  * 关键点（否则会毁数据）：
  *  - 以**原卡为底**做浅合并，schema 之外的字段（自定义键）原样保留；
- *  - 字段清空时**删除该键**而不是写空串/空数组，让卡片保持干净；
+ *  - 字段清空时写**显式空值**（`''` / `[]`），而不是把键删掉——后端靠「键在 + 值为空」
+ *    区分「用户清空了」和「这次没提交这个字段」，删键会让服务端以为用户没动过；
+ *    真正落盘时后端会把空值键清掉，卡片不会被子空串污染；
  *  - `name` 与 `source` 不参与编辑，直接沿用原值。
  */
 export function mergeCard(card: Card | undefined, draft: Draft): Card {
@@ -253,7 +255,7 @@ export function mergeCard(card: Card | undefined, draft: Draft): Card {
       for (const field of group.fields) {
         const value = values[field.key]
         if (value === undefined) continue
-        if (isEmptyValue(value)) delete base[field.key]
+        if (isEmptyValue(value)) base[field.key] = Array.isArray(value) ? [] : ''
         else base[field.key] = Array.isArray(value) ? value.filter(v => v.trim() !== '') : value
       }
       continue
@@ -268,21 +270,29 @@ export function mergeCard(card: Card | undefined, draft: Draft): Card {
     for (const field of group.fields) {
       const value = values[field.key]
       if (value === undefined) continue
+      const previous = next[field.key]
+      // 原值不是字符串/字符串数组时（数字、对象、混合数组），只要用户没改动就原样保留，
+      // 否则「打开编辑器什么都不改直接保存」也会把原值改写成字符串。
+      if (Array.isArray(previous) && !previous.every(item => typeof item === 'string')) {
+        if (Array.isArray(value) && previous.length === value.length && previous.every((item, i) => String(item) === value[i])) continue
+      } else if (previous !== undefined && typeof previous !== 'string' && !Array.isArray(previous)) {
+        const original = asText(previous)
+        if ((Array.isArray(value) ? value.join('、') : value) === original) continue
+      }
       if (isEmptyValue(value)) {
-        // 用户清空了：把键去掉，而不是留一个空串污染卡片
-        delete next[field.key]
+        // 用户清空了：写显式空值，让服务端能看出「这个字段被清空」而不是「没提交」
+        next[field.key] = Array.isArray(value) ? [] : ''
       } else if (Array.isArray(value)) {
         const items = value.filter(v => String(v).trim() !== '')
-        if (items.length === 0) delete next[field.key]
+        if (items.length === 0) next[field.key] = []
         else next[field.key] = items
       } else {
         next[field.key] = value
       }
     }
 
-    // 整组都空了就连同分组对象一起删掉，避免留下 `{}`
-    if (Object.keys(next).length === 0) delete base[rootKey]
-    else base[rootKey] = next
+    // 整组清空也保留分组对象（值为空），由服务端统一清洗；删组会让服务端当成没动过
+    base[rootKey] = next
   }
 
   // 身份字段不可编辑，强制沿用原值；缺了就补上，避免写盘丢字段

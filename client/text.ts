@@ -100,6 +100,9 @@ const zh = {
   'delete.keepMemory': '角色卡删除后，日记文件会保留在磁盘上。',
   'delete.confirm': '确认删除',
   'delete.cancel': '再想想',
+  'delete.done': '已删除角色卡',
+  'delete.doneWithMemory': '已连同记忆一起删除',
+  'forget.none': '没有找到包含该关键词的记忆。',
 
   'mode.title': '切换交互模式',
   'mode.text': '纯文本',
@@ -108,6 +111,9 @@ const zh = {
   'mode.actionHint': '动作神态用括号包起来，与台词分清界限',
 
   'common.loading': '载入中…',
+  'time.today': '今天',
+  'time.yesterday': '昨天',
+  'time.daysAgo': '{n} 天前',
   'common.retry': '重试',
   'common.cancel': '取消',
   'common.save': '保存',
@@ -160,6 +166,9 @@ const zh = {
   'reset.confirmTitle': '彻底重置「{name}」？',
   'reset.confirmBody': '这会删除全部日记与会话记忆，角色卡本身保留。这一步无法撤销。',
   'reset.confirmWord': '彻底重置',
+  'reset.sessionTitle': '全新开始「{name}」？',
+  'reset.sessionBody': '清空最近记录、心情、话题与轮数；日记会保留。这一步不可撤销。',
+  'reset.sessionWord': '全新开始',
 
   // ---- 角色卡编辑器 ----
   'detail.edit': '编辑',
@@ -352,6 +361,9 @@ const en: Dict = {
   'delete.keepMemory': 'The diary file stays on disk if you keep memories.',
   'delete.confirm': 'Delete',
   'delete.cancel': 'Keep it',
+  'delete.done': 'Character deleted',
+  'delete.doneWithMemory': 'Character and memories deleted',
+  'forget.none': 'No memory matched that keyword.',
 
   'mode.title': 'Interaction mode',
   'mode.text': 'Text only',
@@ -360,6 +372,9 @@ const en: Dict = {
   'mode.actionHint': 'Action beats in parentheses, separate from speech',
 
   'common.loading': 'Loading…',
+  'time.today': 'Today',
+  'time.yesterday': 'Yesterday',
+  'time.daysAgo': '{n} days ago',
   'common.retry': 'Retry',
   'common.cancel': 'Cancel',
   'common.save': 'Save',
@@ -411,6 +426,9 @@ const en: Dict = {
   'reset.confirmTitle': 'Fully reset “{name}”?',
   'reset.confirmBody': 'This deletes the entire diary and session memory. The character card itself stays. It cannot be undone.',
   'reset.confirmWord': 'Full reset',
+  'reset.sessionTitle': 'Fresh start for “{name}”?',
+  'reset.sessionBody': 'Clears recent records, mood, topic and turn count; the diary stays. This cannot be undone.',
+  'reset.sessionWord': 'Fresh start',
 
   'detail.edit': 'Edit',
   'edit.title': 'Edit character card',
@@ -598,8 +616,8 @@ export function hueOf(name: string): number {
   return hash % 4
 }
 
-/** 「最近活跃」的短格式：今天 / 昨天 / N 天前 / 日期。 */
-export function relativeDay(iso: string): string {
+/** 「最近活跃」的短格式：今天 / 昨天 / N 天前 / 日期。传入 `t` 时走当前语言。 */
+export function relativeDay(iso: string, t?: Translate): string {
   if (iso === '') return ''
   const when = new Date(iso)
   if (Number.isNaN(when.getTime())) return ''
@@ -608,10 +626,36 @@ export function relativeDay(iso: string): string {
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   const startThen = new Date(when.getFullYear(), when.getMonth(), when.getDate()).getTime()
   const days = Math.round((startToday - startThen) / dayMs)
-  if (days <= 0) return '今天'
-  if (days === 1) return '昨天'
-  if (days < 30) return `${days} 天前`
+  const label = (key: string, fallback: string, params?: Record<string, string | number>): string => {
+    if (t !== undefined) return t(key, params)
+    return params === undefined ? fallback : fallback.replace('{n}', String(params['n'] ?? ''))
+  }
+  if (days <= 0) return label('time.today', '今天')
+  if (days === 1) return label('time.yesterday', '昨天')
+  if (days < 30) return label('time.daysAgo', '{n} 天前', { n: days })
   return `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * 「角色来源」的显示名：三个已知出处映射成当前语言，其余原样（URL 缩成域名）。
+ *
+ * 为什么要映射：source 是 CCv3 的出处标识（custom / distill / import），
+ * 直接铺英文在中文界面里像裸 key；外部导入卡可能塞 URL，所以还要兜一层缩域名。
+ */
+export function sourceLabelOf(key: string, t: Translate): string {
+  if (key === 'custom') return t('stats.source.custom')
+  if (key === 'distill') return t('stats.source.distill')
+  if (key === 'import') return t('stats.source.import')
+  return sourceLabel(key)
+}
+
+export function sourceLabel(key: string): string {
+  if (!/^https?:\/\//i.test(key)) return key
+  try {
+    return new URL(key).hostname.replace(/^www\./, '')
+  } catch {
+    return key
+  }
 }
 
 /** 日记按日期倒序，空行剔除。 */

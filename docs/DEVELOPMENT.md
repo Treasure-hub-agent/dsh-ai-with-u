@@ -135,9 +135,9 @@ const error = new Error(`cannot get property "${prop}" without inject`)
 
 **正解**：用 `ctx.inject(['服务名'], sub => {...})` 声明式等待，回调里服务必然已就绪。
 
-> ⚠️ **不要用 `ctx.get()` 当探测银弹**。`get(name, strict)` 读的是**已解析依赖表**，只检查
-> `fiber.state !== 2`，**并不判断该服务有没有在 inject 里声明**，对未 inject 的服务返回 `undefined`。
-> 我们一度以为它是解法，后来实测证明不是。
+> ⚠️ **`ctx.get()` 能探测服务，但它不看 inject**（cordis `reflect.ts`：`get()` → `_getImpl()` 只查
+> isolate 映射与 store，不校验声明）。未激活的服务返回 `undefined`，所以「就绪没」可以探测；
+> 但**声明式 `ctx.inject([...], cb)` 仍然更稳**——宿主会等依赖，不需要我们自己轮询。
 
 ---
 
@@ -262,7 +262,7 @@ ellipsis 没有裁切上下文。
 }
 ```
 
-`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 三套自检`，
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 七套自检`，
 另有独立的 `npm run typecheck:client`。
 
 > 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
@@ -363,7 +363,7 @@ dsh-ai-with-u/
 │   ├── prompt.ts         # L0/L1 分层注入、时间差档位
 │   ├── store.ts          # 存储层（卡/日记/会话/索引）
 │   ├── tools.ts          # 8 个 awu_* 工具
-│   └── web.ts            # 16 条 REST 路由
+│   └── web.ts            # 21 条 REST 路由
 ├── client/               # 浏览器侧（React）
 │   ├── entry.tsx         # 插件入口（inject/apply/slot 注册）
 │   ├── index.tsx         # 面板主体
@@ -472,7 +472,7 @@ dsh-ai-with-u/
 | `awu_relation` | 查询关系档位依据 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（16 条，`/_dsh/ai-with-u/`）
+### REST 接口（21 条，`/_dsh/ai-with-u/`）
 
 `overview` `characters` `character` `character/save` `character/delete`
 `activate` `deactivate` `mode` `diary/save` `forget` `diary/edit`
@@ -493,7 +493,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 三套自检
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 七套自检
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -505,7 +505,7 @@ npm run verify:host    # 真实 cordis 宿主验证
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
 > **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
-> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(186 项) → `verify-import`(47 项) → `verify-session`(94 项) → `verify-host`(19 项)**，
+> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(111 项) → `verify-host`(34 项)**，
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 ### 安装到 DSH（desktop profile）
@@ -594,7 +594,7 @@ pnpm install --lockfile-only --prefer-offline
 
 | 改动 | 文件 | 为什么 |
 |---|---|---|
-| 新增格式层：识别 / 归一 / 迁移 / 投影 / 渲染 / 世界书 / 宏 / 忘却 / 长度告警 | `src/tavern.ts`（新，约 1800 行） | 纯函数零 IO，能脱离宿主单测（`verify-tavern` 186 项） |
+| 新增格式层：识别 / 归一 / 迁移 / 投影 / 渲染 / 世界书 / 宏 / 忘却 / 长度告警 | `src/tavern.ts`（新，约 1800 行） | 纯函数零 IO，能脱离宿主单测（`verify-tavern` 218 项） |
 | `card.json` 落 CCv3、读时归一、首次迁移写 `card.v1.bak.json` | `src/store.ts` | 无损导入导出；旧卡不会消失；可一条命令回滚 |
 | 保存契约 C7 三键 `{name, card?, ccv3?}` | `src/store.ts` + `src/web.ts` | 结构权威、原生投影；`character_book` / 别人的 extensions 不被洗掉 |
 | **`readCard()` 仍返回旧 34 字段视图**，完整对象走 `readCcV3()` | `src/store.ts` | 面板 / 工具 / 92 项旧自检零改动（Lead 决策 A）；内部一律 `readCcV3` |
@@ -607,12 +607,12 @@ pnpm install --lockfile-only --prefer-offline
 | 忘却改成「全卡按句手术」：遍历 `aiwu` 整棵树 + 世界书 + 外部原文 + 开场白，返回 `scanned` 计数 | `src/store.ts` + `src/tavern.ts` | 旧实现只认 `memory_anchor`/`dynamic_state` 两个键，迁 CCv3 后会**提示成功、一个字没删** |
 | 顺手修：`commitTurn` 的 turnId 去重从**单字段**改成按角色 Map | `src/store.ts` | 多角色并发时共用一个字段会互相踩掉去重 |
 | **L0 底线改为「与角色同进同出」**：`aiwu:baseline` 的 text 改成函数，未启用返回空串；文案 684 → **367 字**（删掉「何时让位给任务模式」整节） | `src/prompt.ts` | 原来无条件下常驻且在没启用时也写着「当前对话启用了角色扮演」= 假话；还与「退出即零残留」自相矛盾 |
-| 新增 `scripts/verify-tavern.mjs`（186 项）并串进 `npm run build` | `scripts/`、`package.json` | 格式 / 迁移幂等 / 34 字段零丢失 / 世界书 / 忘却 / 并发写盘 / 四段装配 |
+| 新增 `scripts/verify-tavern.mjs`（218 项）并串进 `npm run build` | `scripts/`、`package.json` | 格式 / 迁移幂等 / 34 字段零丢失 / 世界书 / 忘却 / 并发写盘 / 四段装配 |
 
 **实测（预置三张卡）**
 
 - 文件：旧卡 2021 B → CCv3 2871 B（**+42%**，双写投影的代价）
-- L1：旧渲染 1107 字 → 新 L1 1142 字（含收尾提醒），**静态块 1042 字**——文件变大但 L1 没变大，
+- L1：旧渲染 1107 字 → 新 L1 实测 1.9–2.4K 字（含收尾提醒与信任边界声明），**静态块 1.3–1.7K 字**——文件变大但 L1 没变大，
   因为原生投影与结构是同一份内容，每段只选一个来源渲染
 - 内容保真：旧卡 42 条文本字段**零丢失**
 - 世界书成本：虞照 + 10 条真实世界书，典型对话命中 4 条、注入 **168 字**（L1 的 11%），

@@ -71,6 +71,7 @@ import {
   makeTranslator,
   relativeDay,
   roleOf,
+  sourceLabelOf,
   sortRoster,
   sortedDiary,
   statTriple,
@@ -181,9 +182,12 @@ function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean 
  *  - `detail`（默认）：详情页那种竖排行；
  *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片。
  */
-function Skeleton(props: { shape?: 'detail' | 'cards' }): JSX.Element {
+function Skeleton(props: { shape?: 'detail' | 'cards'; label?: string }): JSX.Element {
   return (
-    <div className="awu-sk" data-shape={props.shape ?? 'detail'} aria-hidden="true">
+    <div className="awu-sk" data-shape={props.shape ?? 'detail'} role="status" aria-live="polite">
+      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
+        {props.label ?? '载入中…'}
+      </span>
       <div className="awu-skRow" />
       <div className="awu-skRow" />
       <div className="awu-skRow" />
@@ -223,26 +227,8 @@ function Field({ k, v, title }: { k: string; v: string; title?: string }): JSX.E
  * 所以 URL 一律缩成域名，完整值走 title 悬停。
  */
 /**
- * 「角色来源」的显示名：三个已知出处映射成中文，其余原样（含 URL 缩域名的兜底）。
- *
- * 为什么要映射：source 是 CCv3 的出处标识（custom / distill / import），
- * 直接铺英文在中文界面里像裸 key；而外部导入卡可能塞 URL，所以还要兜一层缩域名。
+ * 角色来源与相对日期的显示统一放在 `client/text.ts`（编辑器与面板共用同一套映射）。
  */
-function sourceLabelOf(key: string, t: Translate): string {
-  if (key === 'custom') return t('stats.source.custom')
-  if (key === 'distill') return t('stats.source.distill')
-  if (key === 'import') return t('stats.source.import')
-  return sourceLabel(key)
-}
-
-function sourceLabel(key: string): string {
-  if (!/^https?:\/\//i.test(key)) return key
-  try {
-    return new URL(key).hostname.replace(/^www\./, '')
-  } catch {
-    return key
-  }
-}
 
 /** 分段字段（性格/声音/关系）的小节。 */
 function Section(props: { title: string; count?: number; children: JSX.Element | JSX.Element[] | null }): JSX.Element {
@@ -329,7 +315,7 @@ function CharacterTile(props: {
   const { item, live, busy, t, index, onOpen } = props
   const role = roleOf(item.card)
   const blurb = blurbOf(item.card)
-  const when = relativeDay(item.lastActive)
+  const when = relativeDay(item.lastActive, t)
   return (
     <button
       type="button"
@@ -661,24 +647,27 @@ function ForgetDialog(props: {
 function ResetAllDialog(props: {
   name: string
   busy: boolean
+  /** session = 全新开始（保留日记）；all = 彻底重置（连日记清空）。 */
+  scope: 'session' | 'all'
   onCancel: () => void
   onConfirm: () => void
   t: Translate
 }): JSX.Element {
-  const { name, busy, onCancel, onConfirm, t } = props
+  const { name, busy, scope, onCancel, onConfirm, t } = props
+  const fresh = scope === 'session'
   return (
     <Overlay label={t('reset.title')} onClose={onCancel}>
       <div className="awu-dialogHead">
         <IconAlert size={16} />
-        <span>{t('reset.confirmTitle', { name })}</span>
+        <span>{fresh ? t('reset.sessionTitle', { name }) : t('reset.confirmTitle', { name })}</span>
       </div>
       <div className="awu-dialogBody">
-        <div className="awu-confirmText">{t('reset.confirmBody')}</div>
+        <div className="awu-confirmText">{fresh ? t('reset.sessionBody') : t('reset.confirmBody')}</div>
       </div>
       <div className="awu-dialogFoot">
         <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
         <button type="button" className="awu-btn" data-kind="danger" onClick={onConfirm} disabled={busy}>
-          {busy ? t('common.busy') : t('reset.confirmWord')}
+          {busy ? t('common.busy') : (fresh ? t('reset.sessionWord') : t('reset.confirmWord'))}
         </button>
       </div>
     </Overlay>
@@ -704,7 +693,7 @@ function CharacterDetailView(props: {
 }): JSX.Element {
   const { detail, loading, error, relation, live, busy, t, onBack, onRetry, onActivate, onDeactivate, onDelete, onEdit } = props
 
-  if (loading) return <Skeleton />
+  if (loading) return <Skeleton label={t('common.loading')} />
 
   // 加载失败：detail 已被清空，必须显式给出「空态 + 重试」，否则只会永远转圈
   if (detail === undefined) {
@@ -787,7 +776,7 @@ function CharacterDetailView(props: {
             {(relation?.lastActive ?? detail.session?.last_ts ?? '') !== '' && (
               <span className="awu-heroMetaItem" data-role="active">
                 {t('detail.lastActive')}
-                <b>{relativeDay(String(relation?.lastActive ?? detail.session?.last_ts ?? ''))}</b>
+                <b>{relativeDay(String(relation?.lastActive ?? detail.session?.last_ts ?? ''), t)}</b>
               </span>
             )}
           </div>
@@ -941,7 +930,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
   const [detailError, setDetailError] = useState('')
 
-  const [dialog, setDialog] = useState<'' | 'new' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll'>('')
+  const [dialog, setDialog] = useState<'' | 'new' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
   const [deleteTarget, setDeleteTarget] = useState('')
   const [editTarget, setEditTarget] = useState<DiaryTarget | undefined>(undefined)
   const [dialogError, setDialogError] = useState('')
@@ -951,10 +940,36 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 角色卡编辑器
   const [editing, setEditing] = useState(false)
   const [editError, setEditError] = useState('')
+  // 编辑器草稿是否脏：面板收起/卸载前必须据此拦一道，否则一屏编辑无声丢失
+  const [editorDirty, setEditorDirty] = useState(false)
+  // 递增信号：面板要求编辑器「走一遍未保存确认」（点入口/点遮罩时用）
+  const [editorCloseSignal, setEditorCloseSignal] = useState(0)
+
+  // 编辑器关掉后清脏标记，避免下次打开误拦
+  useEffect(() => {
+    if (!editing) setEditorDirty(false)
+  }, [editing])
+
+  // 有未保存草稿时拦一下页面关闭/刷新（宿主关窗也走 beforeunload）
+  useEffect(() => {
+    if (!open || !editing || !editorDirty) return undefined
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [open, editing, editorDirty])
 
   const buttonRef = useRef<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const aliveRef = useRef(true)
+
+  // 面板本身也要有焦点语义：打开时把焦点送进去、Tab 不跑回宿主、关闭后还回触发按钮。
+  // 编辑器/弹层打开时它们的陷阱会压在栈顶，这里不用额外处理。
+  useRestoreFocus(open)
+  useInitialFocus(panelRef, open)
+  useFocusTrap(panelRef, open)
 
   useEffect(() => {
     aliveRef.current = true
@@ -999,22 +1014,29 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     if (open) markGuideSeen()
   }, [open])
 
+  const detailSeq = useRef(0)
+  /** 最后一次静默刷新的数据签名：相同就跳过 setState，避免 5 秒一次的无意义整树渲染。 */
+  const quietSig = useRef('')
+
   const loadDetail = useCallback(async (name: string): Promise<void> => {
     if (name === '') { setDetail(undefined); setDetailError(''); return }
+    // 快速切换角色时，旧请求的响应可能晚到：只认最后一次发起的那个
+    const seq = detailSeq.current + 1
+    detailSeq.current = seq
     setDetailLoading(true)
     try {
       const body = await fetchCharacter(name)
-      if (!aliveRef.current) return
+      if (!aliveRef.current || seq !== detailSeq.current) return
       setDetail(body)
       setDetailError('')
       setError('')
     } catch (e) {
-      if (!aliveRef.current) return
+      if (!aliveRef.current || seq !== detailSeq.current) return
       setDetail(undefined)
       // 不再顶到全局 error：这条错误属于详情区，由 CharacterDetailView 就地展示 + 重试
       setDetailError(errorText(e))
     } finally {
-      if (aliveRef.current) setDetailLoading(false)
+      if (aliveRef.current && seq === detailSeq.current) setDetailLoading(false)
     }
   }, [])
 
@@ -1036,6 +1058,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     try {
       const [chars, ov] = await Promise.all([fetchCharacters(), fetchOverview().catch(() => undefined)])
       if (!aliveRef.current) return
+      // 5 秒轮询：数据没变就别 setState（否则整棵树每 5 秒白重渲染一次）
+      const signature = JSON.stringify([chars, ov?.active ?? null])
+      if (signature === quietSig.current) return
+      quietSig.current = signature
       setList(chars)
       if (ov !== undefined) {
         setOverview(ov)
@@ -1081,7 +1107,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         || path.includes(layerRef.current as EventTarget)
         || (event.target instanceof Node
           && ((panelRef.current?.contains(event.target) ?? false) || (layerRef.current?.contains(event.target) ?? false)))
-      if (!inside) setOpen(false)
+      // 蒸馏弹层也是 portal 到 body 的 `.awu-scrim`：点它不算「点外部」，
+      // 否则点弹层里的任何按钮都会先把整个面板关掉（主 CTA 直接不可用）。
+      const inNestedLayer = event.target instanceof Element && event.target.closest('.awu-scrim') !== null
+      if (inside || inNestedLayer) return
+      // 编辑器有未保存草稿：不能直接收起面板，转成「走编辑器确认」
+      if (editing && editorDirty) { setEditorCloseSignal(n => n + 1); return }
+      setOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       // 编辑器打开时 dialog 恰好是空串 —— 必须显式排除 editing，否则 Esc 会先关面板、
@@ -1097,7 +1129,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [open, dialog, editing])
+  }, [open, dialog, editing, editorDirty])
 
   // -------------------------------------------------------- 动作
   const onActivate = (name: string): void => { void run(() => activateCharacter(name)) }
@@ -1108,7 +1140,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     void run(async () => {
       await deleteCharacter(target, withMemory)
       if (detailName === target) { setDetailName(''); setDetail(undefined) }
-      setNotice(withMemory ? '已连同记忆一起删除' : '已删除角色卡')
+      setNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'))
     })
   }
   const onCreate = (name: string, role: string, blurb: string): void => {
@@ -1125,7 +1157,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     void run(() => setInteractionMode(mode)).then(ok => { if (ok) setDialog('') })
   }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
-  const openDialog = (which: 'new' | 'mode' | 'forget' | 'resetAll' | ''): void => { setDialogError(''); setDialog(which) }
+  const openDialog = (which: 'new' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
   // -------------------------------------------------------- 维护动作（新接口）
   const onEditDiary = (text: string): void => {
@@ -1153,8 +1185,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       setDialog('')
       setNotice(
         result.changed
-          ? `已忘记：${result.diary.removedTimeline.length + result.diary.removedNotes.length} 条日记、${result.session.removedRecent.length} 条会话记录、${result.card.removed.length} 处角色卡`
-          : '没有找到包含该关键词的记忆。',
+          ? t('forget.done', {
+            diary: result.diary.removedTimeline.length + result.diary.removedNotes.length,
+            session: result.session.removedRecent.length,
+            card: result.card.removed.length,
+          })
+          : t('forget.none'),
       )
       return reload()
     }).catch((error: unknown) => {
@@ -1167,8 +1203,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     setDialogError('')
     void resetSession(scope).then(result => {
       setDialog('')
-      if (scope === 'session') setNotice(`已全新开始，保留 ${result.diaryKept ?? 0} 条日记。`)
-      else setNotice(`已彻底重置，清除 ${result.diaryRemoved ?? 0} 条日记。`)
+      if (scope === 'session') setNotice(t('reset.sessionDone', { n: result.diaryKept ?? 0 }))
+      else setNotice(t('reset.allDone', { n: result.diaryRemoved ?? 0 }))
       return reload()
     }).catch((error: unknown) => {
       setDialogError(errorText(error))
@@ -1223,6 +1259,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const onNextOpening = (): void => {
     if (liveName === '') return
     setBusy(true)
+    setOpeningNote('')
     void nextOpening(liveName).then(result => {
       if (result.needGenerate === true) setOpeningNote(t('opening.needGenerate'))
       else if (result.history) setOpeningNote(t('opening.history'))
@@ -1245,7 +1282,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   // 启用中的角色变了就重拉一次关系档案（放在 liveName 之后，避免 TDZ）
   useEffect(() => {
-    if (liveName === '') { setRelation(undefined); return undefined }
+    if (liveName === '') { setRelation(undefined); setOpeningNote(''); return undefined }
+    setOpeningNote('')
     let cancelled = false
     void fetchRelation(liveName)
       .then(state => { if (!cancelled && aliveRef.current) setRelation(state) })
@@ -1324,7 +1362,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         aria-label={wide ? t('badge.open') : `${t('badge.open')} · ${badgeName}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          // 已打开时再点入口 = 收起；但编辑器有未保存草稿就先问一句
+          if (open && editing && editorDirty) { setEditorCloseSignal(n => n + 1); return }
+          setOpen(!open)
+        }}
       >
         <span className="awu-mark" aria-hidden="true">
           {live ? initialOf(liveName) : <IconMask size={14} />}
@@ -1365,6 +1407,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               source={sourceOf(currentDetail.card)}
               busy={busy}
               error={editError}
+              closeSignal={editorCloseSignal}
+              onDirtyChange={setEditorDirty}
               onCancel={() => setEditing(false)}
               onSave={onSaveCard}
               t={t}
@@ -1425,10 +1469,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 <div className="awu-sigilName">{liveName}</div>
                 <div className="awu-sigilMeta">
                   {t('active.since')}
-                  {active.activatedAt !== undefined ? ` ${relativeDay(String(active.activatedAt))}` : ''}
+                  {active.activatedAt !== undefined ? ` ${relativeDay(String(active.activatedAt), t)}` : ''}
                   {' · '}
                   {active.mode === 'text' ? t('active.mode.text') : t('active.mode.action')}
                 </div>
+                {openingNote !== '' && (
+                  <div
+                    role="status"
+                    style={{ fontSize: 11, color: 'var(--awu-ink-mute)', marginTop: 2, lineHeight: 1.4 }}
+                  >
+                    {openingNote}
+                  </div>
+                )}
               </div>
               <div className="awu-sigilBtns">
                 <button
@@ -1543,9 +1595,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               </div>
 
               <div className="awu-pane">
-                {loading && <Skeleton shape="cards" />}
+                {loading && <Skeleton shape="cards" label={t('common.loading')} />}
 
-                {!loading && roster.length === 0 && (
+                {/* 接口失败时不要再显示「角色簿还是空的」——那会把错误误导成「你没建卡」 */}
+                {!loading && error === '' && roster.length === 0 && (
                   <div className="awu-empty" data-kind="empty">
                     <span className="awu-emptyMark"><IconBook size={20} /></span>
                     <span className="awu-emptyTitle">{t('roster.empty.title')}</span>
@@ -1617,7 +1670,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   <span className="awu-relationMeta">
                     {relation !== undefined ? t('relation.turns', { n: relation.turnCount }) : ''}
                     {relation !== undefined && relation.lastActive !== ''
-                      ? ` · ${relativeDay(relation.lastActive)}`
+                      ? ` · ${relativeDay(relation.lastActive, t)}`
                       : ''}
                   </span>
                 </div>
@@ -1657,7 +1710,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                       type="button"
                       className="awu-btn"
                       data-size="sm"
-                      onClick={() => { setDialogError(''); onReset('session') }}
+                      onClick={() => openDialog('resetSession')}
                       disabled={busy}
                     >
                       {t('reset.session')}
@@ -1714,7 +1767,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                       <Field
                         key={item.name}
                         k={item.name}
-                        v={`${t('roster.memory', { n: item.memoryCount })}${relativeDay(item.lastActive) !== '' ? ` · ${relativeDay(item.lastActive)}` : ''}`}
+                        v={`${t('roster.memory', { n: item.memoryCount })}${relativeDay(item.lastActive, t) !== '' ? ` · ${relativeDay(item.lastActive, t)}` : ''}`}
                       />
                     ))}
                 </Section>
@@ -1782,8 +1835,19 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             <ResetAllDialog
               name={liveName}
               busy={busy}
+              scope="all"
               onCancel={() => setDialog('')}
               onConfirm={() => onReset('all')}
+              t={t}
+            />
+          )}
+          {dialog === 'resetSession' && (
+            <ResetAllDialog
+              name={liveName}
+              busy={busy}
+              scope="session"
+              onCancel={() => setDialog('')}
+              onConfirm={() => onReset('session')}
               t={t}
             />
           )}
