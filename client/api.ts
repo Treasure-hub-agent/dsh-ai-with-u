@@ -18,6 +18,8 @@ export const ROUTES = {
   overview: '/overview',
   characters: '/characters',
   character: (name: string) => `/character?name=${encodeURIComponent(name)}`,
+  /** 只读：本轮注入提示词的快照（宿主 host-core 提供，未就绪时 404 → ApiUnavailableError）。 */
+  preview: '/preview',
 
   activate: '/activate',
   deactivate: '/deactivate',
@@ -288,6 +290,49 @@ export interface OpeningResult {
 /** 总览：启用态 + 全局统计。 */
 export function fetchOverview(): Promise<Overview> {
   return request<Overview>(ROUTES.overview)
+}
+
+// ---------------------------------------------------------------- 注入预览（只读）
+
+/**
+ * 一段注入内容。
+ *
+ * 段 id 约定（宿主侧给的，至少这几段）：
+ * `aiwu:baseline`（L0 底线）/ `aiwu:discipline`（纪律包）/ `aiwu:active-character`（L1 角色设定）/
+ * `aiwu:lore`（世界书命中）/ `aiwu:clock`（时间差）。`order` 是拼进提示词的位置。
+ */
+export interface PreviewSegment {
+  id: string
+  /** 拼装顺序（升序） */
+  order: number
+  /** 给面板看的中文标签；宿主没给时界面回退用 id */
+  label: string
+  /** 该段字符数 */
+  chars: number
+  /** 正文；未启用角色时为空串 */
+  text: string
+}
+
+/** `GET /preview` 的返回：当前会话下一次请求会注入什么。 */
+export interface PreviewData {
+  ok: true
+  active: { enabled: boolean; character?: string }
+  segments: PreviewSegment[]
+  /** 全部段合计字符数 */
+  total: number
+  /** 交互模式（text / text+action），老宿主可能没有 */
+  mode?: string
+  /** 纪律包档位（off / lite / full），老宿主可能没有 */
+  discipline?: string
+}
+
+/**
+ * 读本轮注入快照（只读，不改任何状态）。
+ *
+ * 宿主接口未就绪时抛 `ApiUnavailableError`：面板据此显示「接口还没好」而不是一片红字。
+ */
+export function fetchPreview(): Promise<PreviewData> {
+  return request<PreviewData>(ROUTES.preview)
 }
 
 /** 角色簿：全部角色及其卡片、记忆条数。 */

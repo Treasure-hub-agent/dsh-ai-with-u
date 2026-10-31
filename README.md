@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-720%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-784%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -106,10 +106,14 @@ flowchart LR
 
 四个分区：
 
-- **角色簿** — 卡片墙、导入角色卡、详情页、完整编辑
-- **日记** — 时间线、逐条改写、危险区
+- **角色簿** — 卡片墙、导入角色卡、注入预览、详情页、完整编辑
+- **日记** — 时间线、关键词搜索、按月折叠、导出 markdown、逐条改写、危险区
 - **统计** — 角色数、记忆条数、对话轮次
 - **指南** — 首次打开时的使用说明
+
+**注入预览**在角色簿详情的「预览」入口：列出此刻真正会进系统提示词的五段（L0 底线 / L0.5 纪律包 / L1 角色 / 世界书 / 时间差），每段给段名与字符数，下面是逐段正文，最后给总字符数。它显示的是宿主那一刻的真实渲染结果（`GET /preview`，纯只读：不刷新缓存、不写盘），不是面板自己另算的一份——两套算法的预览迟早会和实际注入对不上。
+
+日记页支持**记忆回顾**：关键词搜索（标题、正文、日期都能命中）、按月份折叠，以及把当前角色的日记导出成 markdown 文件（浏览器里直接下载，不经过宿主）。
 
 角色簿左栏顶部并排两枚同级按钮：**蒸馏角色卡**（从作品里蒸一张）和 **自创角色卡**（从零写一张）。旁边是对话模式的胶囊「纯文本 / 文本 + 动作」，当前值高亮，点一下立刻生效——不需要先启用角色，因为模式是偏好不是角色属性。
 
@@ -203,6 +207,20 @@ New-Item -ItemType Junction `
 - **酒馆卡导入**：支持 `.png`（`tEXt` / `iTXt` 的 `ccv3`、`chara` 段）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 自动升到 V3）
 - **世界书超限**：不再拒绝导入或保存，改为返回 warnings（实际字数 + 上限）并在预览里逐条列出。世界书按需注入，超出 12 条 / 6000 字预算的部分不会进提示词——书是完整的，只是这一轮用不到那么多
 
+### 文件拖放归谁管
+
+**面板打开期间，文件拖放归面板处理。**
+
+DSH 的聊天区有一个「文件或图片拖动到此处即可添加」的拖放区，它是文档级的：文件在页面任何位置松手，都会被它接住当附件。所以插件打开面板后会接管文件拖放：
+
+- 拖进「导入角色卡」的虚线框 → 走导入预览（不写盘，确认才保存）
+- 拖到面板里其它地方 → 提示「把卡拖到虚线框里」，**不放行给聊天区**
+- 拖进面板之外（聊天区自己）→ 正常添加附件，插件不管
+
+为什么这么较真：v0.3.0 真机上出现过「把角色卡拖到面板上，卡被当成附件发进了对话」。宁可拦下来给一句提示，也不能让卡文件混进聊天上下文。
+
+> 插件同时会替聊天区复位它的拖放状态（拖完主动补一个 `dragend`）。所以关掉面板之后，聊天区的拖放应该和平时一样——如果你发现关面板后拖文件进聊天区没反应，那是 P0，请报。
+
 ---
 
 ## 数据存储
@@ -266,10 +284,10 @@ AIWU_TRUSTED_HOSTS=my.tunnel.example
 
 另有一个**条件挂载**的 `awu_card_save`：只在点「蒸馏角色卡」后的两小时内、且保存一次后自动失效。平时模型拿不到写卡能力。
 
-### REST 接口（23 条，`/_dsh/ai-with-u/`）
+### REST 接口（24 条，`/_dsh/ai-with-u/`）
 
 ```
-overview  characters  character  character/save  character/import  character/delete
+overview  preview  characters  character  character/save  character/import  character/delete
 activate  deactivate  mode  discipline  relation  relation/set  opening/next  opening/state
 diary/save  diary/edit  forget  session/reset  session/commit
 distill/flow  distill/arm  distill/disarm  distill/state
@@ -277,12 +295,16 @@ distill/flow  distill/arm  distill/disarm  distill/state
 
 `/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
+`GET /preview` 是**纯只读**快照：返回 `{ active, mode, discipline, segments[] }`，`segments` 永远五段（`id` / `order` / `label` / `chars` / `text`；未启用角色时 `text: ''`、`chars: 0`）。文本走 `PromptController` 的真实渲染路径，不在预览里另拼一份——拼第二份等于给「预览与真实注入漂移」开口子。
+
 > 世界书的改动**必须随 `ccv3` 发**：只发 `card` 时后端以磁盘上的旧卡为底重投影，`character_book` 按原卡保留——改动会被静默吞掉，还会提示保存成功。
 
 `awu_relation` 的口径是「**查看不写回**」：用户只是问「关系如何」时只读档位、不改档；只有里程碑事件（第一次约定、第一次争吵、称呼改变、表白）才带 `set` 写回，并在 `relation_log` 留一条。对话里不出现「好感度 +1」这类数值。
 
 ### 面板与提示词
 
+- **注入预览** —— 五段真实渲染的段名 / 字符数 / 正文 + 总字符，纯只读快照
+- **记忆回顾** —— 日记关键词搜索、按月折叠、导出 markdown
 - **导入角色卡** —— 角色簿左栏入口，吃 PNG / CHARX / JSON，先预览后落盘；世界书超限只警告不拦
 - **自创角色卡** —— 三格表单落骨架卡，可选「让 AI 补全人设」（走当前会话，AI 先问 3–5 个问题）
 - **世界书编辑** —— 角色卡编辑器第 11 分区，条目增删改 + 体检
@@ -295,21 +317,21 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 720 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 784 项）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：14 组契约（33 项；后端做了前端没接 / 验收项回归）
+npm run verify:wiring    # 接线体检：17 组契约（42 项；后端做了前端没接 / 验收项回归）
 npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 软警告（254 项）
 npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
 npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
-npm run verify:session   # 会话、指令、纪律包与关系落盘（184 项）
-npm run verify:host      # 真实 cordis 宿主装配（55 项）
+npm run verify:session   # 会话、指令、纪律包、关系与预览只读（212 项）
+npm run verify:host      # 真实 cordis 宿主装配（82 项）
 npm run typecheck:client # 只查浏览器侧类型
 ```
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 720 = 上面九套自检通过项之和，失败项必须为 0（`bundle 9 + wiring 33 + verify 15 + tavern 254 + distill 121 + import 49 + session 184 + host 55`；`verify-wiring` 里还含 0 项 skip 才算全绿）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的 784 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 42 + verify 15 + tavern 254 + distill 121 + import 49 + session 212 + host 82`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 

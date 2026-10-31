@@ -370,7 +370,7 @@ dsh-ai-with-u/
 │   ├── prompt.ts         # L0/L1 分层注入、时间差档位
 │   ├── store.ts          # 存储层（卡/日记/会话/索引）
 │   ├── tools.ts          # 8 个 awu_* 工具
-│   └── web.ts            # 21 条 REST 路由
+│   └── web.ts            # 24 条 REST 路由
 ├── client/               # 浏览器侧（React）
 │   ├── entry.tsx         # 插件入口（inject/apply/slot 注册）
 │   ├── index.tsx         # 面板主体
@@ -480,9 +480,9 @@ dsh-ai-with-u/
 | `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（23 条，`/_dsh/ai-with-u/`）
+### REST 接口（24 条，`/_dsh/ai-with-u/`）
 
-`overview` `characters` `character` `character/save` `character/import` `character/delete`
+`overview` `preview` `characters` `character` `character/save` `character/import` `character/delete`
 `activate` `deactivate` `mode` `discipline` `relation` `relation/set`
 `opening/next` `opening/state` `diary/save` `diary/edit` `forget`
 `session/reset` `session/commit` `distill/flow` `distill/arm` `distill/disarm` `distill/state`
@@ -502,7 +502,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 720 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 784 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -519,7 +519,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **720 项**（截至 v0.3.0 验收轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **784 项**（截至 v0.3.x 预览轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -692,7 +692,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
 | `awu_diary_write` 支持 `topic` / `mood`（同事务写 session） | `src/tools.ts`、`src/store.ts` | 盘活 L1 的两个死字段 |
 | 面板「导入角色卡」（PNG / CHARX / JSON，预览不落盘、同名二次确认）+ 编辑器第 11 分区「世界书」 | `client/index.tsx`、`client/card-editor.tsx`、`client/lorebook-editor.tsx`（新）、`client/text.ts` | 后端 `POST /character/import` 与世界书数据层都在，界面零入口 = 白做 |
 | 清死路由 `ROUTES.distillParse` / `parseDistillCard` | `client/api.ts` | 宿主从没注册这条路由，留着就是永远抛 `ApiUnavailableError` |
-| 新增 `scripts/verify-wiring.mjs`（接线体检，14 组断言：8 组接线 + 6 组验收回归，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
+| 新增 `scripts/verify-wiring.mjs`（接线体检，17 组断言：8 组接线 + 6 组验收回归 + 3 组预览轮，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
 
 ### 为什么要一个「接线体检」脚本
 
@@ -704,7 +704,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
    **全项目零引用**，世界书改不了。
 
 这两种状态下 `tsc`、esbuild、七套自检（当时还没有 `verify-wiring`）**全是绿的**——因为类型检查只问「类型对不对」，不问「有没有人调用」。
-`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 14 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
+`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 17 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
 纪律包名字 order 长度 / `awu_mode` 与 `awu_relation.set` / `SessionState` 新字段 / 世界书改动是否随 `ccv3` 发出去 /
 **产物里的纪律包文本与源码逐字一致**）。
 拿不准的用 `[skip]`，不误报——红点必须都是真问题，否则没人看。
@@ -886,3 +886,180 @@ document 级：dragover/drop    → preventDefault() + stopPropagation()   // �
 真机点击链路（导入 → 预览 → 同名覆盖 → 世界书编辑 → 保存回读 → 提示条自动消失）、
 `awu_mode` / `awu_relation.set` 在真实模型对话里的调用时机、AI 补全端到端（真实模型是否按 `flow-create.md` 先问 3–5 个问题、
 是否按给定名字覆盖）、桌面 profile 重启加载。
+
+---
+
+## 十二、2026-10-31 · 预览轮（拖放状态机 P0 / 注入预览 / 记忆回顾）
+
+这轮的 P0 是**我们自己的修复造出来的**：上一轮为了不让角色卡被当附件发进对话，把 `drop` 用
+`stopPropagation` 吞掉了；结果宿主聊天区的拖放遮罩永久卡在「文件或图片拖动到此处即可添加」，
+必须再拖一次文件才消失。这一节把它记成先例，因为它的形状非常通用。
+
+### 拖放卡死的完整根因链
+
+先从 `app.asar` 里反查宿主实现（`@deepseek-ai/dsh-client-ui-attachment/lib/client.js` 的
+`installDocumentDropEvents`），拿到的事实是——**它是一个文档级深度计数器**：
+
+```js
+const reset = () => { dragDepth.current = 0; setDragActive(false) }   // 遮罩由 setDragActive 驱动
+onDragEnter: 文件类 → preventDefault(); dragDepth += 1; setDragActive(true)
+onDragLeave: 文件类 → dragDepth = max(0, dragDepth - 1); 归零则 setDragActive(false)
+onDrop:      文件类 → preventDefault(); reset(); canAcceptDrop 时收文件
+window.addEventListener('dragend', reset)     // ← 唯一的「拖拽结束」复位口
+```
+
+文档级监听、**冒泡阶段**（没有 `true`），所以我们的 capture + `stopPropagation` 能整段拦死它。
+于是链条是：
+
+1. 用户拖文件进来 → 宿主的 `onDragEnter` 跑过一次 → `dragDepth = 1`、`dragActive = true` → 遮罩亮
+2. 用户在面板上松手 → 我们的 capture 监听 `preventDefault + stopPropagation` → 宿主的 `onDrop` **根本不跑** → 没有 `reset()`
+3. 系统拖入的文件**没有源元素**（拖动源在资源管理器里，不在页面上）→ 浏览器**不派发 `dragend`**
+   → 宿主挂在 `window` 上的那个 `reset` 也等不到
+4. ⟹ 计数器永远停在 1、`dragActive` 永远 true → 遮罩卡死。再拖一次文件时因为有了新的 `dragend`/`drop` 才被复位，所以看起来「再拖一次就好了」
+
+**这四步里少任何一步，bug 都不会发生**：如果我们不吞 drop（第 2 步不存在）、或者系统拖入也派发 dragend（第 3 步不存在），
+都不会卡。这类 bug 的特征是——**每一层单独看都对，串起来才炸**。
+
+### 修法（三条，缺一条都不算真闭环）
+
+1. **吞 drop 之后主动补一个复位事件**：`window.dispatchEvent(new Event('dragend'))`。
+   宿主监听的就是 `window` 的 `dragend`，派一个合成的过去它就 `reset()` 了。
+2. **连 `dragenter` 一起在捕获阶段拦下**（只拦文件类）：让计数器**根本不 +1**，遮罩从没亮过，也就不需要复位。
+   这条是「釜底抽薪」，第 1 条是兜底，两条都要有——只做第 2 条的话，`dragenter` 与 `drop` 之间的
+   `dragleave` 顺序、以及别人（宿主自己的其它视图）先一步 +1 的情况仍然会把状态带脏。
+3. **监听必须随面板卸载**：`useEffect` 的守卫写 `if (!open) return`、cleanup 里 `removeEventListener` 并**再派一次 `dragend`**
+   （覆盖「拖进来但没 drop 就直接关面板」这条路径）。
+
+> ⚠️ 第 3 条是这轮最容易写歪的地方，也是比原 bug 更危险的失败模式：
+> 如果 document 监听**常驻**（不随 open 卸载）、又带 `capture + stopPropagation`，那么面板关掉之后
+> **宿主再也收不到任何文件拖放**——聊天区从此加不了附件，而且用户完全不知道是插件干的。
+> 卡遮罩是「看得见的坏」，永久拦死是「看不见的坏」。
+
+> 🔎 反查结论与脆弱点：宿主当前只有**一处** `window.addEventListener("dragend", reset)`
+> （`dsh-client-ui-attachment` 的附件视图），且 `reset` 不读事件负载，所以派发 `new Event('dragend')`
+> （而非 `DragEvent`）是安全且精准的。但这条修复**依赖宿主把复位挂在 `window` 上**——
+> 哪天 DSH 改成元素级监听，合成事件就递不到，需要重新核对 `installDocumentDropEvents` 的实现。
+> 升级 DSH 之后如果「拖完卡遮罩卡死」复发，第一个要看的就是这个函数。
+
+### 可复用判据
+
+> **当你准备吞掉一个由第三方状态机驱动的原生事件时，必须同时补上它的「复位事件」。**
+
+展开成三条可操作的检查：
+
+- 先读**对方**的状态机：谁 ++、谁 --、谁 reset、reset 挂在哪一层（`document` / `window` / 元素）与哪个阶段（捕获 / 冒泡）
+- 你的拦截会让它的哪个状态**停在中间**？停在中间的那个状态，谁来复位？
+- 复位事件是否**必然到达**？系统级拖入（从资源管理器/桌面拖文件）**没有源元素**，浏览器不派发 `dragend`——
+  这正是「本地开发用页面内元素拖拽测不出来、真机一拖就卡」的原因
+
+同类先例：`change`/`input` 之于受控组件、`pointerup` 之于按下态、`transitionend` 之于动画类名。
+**吞一半 = 对方永远等不到另一半。**
+
+### 这一轮另外两件事
+
+**注入预览（`GET /preview`）**：面板要能回答「此刻到底注入了什么、占了多少字」。
+实现要点是**只读 + 复用真实渲染路径**：`prompt.preview()` 从 `this.state` / `this.cache` 现读，
+不 `refresh`、不 `notify`、不写盘；五段（`aiwu:baseline` / `aiwu:discipline` / `aiwu:active-character` /
+`aiwu:lore` / `aiwu:clock`）按 order 升序，永远五段（未启用时 `text: ''`、`chars: 0`）。
+**绝不在预览里另拼一份文本**——拼第二份等于给「预览与真实注入漂移」开口子，而这正是本轮想解决的问题类型。
+
+**记忆回顾（客户端）**：日记页加关键词搜索、按月折叠、导出 markdown（`Blob` + `URL.createObjectURL` + `a.download`，
+浏览器侧生成、不经宿主）。导出走客户端而不是新增后端接口的原因：数据 `GET /character` 已经全给了，
+再加一条只读接口只是把同样的字节绕一圈。
+
+### 这一轮的断言（verify-wiring [15]–[17]）
+
+- `[15]` 预览器接线：`web.ts` 有 `/preview` 路由 → 预览走真实段渲染（区块里出现 `SECTION_*` / `render*Section` / `renderL1`）
+  → client 有 `/preview` 封装且真被组件调用 → **组件用到的 `preview.*` 文案 key 在字典里中英各一**
+- `[16]` 宿主拖放复位（**这条是给本轮 P0 上锁**）：
+  - `dispatchEvent(new Event('dragend'))` / `resetHostDropState()` 的**调用点 ≥ 2**（吞 drop 路径 + 关闭 cleanup）
+  - `dragenter` 在**捕获阶段**被监听（`addEventListener('dragenter', …, true)` 或 `{capture:true}`）
+  - document 监听随面板卸载：effect 有 `open`/`dialog` 守卫 **且** 有 `removeEventListener` 清理
+- `[17]` 记忆回顾：导出要同时有「文案 key」**和**真正生成文件的代码（`new Blob(` / `URL.createObjectURL` / `a.download`），
+  搜索与按月折叠各自要有可识别的文案 key 或实现痕迹
+
+`[15]` 的第四条（文案 key 完整性）是这轮现加的，起因是当场抓到的真问题：`client/preview.tsx` 落地时用了 14 个
+`preview.*` key，而 `client/text.ts` 里一个都没有——`makeTranslator` 找不到就回落成 key 本身，于是整个预览面板
+会裸显 `preview.activeLabel` 这种字样。类型检查、构建、其余断言**全绿**，因为「组件接了」和「文案接了」是两件事。
+这条断言现在是常驻检查：用了多少 key、字典里缺哪些，直接列出来。
+
+`[16]` 的第 3 条检查是本轮唯一一条**「防我们自己的修复比 bug 更糟」**的断言——它判的不是功能有没有，
+而是失败模式有没有被关掉。
+
+### 本轮落地的三个新文件
+
+| 文件 | 职责 | 为什么单独抽出来 |
+|---|---|---|
+| `client/dragdrop.ts` | `dragHasFiles` / `isInsideOurLayers` / `resetHostDropState` / `swallowFileDrag` | 面板、导入弹层、蒸馏弹层都要「吞文件拖放 + 复位宿主」，写两份早晚漂移；把宿主实现还原写进文件头，下一个维护者不用再翻 asar |
+| `client/preview.tsx` | 注入预览展示（五段 / 字符数 / 总字符） | 纯展示、不写盘；文案 key 前缀 `preview.*` |
+| `client/diary-review.tsx` | 日记搜索 / 按月折叠 / 导出 markdown | 导出用 `Blob` + `URL.createObjectURL` + `a.download`，浏览器侧生成、不经宿主 |
+
+> 拖放复位的落地是**三层**而不是两层：吞 drop 后补 `dragend`、捕获阶段拦 `dragenter`，外加
+> **卸载兜底** `useEffect(() => () => resetHostDropState(), [])`。三处调用点分别是 document 捕获监听的
+> drop 分支、`open` effect 的 cleanup、组件卸载。多调没有副作用（宿主 `reset` 幂等，只把深度归零 + 关遮罩）。
+
+### 集成验收记录（G4，九套全量）
+
+`npm run build` 一次过，**784 项通过 / 0 失败**（日志 ✓784 / ✗0，`exit=0`）。build 串 11 步 = `tsc`×2 + esbuild + 8 个自检脚本：
+
+| 自检 | 通过项 | 与上轮 |
+|---|---|---|
+| `verify-bundle` | 9 | — |
+| `verify-wiring` | 42 | 33 → 42（17 组） |
+| `verify`（产物形状 / 新鲜度 / 孤儿产物） | 15 | — |
+| `verify-tavern` | 254 | — |
+| `verify-distill` | 121 | — |
+| `verify-import` | 49 | — |
+| `verify-session` | 212 | 184 → 212（+28，含预览只读） |
+| `verify-host` | 82 | 55 → 82（+27，含五段预览） |
+
+产物抽查 24 项全命中（`lib/client.js` 291.6 KB，9995 处 `\uXXXX`、0 个未转义汉字）：
+`new Event("dragend")`、`console.warn('复位宿主拖放状态失败')`、`closest(".awu-scrim, .awu-panel")`、
+捕获阶段的 `dragenter`/`drop` 监听、`removeEventListener`、`/preview`、`preview.title`/`preview.activeLabel`/
+`preview.discipline.full`/`preview.noSegments`、`diary.search`/`diary.export`/`diary.month`、
+`new Blob([`、`createObjectURL`、`.download`、「-日记-」文件名；`lib/prompt.js`（31.0 KB，tsc 保留 UTF-8）
+里 `aiwu:discipline` / 禁止词库 / preview 都在。
+
+> 🔍 抽查口径的又一课：`resetHostDropState` / `swallowFileDrag` / `isInsideOurLayers` 这些**函数名在产物里查不到**
+> ——esbuild `minify: true` 会改成 `ha` / `dt` 这类短名。第一次抽查报了 5 项 MISS，全是压缩改名，不是缺功能。
+> 正确的查法是**查行为标记与文案 key**（事件构造、class 选择器串、文案 key、`new Blob(` 之类），不查我们自己起的函数名。
+
+### 三件事判定
+
+**① 拖放修复：四处路径全覆盖，[16] 仍绿。**
+吞文件拖放的路径一共**五处**，全部收敛到 `swallowFileDrag`（内部 drop 必复位）：
+导入虚线框、弹层遮罩（`Overlay`）、面板根（另挂 `panel.dropCard` 提示）、蒸馏弹层、以及弹层打开时容器外的漏网地区
+（document 捕获 + `resetHostDropState`）。关闭路径是 `open` effect 的 cleanup（`removeEventListener` ×3 + 复位）
+加组件卸载兜底。`[16]` 三条检查 build 后复跑仍全绿。
+
+面板开着但**没弹层**时，容器外的 `dragover`/`drop` 不拦（`if (dialog !== '')` 才挂）——聊天区照常收文件。
+容器内的 `dragenter` 仍被捕获阶段掐掉，所以拖到面板上不会点亮宿主遮罩。
+
+**② 注入预览：五段真实渲染，未启用全空。**
+`verify-host` 新增的预览断言直接对宿主渲染结果：未启用时 `segments.length === 5`、每段 `text === ''` 且 `chars === 0`、
+`total === 0`、段 id 顺序固定为 `baseline → discipline → active-character → lore → clock`；启用后用真实段文本比对。
+只读性也被钉住：`GET /preview` 之后 `session.json` 的 mtime 与 `_active.json` / `session.json` 的**字节**都不变
+（不 refresh、不 notify、不写盘）。
+
+**③ 记忆回顾：搜索 + 按月折叠 + 导出全部。**
+搜索对时间线与心情札记都扫，大小写与全半角归一；搜索时所有月份强制展开，且改写仍按**原始下标**定位
+（不会因为过滤而改错行）。月标题形如「2026 年 10 月」，默认只展开最近一个月。
+导出走 `diaryToMarkdown` 逐字对齐 `store` 的 `diary.md` 结构（两空格缩进、`**心情札记**`、`> 引用行`），
+**导的是全部条目、不随搜索过滤**——备份语义，能被 store 直接读回。
+
+### 主人口径确认（本轮拍板，实现已符合）
+
+| 裁决 | 现状 | 结论 |
+|---|---|---|
+| 面板开着但没弹层时，容器外 drop 不拦（聊天区照常收文件） | `if (dialog !== '')` 才挂容器外的 `dragover`/`drop` 拦截 | **保持现状**，不动 |
+| 日记导出导全部、不按搜索过滤 | `onExport` 用 `entries`（全部），不用 `filtered` | **保持现状**，备份语义正确 |
+| 月分组标题用「2026 年 10 月」 | 月分组标题就是「YYYY 年 MM 月」 | **保持现状**，不照任务书里的示例字面改 |
+
+### 需要主人真机复看的清单（这几条静态断言证明不了）
+
+1. **关掉面板后宿主拖放恢复正常**：开面板 → 拖卡到面板上松手 → 关面板 → 从资源管理器拖一张图进聊天区，应正常出现附件缩略图。
+   这条是本轮 P0 的**收尾判据**，也是「修复比 bug 更糟」那条失败模式的唯一终检。
+2. **面板内非导入区松手**：只出现「卡文件请从『导入角色卡』拖进虚线框」，不弹附件、遮罩消失。
+3. **拖过面板外的页面区域**：宿主 `dragenter` 会 +1（遮罩亮一下），drop 被捕获拦下并复位 → 理论上会「闪一下」，看视觉是否刺眼。
+4. 预览面板在**未启用角色**时点开：五段都应是空态、总字符 0，而不是报错或空白弹层。
+5. 日记导出：下载文件名形如 `{角色}-日记-YYYYMMDD.md`，内容能对上磁盘上的 `diary.md` 结构。

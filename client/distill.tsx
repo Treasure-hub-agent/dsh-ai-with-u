@@ -34,6 +34,7 @@ import type { JSX } from 'react'
 
 import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
 import type { DistillKind } from './api'
+import { swallowFileDrag } from './dragdrop'
 import { IconClose, IconQuill } from './icons'
 import type { Translate } from './text'
 
@@ -333,20 +334,6 @@ function useBodyScrollLock(active: boolean): void {
     document.body.style.overflow = 'hidden'
     return () => { document.body.style.overflow = previous }
   }, [active])
-}
-
-/**
- * 遮罩上的文件拖放：一律拦住。
- *
- * 这个弹层也是全屏 portal 遮罩，拖一张卡进来时目标就是它；不拦的话事件会冒到
- * 宿主 composer，图片被当成附件发出去（与面板导入弹层同一个坑）。
- * 只对「文件类」动手，面板内的文字拖拽不受影响。
- */
-function swallowFileDrag(event: { dataTransfer: DataTransfer | null; preventDefault: () => void; stopPropagation: () => void }): void {
-  const types = event.dataTransfer?.types
-  if (types === undefined || !Array.from(types).includes('Files')) return
-  event.preventDefault()
-  event.stopPropagation()
 }
 
 export interface DistillDialogProps {

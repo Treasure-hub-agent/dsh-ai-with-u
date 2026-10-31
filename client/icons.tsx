@@ -157,3 +157,12 @@ export const IconImport = icon(
     <path d="M2.8 10.4v1.6c0 .7.6 1.2 1.2 1.2h8c.6 0 1.2-.5 1.2-1.2v-1.6" />
   </>,
 )
+
+/** 导出：托盘 + 上箭头（日记导出 markdown）。 */
+export const IconDownload = icon(
+  <>
+    <path d="M8 9.4V3" />
+    <path d="M5.4 5.6 8 3l2.6 2.6" />
+    <path d="M2.8 10.4v1.6c0 .7.6 1.2 1.2 1.2h8c.6 0 1.2-.5 1.2-1.2v-1.6" />
+  </>,
+)

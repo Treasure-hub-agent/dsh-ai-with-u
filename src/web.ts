@@ -237,6 +237,17 @@ export function buildRoutes(
         })
       }),
     },
+    // ------------------------------------------------------------ 提示词预览（纯只读）
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/preview`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'GET')
+        // **纯只读**：不 refresh、不 notify、不写盘。文本来自 PromptController 的真实渲染路径，
+        // 绝不在这里重新拼一份（拼一份就等于给"预览与真实注入漂移"开了口子）。
+        send(res, 200, { ok: true, ...prompt.preview() })
+      }),
+    },
     // ------------------------------------------------------------ 角色列表
     {
       method: 'GET',

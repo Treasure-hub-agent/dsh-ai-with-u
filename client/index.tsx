@@ -42,6 +42,8 @@ import {
 } from './api'
 import { CardEditor } from './card-editor'
 import type { CardSavePayload } from './card-editor'
+import { DiaryReview } from './diary-review'
+import type { DiaryTarget } from './diary-review'
 import {
   DistillEntry,
   armAndSendInstruction,
@@ -50,6 +52,12 @@ import {
   sendFailureText,
   useComposerReady,
 } from './distill'
+import {
+  dragHasFiles,
+  isInsideOurLayers,
+  resetHostDropState,
+  swallowFileDrag,
+} from './dragdrop'
 import { GuideView, guideFirstRun, markGuideSeen } from './guide'
 import type {
   ActiveState,
@@ -76,11 +84,13 @@ import {
   IconPower,
   IconQuill,
   IconRefresh,
+  IconSpark,
   IconSpinner,
   IconText,
   IconTrash,
 } from './icons'
 import { toLoreDraftFromCard } from './lorebook-schema'
+import { PromptPreview } from './preview'
 import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
 import {
   blurbOf,
@@ -149,24 +159,12 @@ function useScrollLock(active: boolean): void {
 }
 
 /**
- * 这次拖拽里有没有文件。
- *
- * 只对「拖文件」动手：面板内拖一段选中的文字、拖 scrollbar 之类必须照常工作，
- * 一刀切 `preventDefault` 会把它们全废掉（宿主 composer 也会跟着失灵）。
- */
-function dragHasFiles(event: { dataTransfer: DataTransfer | null }): boolean {
-  const types = event.dataTransfer?.types
-  if (types === undefined) return false
-  return Array.from(types).includes('Files')
-}
-
-/**
  * 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。
  *
  * 另外**吞掉落在弹层上的文件拖放**：`.awu-scrim` 是 fixed 全屏遮罩，用户拖一张卡进来时
  * 目标就是它，但事件会继续冒到宿主 composer，图片会被当成附件发出去（真机踩过）。
- * 这里 `preventDefault + stopPropagation` 在冒泡阶段收口；虚线拖放区在内层先接住，
- * 所以真正的拖放不受影响。
+ * `swallowFileDrag` 现在还会在 drop 时复位宿主的拖放计数器（否则聊天区遮罩会永久卡死，
+ * 见 `dragdrop.ts` 文件头），拖放区在内层先接住，所以真正的拖放不受影响。
  */
 function Overlay(props: {
   label: string
@@ -195,6 +193,10 @@ function Overlay(props: {
     return () => document.removeEventListener('keydown', onKey, true)
   }, [onClose])
 
+  // 兜底：弹层卸载时再复位一次——万一拖放在中途被别的东西吃掉（Esc、焦点切换）
+  // 没走到 drop，宿主的计数器也得有人归零
+  useEffect(() => () => { resetHostDropState() }, [])
+
   return createPortal(
     <div
       className="awu-scrim"
@@ -202,15 +204,9 @@ function Overlay(props: {
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose()
       }}
-      onDragOver={event => {
-        if (!dragHasFiles(event)) return
-        event.preventDefault()
-        event.stopPropagation()
-      }}
+      onDragOver={swallowFileDrag}
       onDrop={event => {
-        if (!dragHasFiles(event)) return
-        event.preventDefault()
-        event.stopPropagation()
+        swallowFileDrag(event)
         const files = event.dataTransfer?.files
         if (files !== undefined && files.length > 0) onFilesDropped?.(files)
       }}
@@ -313,13 +309,9 @@ function Section(props: { title: string; count?: number; children: JSX.Element |
 }
 
 /** 日记视图（详情页与日记页共用）。 */
-/** 日记里一条可操作的记录（编辑需要知道日期/分区/下标）。 */
-export interface DiaryTarget {
-  date: string
-  section: 'timeline' | 'notes'
-  index: number
-  text: string
-}
+// `DiaryTarget` 与「按行改写」的类型定义搬到了 `diary-review.tsx`（日记页那块要复用），
+// 这里只做再导出，保证 `EditDiaryDialog` 等旧引用不用改。
+export type { DiaryTarget } from './diary-review'
 
 function DiaryList(props: {
   entries: DiaryEntry[]
@@ -869,10 +861,10 @@ function ImportDialog(props: {
   }
 
   const onDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
-    // 内层拖放区自己接住：preventDefault 允许 drop，stopPropagation 保证事件
-    // 不会冒到弹层遮罩 / 面板 / 宿主 composer（真机上曾把卡当附件发出去）
-    event.preventDefault()
-    event.stopPropagation()
+    // 内层拖放区自己接住：preventDefault 允许 drop，stopPropagation 保证事件不会冒到
+    // 弹层遮罩 / 面板 / 宿主 composer；`swallowFileDrag` 在 drop 时还会顺手复位宿主的
+    // 拖放计数器（漏这一步 = 聊天区遮罩永久卡死，真机 P0，见 dragdrop.ts）
+    swallowFileDrag(event)
     setDropHint('')
     if (locked) return
     const picked = event.dataTransfer.files[0]
@@ -1495,11 +1487,8 @@ function DiaryView(props: {
           <span className="awu-emptyHint">{t('diary.emptyForHint')}</span>
         </div>
       ) : (
-        <DiaryList
-          entries={entry.diary}
-          t={t}
-          onEdit={onEdit}
-        />
+        /* 记忆回顾：搜索 / 按月折叠 / 导出 markdown（纯前端，见 diary-review.tsx） */
+        <DiaryReview name={entry.name} entries={entry.diary} t={t} onEdit={onEdit} />
       )}
 
       {/* 维护：全新开始 / 彻底重置 */}
@@ -1648,7 +1637,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
   const [detailError, setDetailError] = useState('')
 
-  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
+  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'preview' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
   const [deleteTarget, setDeleteTarget] = useState('')
   const [editTarget, setEditTarget] = useState<DiaryTarget | undefined>(undefined)
   const [dialogError, setDialogError] = useState('')
@@ -1853,31 +1842,56 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     }
   }, [reload, dismissNotice])
 
-  // -------------------------------------------------------- 拖放兜底
+  // -------------------------------------------------------- 拖放兜底（宿主计数器）
   //
-  // 弹层打开期间，整页任何一处的文件拖放都要被我们接管：宿主 composer 有 document 级
-  // drop 处理，一张卡拖到面板上会被当成附件发进对话（真机踩过）。
+  // 宿主的「文件或图片拖动到此处即可添加」遮罩由 **document 级深度计数器** 驱动（app.asar 反查）：
+  //   dragenter → depth++ / 亮遮罩    dragleave → depth-- / 归零才关
+  //   drop      → reset()            window 的 dragend → reset()   ← 唯一的两个复位口
   //
-  // 只在**文件类**拖拽上动手，且目标不在 `.awu-scrim / .awu-panel` 里才拦
-  // —— 我们自己的拖放区与面板根节点各有自己的处理（都会 stopPropagation），
-  // 一刀切会把面板内的文字拖拽、滚动条拖拽一并废掉。弹层关掉立刻卸载监听。
+  // 我们从系统拖进来的文件没有源元素，浏览器不会派发 dragend；而我们的各层又把 drop
+  // stopPropagation 掉了（不拦的话卡会被当附件发进对话）→ 宿主的 `onDrop → reset()` 也不跑。
+  // 两个复位口一起失效 = 聊天区遮罩永久卡死（真机 P0，2026-10-31）。
+  //
+  // 于是这里做两件事：
+  //  1. **不在面板上方点亮遮罩**：`dragenter` 在捕获阶段就 stopPropagation（**不 preventDefault**，
+  //     否则会废掉后续 dragover/drop 的默认行为），且只对「目标在我们容器里」的拖拽动手 →
+  //     宿主的 depth++ 压根不执行；
+  //  2. **吞掉的 drop 一律复位**：目标在我们容器里的交给各层自己的处理器（它们都走
+  //     `swallowFileDrag` → 内部已 reset）；弹层打开时落在容器外的也由这里拦下并 reset。
+  //
+  // 只在面板打开期间挂、关面板立刻卸载并补一次 reset —— 这样「关掉面板后拖文件进对话框」
+  // 完全回到宿主自己的逻辑（那正是 QA 要复验的行为）。
+  // 挂载点是 `open`（不是 `dialog`）：遮罩不该在「面板开着但没弹层」时也被点亮。
   useEffect(() => {
-    if (dialog === '') return undefined
-    const ours = (target: EventTarget | null): boolean =>
-      target instanceof Element && target.closest('.awu-scrim, .awu-panel') !== null
-    const swallow = (event: DragEvent): void => {
+    if (!open) return undefined
+    const onDragEnter = (event: DragEvent): void => {
       if (!dragHasFiles(event)) return
-      if (ours(event.target)) return
+      // 只掐掉冒泡，不碰默认行为：后面的 dragover/drop 还要正常到达我们的处理器
+      if (isInsideOurLayers(event.target)) event.stopPropagation()
+    }
+    const swallowOutside = (event: DragEvent): void => {
+      if (!dragHasFiles(event)) return
+      if (isInsideOurLayers(event.target)) return
       event.preventDefault()
       event.stopPropagation()
+      // 被我们拦下的 drop 同样要让宿主计数器归零（否则遮罩照样卡住）
+      if (event.type === 'drop') resetHostDropState()
     }
-    document.addEventListener('dragover', swallow, true)
-    document.addEventListener('drop', swallow, true)
+    document.addEventListener('dragenter', onDragEnter, true)
+    // 弹层打开时遮罩铺满全屏，容器外的 drop 属于「漏网」：拦掉别让它进对话。
+    // 面板开着但没弹层时**不拦容器外**——聊天区仍可正常接收拖入的文件。
+    if (dialog !== '') {
+      document.addEventListener('dragover', swallowOutside, true)
+      document.addEventListener('drop', swallowOutside, true)
+    }
     return () => {
-      document.removeEventListener('dragover', swallow, true)
-      document.removeEventListener('drop', swallow, true)
+      document.removeEventListener('dragenter', onDragEnter, true)
+      document.removeEventListener('dragover', swallowOutside, true)
+      document.removeEventListener('drop', swallowOutside, true)
+      // 兜底：面板关闭（或卸载）时再复位一次，覆盖任何没走到 drop 的路径
+      resetHostDropState()
     }
-  }, [dialog])
+  }, [open, dialog])
 
   // -------------------------------------------------------- 定位
   // 面板已改成「居中大窗 + 遮罩」（对齐 dsh-context 的 .lc-modal-card 形态），
@@ -1984,7 +1998,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   const onModePick = (next: InteractionMode): void => { applyMode(next, () => setDialog('')) }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
-  const openDialog = (which: 'new' | 'import' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
+  const openDialog = (which: 'new' | 'import' | 'preview' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
   // -------------------------------------------------------- 维护动作（新接口）
   const onEditDiary = (text: string): void => {
@@ -2285,18 +2299,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           aria-modal="false"
           aria-label={t('panel.title')}
           {...{ [SCOPED_ATTR]: '' }}
-          /* 面板自己也吞掉文件拖放：不吞的话，卡文件会冒到宿主 composer 被当附件发出去 */
-          onDragOver={event => {
-            if (!dragHasFiles(event)) return
-            event.preventDefault()
-            event.stopPropagation()
-          }}
+          /*
+            面板自己也吞掉文件拖放：不吞的话，卡文件会冒到宿主 composer 被当附件发出去。
+            `swallowFileDrag` 在 drop 时还会复位宿主的拖放计数器 —— 否则聊天区的
+            「文件或图片拖动到此处即可添加」遮罩会永久卡死（真机 P0，见 dragdrop.ts）。
+          */
+          onDragOver={swallowFileDrag}
           onDrop={event => {
-            if (!dragHasFiles(event)) return
-            event.preventDefault()
-            event.stopPropagation()
+            swallowFileDrag(event)
             // 吞掉之后必须给一句反馈：不然用户拖了半天，界面一点动静都没有（qa 复核提的口子）
-            showNotice(t('panel.dropCard'), 'ok')
+            if (dragHasFiles(event)) showNotice(t('panel.dropCard'), 'ok')
           }}
         >
           {/*
@@ -2547,6 +2559,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                       className="awu-btn"
                       data-size="sm"
                       data-kind="ghost"
+                      onClick={() => openDialog('preview')}
+                      disabled={busy}
+                      title={t('preview.hint')}
+                    >
+                      <IconSpark size={12} />
+                      {t('preview.entry')}
+                    </button>
+                    <button
+                      type="button"
+                      className="awu-btn"
+                      data-size="sm"
+                      data-kind="ghost"
                       onClick={() => openDialog('import')}
                       disabled={busy}
                       title={t('import.title')}
@@ -2721,6 +2745,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               onImported={onImported}
               t={t}
             />
+          )}
+          {/* 注入预览：只读快照，内容本体在 preview.tsx（遮罩/焦点用这里的 Overlay） */}
+          {dialog === 'preview' && (
+            <Overlay label={t('preview.title')} onClose={() => setDialog('')}>
+              <PromptPreview t={t} onClose={() => setDialog('')} />
+            </Overlay>
           )}
           {dialog === 'delete' && (
             <DeleteDialog

@@ -1589,6 +1589,185 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-lineEdit:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
 .awu-lineEdit:hover { background: color-mix(in srgb, var(--awu-accent) 14%, transparent); }
 
+/* ---- 记忆回顾：搜索栏 + 按月折叠（diary-review.tsx） ---- */
+.awu-review { display: flex; flex-direction: column; gap: var(--awu-gap-5); }
+
+.awu-reviewBar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--awu-gap-4); }
+
+.awu-reviewInput {
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 36px;
+  font-size: var(--awu-fs-body);
+}
+
+.awu-reviewHits {
+  flex: none;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+.awu-reviewMonths { display: flex; flex-direction: column; gap: var(--awu-gap-4); }
+
+.awu-reviewMonth {
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-lg);
+  background: var(--awu-surface-2);
+  overflow: hidden;
+}
+
+.awu-reviewMonth[data-open="true"] { border-color: var(--awu-line-strong); }
+
+.awu-reviewMonthHead {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-4);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--awu-gap-3) var(--awu-gap-5);
+  border: none;
+  background: transparent;
+  color: var(--awu-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-reviewMonthHead:hover { background: var(--awu-surface-3); }
+.awu-reviewMonthHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-reviewMonth[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
+
+.awu-reviewMonthTitle { font-size: var(--awu-fs-body); font-weight: 600; }
+
+.awu-reviewMonthMeta {
+  margin-left: auto;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+.awu-reviewMonth > .awu-diary {
+  padding: var(--awu-gap-4) var(--awu-gap-5) var(--awu-gap-5);
+  border-top: 1px solid var(--awu-line);
+}
+
+/* ---- 注入预览（preview.tsx） ---- */
+.awu-previewSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--awu-gap-4);
+  margin-bottom: var(--awu-gap-5);
+}
+
+.awu-previewStat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+}
+
+.awu-previewStatKey { font-size: var(--awu-fs-micro); color: var(--awu-ink-mute); }
+
+.awu-previewStatVal {
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-body);
+  color: var(--awu-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.awu-previewSegs { display: flex; flex-direction: column; gap: var(--awu-gap-3); }
+
+.awu-previewSeg {
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+  overflow: hidden;
+}
+
+.awu-previewSeg[data-open="true"] { border-color: var(--awu-line-strong); }
+
+.awu-previewSegHead {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-3);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-previewSegHead:hover { background: var(--awu-surface-3); }
+.awu-previewSegHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-previewSeg[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
+
+.awu-previewSegLabel {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--awu-fs-body);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.awu-previewSegId {
+  flex: none;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-micro);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+.awu-previewSegMeta {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-micro);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+/* 注入正文：等宽 + 保留换行；长段内部滚动，别把弹层撑爆 */
+.awu-previewText {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border-top: 1px solid var(--awu-line);
+  background: var(--awu-surface-field);
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.awu-previewEmpty {
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border-top: 1px solid var(--awu-line);
+  font-size: var(--awu-fs-label);
+  color: var(--awu-ink-mute);
+}
+
+/* 警示语气的普通提示（预览/日记里那种「不是错误、但要你看一眼」的话） */
+.awu-hint[data-tone="warn"] { color: var(--awu-gold); }
+
 /* ================================================================ 关系 / 维护区 */
 .awu-relation {
   display: flex;

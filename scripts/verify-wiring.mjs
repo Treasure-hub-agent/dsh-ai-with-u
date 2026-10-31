@@ -909,6 +909,207 @@ head('[14] 补全手册的名字约束（flow-create.md 必须钉死「按给定
   }
 }
 
+// ================================================================ 15. 提示词预览器
+head('[15] 注入预览器接线（web.ts /preview → 用真实渲染函数 → client 有路由与展示）')
+{
+  const web = await readSource('src/web.ts')
+  const webPreview = web === undefined ? undefined : sliceRoute(web, '/preview')
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else if (webPreview === undefined) {
+    bad('web.ts 有 /preview 路由',
+      '宿主没有注册 `${ROUTE_PREFIX}/preview`：面板的「注入预览」拿不到数据，只能自己瞎猜提示词长什么样。'
+      + '该找 host-core（GET /preview 返回各段的段名 / 字符数 / 正文）')
+  } else {
+    ok('web.ts 有 /preview 路由')
+
+    // 预览必须复用真实渲染函数，否则「预览」和「实际注入」是两套文本，等于没有预览
+    const promptSrc = await readSource('src/prompt.ts')
+    const renderRefs = /renderActiveSection|renderBaselineSection|renderLoreSection|renderClockSection|renderDisciplineSection|SECTION_BASELINE|SECTION_DISCIPLINE|SECTION_ACTIVE|renderL1/u
+    const inWeb = renderRefs.test(webPreview)
+    const inPrompt = promptSrc !== undefined && /preview/iu.test(promptSrc) && renderRefs.test(promptSrc)
+    if (inWeb || inPrompt) {
+      ok('预览用的是真实渲染路径', inWeb ? '/preview 路由块里直接引用段渲染' : 'prompt.ts 里有预览入口且引用段渲染')
+    } else if (promptSrc !== undefined && /preview/iu.test(promptSrc)) {
+      bad('预览用的是真实渲染路径',
+        'prompt.ts / web.ts 里出现了 preview，但看不到对真实段渲染的引用（SECTION_* / render*Section / renderL1）—— '
+        + '预览可能另写了一套拼装逻辑，那样它显示的和实际注入的迟早漂移。该找 host-core')
+    } else {
+      bad('预览用的是真实渲染路径',
+        'prompt.ts 与 web.ts 都没有「预览 + 真实渲染」的接法：预览接不上真实提示词，等于给用户看假数据。该找 host-core')
+    }
+  }
+
+  const api = (await readSource('client/api.ts')) ?? ''
+  const text = (await readSource('client/text.ts')) ?? ''
+  if (api === '') {
+    bad('client/api.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else if (!api.includes('/preview')) {
+    bad('client 有 /preview 调用与展示',
+      'client/api.ts 里没有 preview 路由常量/调用：面板的注入预览点了没反应。该找 client-ui')
+  } else {
+    const routeKey = /([A-Za-z0-9_$]+)\s*:\s*['"`]\/preview['"`]/u.exec(api)?.[1]
+    let owner
+    if (routeKey !== undefined) {
+      const useAt = api.indexOf(`ROUTES.${routeKey}`)
+      if (useAt >= 0) owner = enclosingExportName(api, useAt)
+    }
+    if (owner === undefined) owner = enclosingExportName(api, api.indexOf('/preview'))
+    const user = owner === undefined ? undefined : await findClientUser(owner, ['client/api.ts'], clientFiles)
+    const hasUi = /['"`]preview\.[A-Za-z0-9_.]+['"`]/u.test(text)
+    if (owner !== undefined && user !== undefined) {
+      ok('client 有 /preview 调用与展示', `${owner}() ← ${user}`)
+    } else if (owner !== undefined) {
+      bad('client 有 /preview 调用与展示',
+        `client/api.ts 导出了 ${owner}() 但没有被任何组件调用：预览接口通了，界面上没有入口。该找 client-ui`)
+    } else if (!hasUi) {
+      bad('client 有 /preview 调用与展示',
+        'client/api.ts 里有 /preview 字符串但看不出封装函数，也没有 preview.* 文案 key：预览入口未接。该找 client-ui')
+    } else {
+      skipped('client 有 /preview 调用与展示', '有 preview.* 文案 key 但静态看不出 api 封装（可能走了通用 request）')
+    }
+
+    // 文案 key 是否真的在字典里：组件写了 t('preview.xxx') 但 text.ts 没这个 key，
+    // 用户看到的就是 `preview.activeLabel` 这种裸 key（makeTranslator 会 fallback 到 key 本身）。
+    // 这类「组件接了、文案没接」的问题类型检查和渲染都不会报错。
+    // 扫**所有** client 文件取并集：预览面板可能被好几个组件引用（入口、章节、空态）。
+    const usedKeys = new Set()
+    const usedIn = []
+    for (const file of clientFiles) {
+      const src = await readSource(file)
+      if (src === undefined) continue
+      const keys = [...src.matchAll(/t\(\s*['"](preview\.[A-Za-z0-9_.]+)['"]/gu)].map(m => m[1])
+      if (keys.length === 0) continue
+      usedIn.push(file)
+      for (const key of keys) usedKeys.add(key)
+    }
+    const used = [...usedKeys].sort()
+    if (used.length === 0) {
+      skipped('预览文案 key 在字典里（中英各一）', '还没找到用 preview.* 文案的组件')
+    } else {
+      const missing = used.filter(key => {
+        // 字典里同一个 key 会出现两次（zh + en）；只出现一次说明只补了一半
+        const hits = text.split(`'${key}'`).length - 1
+        return hits < 2
+      })
+      if (missing.length === 0) {
+        ok('预览文案 key 在字典里（中英各一）', `${used.length} 个 key，来自 ${usedIn.join(' / ')}`)
+      } else {
+        bad('预览文案 key 在字典里（中英各一）',
+          `${usedIn.join(' / ')} 共用了 ${used.length} 个 preview.* key，但 client/text.ts 里缺 ${missing.length} 个（中英各一才算齐）：`
+          + `${missing.slice(0, 6).join('、')}${missing.length > 6 ? ' …' : ''}。`
+          + 'makeTranslator 找不到就回落成 key 本身，界面上会直接裸显 `preview.activeLabel` 这种字样。该找 client-ui')
+      }
+    }
+  }
+}
+
+// ================================================================ 16. 宿主拖放复位
+head('[16] 宿主拖放状态复位（吞 drop 后补 dragend + 捕获阶段拦 dragenter + 监听随面板卸载）')
+{
+  const src = await readSource('client/index.tsx')
+  if (src === undefined) {
+    bad('client/index.tsx 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    // ① 复位动作至少两处：吞 drop 的路径 + 关闭时的 cleanup。
+    //    dispatchEvent 本体与封装函数调用分开数，封装函数自己的定义行不算调用点。
+    const lines = src.split('\n')
+    const triggers = lines.filter(line => /dispatchEvent\(\s*new\s+Event\(\s*['"]dragend['"]/u.test(line)
+      || (/\bresetHostDropState\s*\(\s*\)/u.test(line) && !/=>|function|const\s+resetHostDropState/u.test(line)))
+    if (triggers.length === 0) {
+      bad('吞掉 drop 后补发 dragend 复位（两处：吞 drop 路径 + 关闭 cleanup）',
+        'client 里既没有 `dispatchEvent(new Event(\'dragend\'))` 也没有 `resetHostDropState()`。'
+        + '宿主是文档级深度计数器（dragenter +1 / dragleave -1 / drop reset / window 的 dragend reset）：'
+        + '我们 stopPropagation 掉 drop 后它的 onDrop 不跑，系统拖入的文件又没有源元素、不派发 dragend，'
+        + '计数器永远停在 1 → 遮罩永久卡在「文件或图片拖动到此处即可添加」。这就是主人报的 P0。该找 client-ui')
+    } else if (triggers.length === 1) {
+      bad('吞掉 drop 后补发 dragend 复位（两处：吞 drop 路径 + 关闭 cleanup）',
+        '只找到 1 处复位：「拖进来但没 drop 就把面板关掉」这条路径没人复位，遮罩照样卡。'
+        + '该找 client-ui（cleanup 里再补一次 dragend）')
+    } else {
+      ok('吞掉 drop 后补发 dragend 复位（两处：吞 drop 路径 + 关闭 cleanup）', `${triggers.length} 处`)
+    }
+
+    // ② 拦 in-container 的 dragenter，让宿主计数器根本不 +1
+    const enterCalls = [...src.matchAll(/addEventListener\(\s*['"]dragenter['"]/gu)]
+    const captureEnter = enterCalls.filter(m => /,\s*true\s*\)|capture\s*:\s*true/u.test(src.slice(m.index, m.index + 160)))
+    if (enterCalls.length === 0) {
+      bad('dragenter 也在捕获阶段拦下',
+        '没有监听 dragenter：宿主在 document 上一 dragenter 就 +1 并亮遮罩，我们只拦 drop 等于「先让它亮、再强行不放」，'
+        + '每次都得靠复位兜底，多一层脆弱。该找 client-ui（文件类 dragenter 同样 stopPropagation）')
+    } else if (captureEnter.length === 0) {
+      bad('dragenter 也在捕获阶段拦下',
+        '监听了 dragenter 但不在捕获阶段（缺 `true` 或 `{capture:true}`）：宿主在 document 上按冒泡顺序监听，'
+        + '我们冒泡阶段拦等于拦在自己后面，计数器已经 +1。该找 client-ui')
+    } else {
+      ok('dragenter 也在捕获阶段拦下', `${captureEnter.length} 处`)
+    }
+
+    // ③ 闭环的关键（Lead 点名要独立质疑的一条）：监听必须随面板/弹层卸载。
+    //    常驻监听 + capture + stopPropagation = 宿主从此再也收不到文件拖放，比遮罩卡死更糟。
+    const dragEnterAt = enterCalls[0]?.index
+    if (dragEnterAt === undefined) {
+      skipped('document 监听随面板卸载', '还没有 dragenter 监听可判（见上一条）')
+    } else {
+      const effectAt = src.slice(0, dragEnterAt).lastIndexOf('useEffect(')
+      const tail = effectAt < 0 ? '' : src.slice(effectAt, dragEnterAt + 3000)
+      const cleans = /removeEventListener\(\s*['"]dragenter['"]/u.test(tail)
+      const guarded = /if\s*\(\s*!?\s*(open|dialog)\b/u.test(tail) || /\[\s*(open|dialog)\b[^\]]*\]/u.test(tail)
+      if (cleans && guarded) {
+        ok('document 监听随面板卸载', '有 open/dialog 守卫 + removeEventListener 清理')
+      } else if (!cleans) {
+        bad('document 监听随面板卸载',
+          '挂了 document 级监听但没有 removeEventListener：监听会一直留在 document 上，配合 capture + stopPropagation，'
+          + '**面板关掉之后宿主彻底收不到文件拖放**——这比遮罩卡死更糟。该找 client-ui')
+      } else {
+        bad('document 监听随面板卸载',
+          '有清理，但看不出这个 effect 依赖面板开关（没有 `if (open/dialog)` 守卫或依赖数组）：'
+          + '监听可能常驻，同样会把宿主的拖放永久挡掉。该找 client-ui')
+      }
+    }
+  }
+}
+
+// ================================================================ 17. 记忆回顾
+head('[17] 记忆回顾（日记搜索 / 按月折叠 / 导出 markdown）')
+{
+  const text = (await readSource('client/text.ts')) ?? ''
+  const parts = []
+  for (const file of clientFiles) {
+    const src = await readSource(file)
+    if (src !== undefined) parts.push(src)
+  }
+  const all = parts.join('\n')
+
+  // ① 导出 markdown：要有真正生成文件的代码，不能只有文案
+  const exportTech = /URL\.createObjectURL|new Blob\(|\.download\s*=/u.test(all)
+  const exportText = /导出|['"`][A-Za-z0-9_.]*[Ee]xport[A-Za-z0-9_.]*['"]/u.test(text)
+  if (exportTech && exportText) {
+    ok('有导出 markdown 的实现（Blob / 下载链接 + 文案）')
+  } else if (exportText) {
+    bad('有导出 markdown 的实现（Blob / 下载链接 + 文案）',
+      '有导出文案但没有生成文件的代码（`new Blob(` / `URL.createObjectURL` / `a.download`）：按钮点了没东西落地。该找 client-ui')
+  } else {
+    bad('有导出 markdown 的实现（Blob / 下载链接 + 文案）',
+      '看不到「导出日记」整条链路（文案 key 与文件生成代码都没有）：记忆回顾少了把档案拿出去的能力。该找 client-ui')
+  }
+
+  // ② 搜索 + 按月折叠
+  const hasSearch = /['"`][A-Za-z0-9_.]*[Ss]earch[A-Za-z0-9_.]*['"]\s*:/u.test(text)
+    || /placeholder=\{[^}]*search/iu.test(all)
+  const hasMonth = /groupByMonth|monthKey|byMonth|按月|月份/u.test(all)
+    || /['"`][A-Za-z0-9_.]*[Mm]onth[A-Za-z0-9_.]*['"]/u.test(text)
+  if (hasSearch && hasMonth) {
+    ok('有日记搜索与按月折叠')
+  } else if (!hasSearch) {
+    bad('有日记搜索与按月折叠',
+      '找不到日记搜索（没有 search 文案 key，也没有 search 输入框）：日记一多只能靠肉眼翻。该找 client-ui')
+  } else {
+    bad('有日记搜索与按月折叠',
+      '有搜索但没有按月折叠的痕迹（无 groupByMonth / monthKey / 月份 文案 key）：长档案还是连续平铺。该找 client-ui')
+  }
+}
+
 // ================================================================ 汇总
 console.log('')
 if (fail > 0) {

@@ -11,7 +11,7 @@
  *
  * 运行：node scripts/verify-host.mjs
  */
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -43,6 +43,8 @@ process.env['AIWU_STORAGE_ROOT'] = sandbox
 
 const { Context, Service } = await import(pathToFileURL(join(root, 'node_modules', 'cordis', 'lib', 'index.js')).href)
 const plugin = await import(lib('index.js'))
+/** 预览必须与真实注入逐字一致，所以直接拿纪律包常量做对照。 */
+const { DISCIPLINE_TEXT } = await import(lib('prompt.js'))
 
 console.log('真实 cordis 宿主验证：')
 
@@ -207,6 +209,27 @@ const fakeReq = (method, body) => ({
 })
 const routeOf = (suffix) => registered.routes.find(r => r.path.endsWith(suffix))
 
+// ---------------------------------------------------------------- 提示词预览（未启用态）
+// 预览必须走真实渲染路径，所以下面「未启用」与「启用后」两处都拿真实宿主段文本来对。
+if (routeOf('/preview') === undefined) {
+  fail('没有注册 /preview 路由')
+} else {
+  const idlePreview = fakeRes()
+  await routeOf('/preview').handler(fakeReq('GET'), idlePreview)
+  const body = idlePreview.out.body ?? {}
+  check(idlePreview.out.status === 200 && body.ok === true, `GET /preview（未启用）→ ${idlePreview.out.status}`)
+  check(body.active?.enabled === false, '未启用：active.enabled=false')
+  check(body.active?.character === undefined, '未启用：不带 character')
+  check(body.discipline === 'lite', `未启用：discipline 仍是全局偏好 lite（${String(body.discipline)}）`)
+  check(Array.isArray(body.segments) && body.segments.length === 5,
+    `未启用：仍然返回五段（实际 ${body.segments?.length}）`)
+  check(body.segments.every(s => s.text === '' && s.chars === 0), '未启用：五段 text 全为空串、chars 全 0')
+  check(body.total === 0, `未启用：total=0（实际 ${String(body.total)}）`)
+  check(body.segments.map(s => s.id).join() === [
+    'aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
+  ].join(), '未启用：段 id 顺序固定')
+}
+
 if (routeOf('/distill/arm') === undefined) {
   fail('没有注册 /distill/arm 路由')
 } else {
@@ -269,6 +292,78 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
   check(registered.tools.includes('awu_mode'), '启用后挂载 awu_mode 工具')
   check(registered.tools.includes('awu_relation'), '启用后挂载 awu_relation 工具')
   check(registered.tools.includes('awu_diary_write'), '启用后挂载 awu_diary_write 工具')
+
+  // ---------------------------------------------------------------- 提示词预览（启用态）
+  const previewRes = fakeRes()
+  await routeOf('/preview').handler(fakeReq('GET'), previewRes)
+  const pv = previewRes.out.body ?? {}
+  check(previewRes.out.status === 200 && pv.ok === true, `GET /preview（启用后）→ ${previewRes.out.status}`)
+  check(pv.active?.enabled === true && pv.active?.character === ACTIVE_NAME,
+    `active = ${JSON.stringify(pv.active)}`)
+  check(Array.isArray(pv.segments) && pv.segments.length === 5, `启用后五段齐全（${pv.segments?.length}）`)
+  const orders = (pv.segments ?? []).map(s => s.order)
+  check(orders.every((v, i) => i === 0 || orders[i - 1] < v), `segments 按 order 升序：${orders.join(' < ')}`)
+  check(pv.total === (pv.segments ?? []).reduce((n, s) => n + s.chars, 0),
+    `total = 各段 chars 之和（${String(pv.total)}）`)
+  check((pv.segments ?? []).every(s => s.chars === s.text.length), 'chars 都是 String.length（不是字节数）')
+  check(pv.discipline === 'lite', `preview.discipline=${String(pv.discipline)}`)
+  check(pv.mode === 'text+action' || pv.mode === 'text', `preview.mode=${String(pv.mode)}`)
+
+  // 🔴 关键：预览必须与"真正会注进提示词的那段文本"逐字一致（这里用真实宿主注册的段函数对）
+  const previewById = new Map((pv.segments ?? []).map(s => [s.id, s]))
+  const strictIds = ['aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore']
+  const mismatch = []
+  for (const id of strictIds) {
+    const section = sp.layers.get(id)
+    const real = section === undefined
+      ? ''
+      : (typeof section.text === 'function' ? section.text({}) : String(section.text))
+    const got = previewById.get(id)?.text ?? ''
+    if (real !== got) mismatch.push(`${id}（preview ${got.length} 字 / 真实 ${real.length} 字）`)
+  }
+  check(mismatch.length === 0,
+    `预览与真实宿主段逐字一致${mismatch.length === 0 ? '' : '：' + mismatch.join('、')}`)
+  check(previewById.get('aiwu:discipline')?.text === DISCIPLINE_TEXT,
+    '纪律包段与 DISCIPLINE_TEXT 逐字一致')
+  const l1Preview = previewById.get('aiwu:active-character')
+  const l1Real = sp.layers.get('aiwu:active-character')?.text({}) ?? ''
+  check(l1Preview?.chars === l1Real.length && l1Preview.chars > 500,
+    `L1 段 chars=${l1Preview?.chars} 与真实段长度 ${l1Real.length} 一致`)
+
+  // 时间差段是现算的（分钟分辨率），只对标题：正文允许"分钟边界"这种天然差异
+  const clockPreview = previewById.get('aiwu:clock')?.text ?? ''
+  const clockReal = sp.layers.get('aiwu:clock')?.text({}) ?? ''
+  check(clockPreview.split('\n')[0] === clockReal.split('\n')[0],
+    `时间差段标题一致（${clockPreview.split('\n')[0]}）`)
+  // lore 统计来自 cache.lore.diag（constantCount/hitCount 是「候选」计数，count 是「实际注入」条数，
+  // 两者不相等是正常的：超出预算的被丢掉了）
+  check(['count', 'constantCount', 'hitCount', 'usedChars', 'budgetChars'].every(k => Number.isInteger(pv.lore?.[k])),
+    `lore 统计都是整数：${JSON.stringify(pv.lore)}`)
+  check(pv.lore.constantCount + pv.lore.hitCount >= pv.lore.count,
+    `候选条数 ≥ 实际注入条数（${pv.lore.constantCount}+${pv.lore.hitCount} ≥ ${pv.lore.count}）`)
+  check(typeof pv.lore.budgetChars === 'number' && pv.lore.budgetChars > 0,
+    `lore.budgetChars=${String(pv.lore?.budgetChars)}`)
+
+  // ---------------------------------------------------------------- 纯只读：调用前后磁盘零变化
+  const { Store: HostStore } = await import(lib('store.js'))
+  const hostStore = new HostStore(sandbox)
+  await hostStore.commitTurn({ character: ACTIVE_NAME, user: '只读自检', turnId: 'preview-readonly' })
+  const activePath = join(sandbox, '_active.json')
+  const sessionPath = join(sandbox, 'characters', ACTIVE_NAME, 'session.json')
+  const snapshotOf = async () => ({
+    activeMtime: (await stat(activePath)).mtimeMs,
+    sessionMtime: (await stat(sessionPath)).mtimeMs,
+    activeBytes: await readFile(activePath, 'utf8'),
+    sessionBytes: await readFile(sessionPath, 'utf8'),
+  })
+  const beforeIo = await snapshotOf()
+  await routeOf('/preview').handler(fakeReq('GET'), fakeRes())
+  await routeOf('/preview').handler(fakeReq('GET'), fakeRes())
+  const afterIo = await snapshotOf()
+  check(beforeIo.activeMtime === afterIo.activeMtime, '_active.json mtime 未被 preview 改动')
+  check(beforeIo.sessionMtime === afterIo.sessionMtime, 'session.json mtime 未被 preview 改动')
+  check(beforeIo.activeBytes === afterIo.activeBytes, '_active.json 字节未变（只读）')
+  check(beforeIo.sessionBytes === afterIo.sessionBytes, 'session.json 字节未变（只读）')
 
   const resOff = fakeRes()
   await routeOf('/deactivate').handler(fakeReq('POST'), resOff)

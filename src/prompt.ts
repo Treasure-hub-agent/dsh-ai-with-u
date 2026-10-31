@@ -34,6 +34,7 @@ import {
   type L1Extras,
   type LoreSelection,
   CARD_CONTENT_GUARD,
+  LORE_DEFAULTS,
   awiuOf,
   cardName,
   renderL1,
@@ -154,6 +155,49 @@ export const DISCIPLINE_FULL_TEXT = `${DISCIPLINE_TEXT}
 /** 纪律包档位。'off' 表示用户主动关掉（此时该段渲染为空串）。 */
 export type DisciplineLevel = 'off' | 'lite' | 'full'
 export const DISCIPLINE_LEVELS: readonly DisciplineLevel[] = ['off', 'lite', 'full']
+
+/** 提示词预览里的一段（`GET /preview` 的 `segments` 元素）。 */
+export interface PreviewSegment {
+  /** 段名，与向宿主注册的 name 一致（`aiwu:baseline` 等）。 */
+  id: string
+  order: number
+  /** 面板显示用中文名（纪律包会带当前档位）。 */
+  label: string
+  /** `text.length`（中文按字符计，与纪律包自检同一口径）。 */
+  chars: number
+  text: string
+}
+
+/**
+ * 提示词预览快照（`GET /preview` 的 body，不含 `ok`）。
+ *
+ * **只读**：由 `this.state` + `this.cache` 现读出来，不写盘、不刷新缓存、不触发 notify。
+ */
+export interface PreviewSnapshot {
+  active: { enabled: boolean; character?: string }
+  /**
+   * 交互模式。取的是 L1 段**实际渲染时用的那个值**（即最近一次 refresh 解析出来的
+   * `session.mode` > `_active.mode` > `text+action`），所以预览里的模式段与这个字段永远自洽。
+   */
+  mode: InteractionMode
+  discipline: DisciplineLevel
+  /** 按 order 升序，**永远五段**；未启用角色时 `text: ''`、`chars: 0`。 */
+  segments: PreviewSegment[]
+  /** 各段 chars 之和（未启用时为 0）。 */
+  total: number
+  /** 世界书命中快照（未启用 / 尚未刷新时全 0，budgetChars 给默认预算）。 */
+  lore: { count: number; constantCount: number; hitCount: number; usedChars: number; budgetChars: number }
+}
+
+/**
+ * L1 段在「缓存还没准备好」时的占位文本。
+ *
+ * 抽成模块级函数是为了让**真实组装**和**预览**用同一句话——两边各写一份必然会漂移。
+ */
+function activePlaceholderText(name: string): string {
+  return `## 你现在的身份：${name}\n\n（角色卡正在载入，先用这个身份和声线自然对话。）`
+}
+
 
 
 /** 时间差档位。输入分钟差与是否同夜，输出角色该有的语气档位描述。 */
@@ -563,12 +607,21 @@ export class PromptController {
     const name = this.state.character
     if (name === undefined) return ''
     const cache = this.cache
-    // 缓存缺失（启动瞬间 / 刚启用）：给出最小可用内容，避免整段空掉
+    // 缓存缺失（启动瞬间 / 刚启用）：给出最小可用内容，避免整段空掉。
+    // 「自愈」只发生在真实组装这条路上——`preview()` 是纯只读，绝不因为看一眼就触发 refresh。
     if (cache === undefined || cache.character !== name) {
       void this.refresh(undefined, undefined)
-      return `## 你现在的身份：${name}\n\n（角色卡正在载入，先用这个身份和声线自然对话。）`
+      return activePlaceholderText(name)
     }
+    return this.renderActiveText(cache)
+  }
 
+  /**
+   * L1 段的**唯一**渲染实现（真实组装与 {@link preview} 共用，杜绝预览漂移）。
+   *
+   * 纯函数式：只读传入的 cache，不触发 refresh、不改任何状态。
+   */
+  private renderActiveText(cache: L1Cache): string {
     const mode = cache.mode
     const extras: L1Extras = {
       // 世界书与时间差各自独立成段（垫底），不进 L1 —— 见 SECTION_LORE / SECTION_CLOCK 的注释
@@ -586,6 +639,65 @@ export class PromptController {
       // 渲染失败绝不吐空段（那等于人设消失）：退回静态块，并把原因打出来
       this.host.logger.error('L1 渲染失败（退回静态块）：%s', error instanceof Error ? error.message : String(error))
       return cache.staticText
+    }
+  }
+
+  /**
+   * 提示词预览快照（**纯只读**：不写盘、不 refresh、不 notify）。
+   *
+   * 五段文本全部走**真实渲染路径**——`renderBaselineSection` / `renderDisciplineSection` /
+   * `renderActiveText` / `renderLoreSection` / `renderClockSection`，这里不重写任何拼接逻辑。
+   * 理由：预览一旦和真实注入漂移，这个功能就是负资产（verify-host 用真实宿主装配逐字比对）。
+   *
+   * 数据来源与新鲜度：
+   *   - L0 / L0.5：现算（纯常量 + 当前档位）；
+   *   - L1：`this.cache`（**最近一次 refresh 的快照**，不是实时重读卡与日记）；
+   *   - 世界书：`cache.lore.diag`（同样是快照）；
+   *   - 时间差：现算（它本来每轮都在变）。
+   *
+   * 缓存是**整体替换**的（`refreshCache` 末尾一次性赋值），所以这里读到的要么是上一代、
+   * 要么是新一代，不会读到半截。
+   */
+  preview(): PreviewSnapshot {
+    const enabled = this.state.enabled
+    const character = enabled ? this.state.character : undefined
+    const cache = enabled && character !== undefined && this.cache?.character === character
+      ? this.cache
+      : undefined
+    const segment = (id: string, order: number, label: string, text: string): PreviewSegment =>
+      ({ id, order, label, chars: text.length, text })
+    const discipline = this.disciplineLevel
+
+    const segments: PreviewSegment[] = [
+      segment(SECTION_BASELINE, ORDER_BASE, '角色扮演底线', this.renderBaselineSection()),
+      segment(SECTION_DISCIPLINE, ORDER_BASE + 50, `纪律包（${discipline}）`, this.renderDisciplineSection()),
+      segment(SECTION_ACTIVE, ORDER_BASE + 100, '角色卡 L1',
+        character === undefined
+          ? ''
+          : cache === undefined ? activePlaceholderText(character) : this.renderActiveText(cache)),
+      segment(SECTION_LORE, ORDER_BASE + 5300, '世界书命中', this.renderLoreSection()),
+      segment(SECTION_CLOCK, ORDER_BASE + 5350, '时间差 / 当前时间', this.renderClockSection()),
+    ]
+
+    const diag = cache?.lore?.diag
+    return {
+      active: { enabled, ...(character === undefined ? {} : { character }) },
+      // 与 L1 段实际渲染用的是同一个值：cache.mode 就是 refresh 时 resolveInteractionMode 的结果
+      mode: cache?.mode ?? resolveInteractionMode(undefined, this.state),
+      discipline,
+      segments,
+      total: segments.reduce((sum, item) => sum + item.chars, 0),
+      lore: {
+        count: cache?.lore?.entries.length ?? 0,
+        constantCount: diag?.constantCount ?? 0,
+        hitCount: diag?.hitCount ?? 0,
+        usedChars: diag?.usedChars ?? 0,
+        // `selectLoreEntries` 在「卡里没有世界书」时返回的 diag 全是 0（早退分支），
+        // 这里回落到默认预算——否则面板会显示「预算 0」，看着像坏了。
+        budgetChars: diag?.budgetChars !== undefined && diag.budgetChars > 0
+          ? diag.budgetChars
+          : LORE_DEFAULTS.budgetChars,
+      },
     }
   }
 

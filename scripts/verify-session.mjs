@@ -20,7 +20,7 @@
  *
  * 运行：node scripts/verify-session.mjs
  */
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -49,7 +49,7 @@ const { createTools } = await import(lib('tools.js'))
 const { buildRoutes } = await import(lib('web.js'))
 const {
   PromptController, SECTION_BASELINE, SECTION_DISCIPLINE, SECTION_ACTIVE,
-  DISCIPLINE_TEXT, DISCIPLINE_FULL_TEXT,
+  BASELINE_TEXT, DISCIPLINE_TEXT, DISCIPLINE_FULL_TEXT,
 } = await import(lib('prompt.js'))
 
 const store = new Store(sandbox)
@@ -828,6 +828,82 @@ section('16. 亲密度：session.intimacy 写回、relation_log 上限、REST �
   const resetAll = await store.resetStory(NAME)
   check(resetAll.session.intimacy === undefined && resetAll.session.relation_log === undefined,
     '彻底重置把亲密度与日志一起清掉')
+}
+
+// ---------------------------------------------------------------- 17. 提示词预览（只读）
+
+section('17. 提示词预览：五段真实文本、只读、与 L1 段自洽')
+{
+  const { pc, renderOf } = await makePromptHost()
+  const routes = buildRoutes(store, pc)
+
+  // 先给一张有内容的卡：会话 + 日记 + topic，让 L1 段非空
+  await store.commitTurn({ character: NAME, user: '看看提示词', assistant: '嗯', turnId: 'preview-1' })
+  await store.appendDiary(NAME, '2026 10 12', ['[事实] 预览自检用的一条'], [])
+  await pc.refresh(undefined, undefined)
+
+  const preview = pc.preview()
+  check(Array.isArray(preview.segments) && preview.segments.length === 5,
+    `preview 返回五段（实际 ${preview.segments.length}）`)
+  check(preview.segments.map(s => s.id).join() === [
+    'aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
+  ].join(), '段 id 顺序固定')
+  const orders = preview.segments.map(s => s.order)
+  check(orders.every((v, i) => i === 0 || orders[i - 1] < v), `order 升序：${orders.join(' < ')}`)
+  check(preview.total === preview.segments.reduce((n, s) => n + s.chars, 0),
+    `total = 各段 chars 之和（${preview.total}）`)
+  check(preview.segments.every(s => s.chars === s.text.length), 'chars = String.length')
+  check(preview.active.enabled === true && preview.active.character === NAME,
+    `active = ${JSON.stringify(preview.active)}`)
+  check(preview.discipline === 'lite', `discipline=${preview.discipline}`)
+  check(['text', 'text+action'].includes(preview.mode), `mode=${preview.mode}`)
+
+  // 与真实渲染函数逐字一致（L0 / L0.5 / L1）
+  const byId = new Map(preview.segments.map(s => [s.id, s]))
+  check(byId.get('aiwu:baseline').text === BASELINE_TEXT,
+    'L0 底线段与真实渲染一致')
+  check(byId.get('aiwu:discipline').text === DISCIPLINE_TEXT, '纪律包段与 DISCIPLINE_TEXT 一致')
+  check(byId.get('aiwu:active-character').text === renderOf(SECTION_ACTIVE),
+    'L1 段与 section 渲染函数逐字一致')
+  check(byId.get('aiwu:active-character').text.includes('预览自检用的一条'),
+    'L1 段里能看到刚写的日记（说明用的是真实渲染产物）')
+
+  // 只读：两次预览除了时间差段（现算）之外完全一致；文件 mtime 不变
+  const activePath = join(sandbox, '_active.json')
+  const sessionPath = join(sandbox, 'characters', NAME, 'session.json')
+  const beforeStat = { active: (await stat(activePath)).mtimeMs, session: (await stat(sessionPath)).mtimeMs }
+  const beforeBytes = {
+    active: await readFile(activePath, 'utf8'),
+    session: await readFile(sessionPath, 'utf8'),
+  }
+  const again = pc.preview()
+  const againById = new Map(again.segments.map(s => [s.id, s]))
+  check(['aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore']
+    .every(id => againById.get(id).text === byId.get(id).text), '两次预览的四个稳定段逐字一致')
+  check(again.discipline === preview.discipline && again.active.character === preview.active.character,
+    '两次预览的启用态一致')
+  check((await stat(activePath)).mtimeMs === beforeStat.active, '_active.json mtime 未被预览改动')
+  check((await stat(sessionPath)).mtimeMs === beforeStat.session, 'session.json mtime 未被预览改动')
+  check(await readFile(activePath, 'utf8') === beforeBytes.active, '_active.json 字节未变（纯只读）')
+  check(await readFile(sessionPath, 'utf8') === beforeBytes.session, 'session.json 字节未变（纯只读）')
+
+  // REST：GET /preview
+  const res = await restCall(routes, 'GET', '/preview')
+  check(res.status === 200 && res.body?.ok === true, `GET /preview → ${res.status}`)
+  check(Array.isArray(res.body?.segments) && res.body.segments.length === 5, 'REST 也返回五段')
+  check(res.body?.total === res.body.segments.reduce((n, s) => n + s.chars, 0), 'REST total 自洽')
+  check((await restCall(routes, 'POST', '/preview')).status === 405, 'POST /preview 被拒（405，只读接口）')
+  check((await stat(activePath)).mtimeMs === beforeStat.active, 'REST 预览之后 _active.json 仍未变')
+
+  // 未启用：五段仍在但全空
+  await pc.deactivate()
+  const idle = pc.preview()
+  check(idle.active.enabled === false, '未启用：active.enabled=false')
+  check(idle.segments.length === 5 && idle.segments.every(s => s.text === '' && s.chars === 0),
+    '未启用：五段仍在，text 全空、chars 全 0')
+  check(idle.total === 0, `未启用：total=0（实际 ${idle.total}）`)
+  check(idle.lore.count === 0 && idle.lore.usedChars === 0, '未启用：lore 统计归零')
+  check(idle.mode === 'text+action' || idle.mode === 'text', `未启用：mode 仍可读（${idle.mode}）`)
 }
 
 // ---------------------------------------------------------------- 清理
