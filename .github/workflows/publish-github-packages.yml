@@ -1,0 +1,37 @@
+name: Publish to GitHub Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@treasure-hub-agent'
+
+      - name: Install
+        run: npm ci
+
+      - name: Build and self-check
+        run: npm run build
+
+      # GitHub Packages 的 npm 包必须是 scoped 名称，而公开 npm 用的是裸名。
+      # 这里只在发布瞬间改 name，不落回仓库。
+      - name: Publish
+        run: |
+          npm pkg set name=@treasure-hub-agent/dsh-ai-with-u
+          npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

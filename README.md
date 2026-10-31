@@ -3,6 +3,7 @@
 **给 DeepSeek Harness 的角色扮演插件。** 蒸馏任意ip角色卡并让你的大肥鱼成为TA，选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
 
 ![version](https://img.shields.io/badge/version-0.2.0-d97706)
+![npm](https://img.shields.io/npm/v/dsh-ai-with-u?color=cb3837&logo=npm)
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
@@ -113,6 +114,14 @@ flowchart LR
 - 不需要编译 C++，零原生依赖
 
 ### 步骤
+
+包已发布到 npm，可以跳过克隆直接装（装完仍要按第 3 步配 bundles）：
+
+```bash
+npm install dsh-ai-with-u
+```
+
+或者从源码构建：
 
 ```bash
 git clone https://github.com/Treasure-hub-agent/dsh-ai-with-u.git
