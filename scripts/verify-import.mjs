@@ -377,19 +377,59 @@ console.log('裸 JSON：')
   const noName = parseCardBuffer(Buffer.from(JSON.stringify({ spec: 'chara_card_v3', data: {} }), 'utf8'), 'noname.json')
   truthy('缺名字有告警', noName.warnings.some(w => w.includes('没有名字')))
 
-  // assets / regex_scripts 剥离
+  // assets 剥离；regex_scripts **保留**（2026-10-31 口径：卡是用户资产，只告警不删）
   const heavy = parseCardBuffer(Buffer.from(JSON.stringify({
     spec: 'chara_card_v3',
     data: {
       name: '夹具丙',
       assets: [{ type: 'icon', uri: 'embeded://assets/1.png', name: 'a' }],
       regex_scripts: [{ scriptName: 'x' }],
+      extensions: {
+        regex_scripts: [{ scriptName: 'y' }, { scriptName: 'z' }],
+        depth_prompt: { prompt: '从这里开始按深度插入的提示', depth: 4, role: 'system' },
+      },
     },
   }), 'utf8'), 'heavy.json')
   eq('assets 已剥离', heavy.card.data.assets, undefined)
-  eq('regex_scripts 已剥离', heavy.card.data.regex_scripts, undefined)
+  eq('data.regex_scripts 保留（不删用户资产）', heavy.card.data.regex_scripts?.length, 1)
+  eq('data.extensions.regex_scripts 也保留', heavy.card.data.extensions?.regex_scripts?.length, 2)
   truthy('assets 有告警', heavy.warnings.some(w => w.includes('assets')))
-  truthy('regex_scripts 有告警', heavy.warnings.some(w => w.includes('regex_scripts')))
+  truthy('regex_scripts 有告警（两处合计 3 条）',
+    heavy.warnings.some(w => w.includes('不执行酒馆正则脚本') && w.includes('3 条')))
+  truthy('depth_prompt 非空时明示不支持', heavy.warnings.some(w => w.includes('深度提示')))
+
+  // depth_prompt 为空 → 静默（不刷无意义的告警）
+  const emptyDepth = parseCardBuffer(Buffer.from(JSON.stringify({
+    spec: 'chara_card_v3',
+    data: { name: '夹具丁', extensions: { depth_prompt: { prompt: '   ', depth: 4 } } },
+  }), 'utf8'), 'depth.json')
+  eq('depth_prompt 空时不告警', emptyDepth.warnings.some(w => w.includes('深度提示')), false)
+
+  // 世界书里「按深度注入」的条目：保留 + 导入时明示（本轮按普通设定注入）
+  const depthBook = parseCardBuffer(Buffer.from(JSON.stringify({
+    spec: 'chara_card_v3',
+    data: {
+      name: '夹具戊',
+      character_book: {
+        name: '深度书',
+        extensions: {},
+        entries: [
+          { keys: ['a'], content: '深度条目', enabled: true, insertion_order: 1, use_regex: false, position: 4 },
+          { keys: ['b'], content: '普通条目', enabled: true, insertion_order: 2, use_regex: false, position: 'after_char' },
+        ],
+      },
+    },
+  }), 'utf8'), 'depth-book.json')
+  truthy('世界书深度条目有告警', depthBook.warnings.some(w => w.includes('按深度注入')))
+  eq('世界书深度条目被保留', depthBook.card.data.character_book?.entries?.length, 2)
+  eq('世界书 position 字段原样保留', depthBook.card.data.character_book?.entries?.[0]?.position, 4)
+
+  // 保留字段必须能穿过归一化 —— 否则"保留"只是解析期的假象，落盘时照样丢
+  const { normalizeCard } = await import(pathToFileURL(join(root, 'lib', 'tavern.js')).href)
+  const normalizedHeavy = normalizeCard(heavy.card)
+  eq('归一化后 data.regex_scripts 仍在', normalizedHeavy.data.regex_scripts?.length, 1)
+  eq('归一化后 data.extensions.regex_scripts 仍在', normalizedHeavy.data.extensions?.regex_scripts?.length, 2)
+  truthy('归一化后 extensions.depth_prompt 仍在', normalizedHeavy.data.extensions?.depth_prompt !== undefined)
 
   // 本插件 v0.1 旧卡：明确指向迁移路径
   throws(

@@ -226,12 +226,24 @@ section('V8 · constant 条目')
   const sel = selectLoreEntries(book, ['完全无关的话'])
   check(sel.entries.length === 1 && sel.entries[0].id === 'always', 'constant 不需要关键词也注入')
   check(sel.diag.constantCount === 1, 'constantCount 统计正确')
-  // constant 优先保留：预算只够一条时，constant 留下（内容要不同，否则先去重了）
-  const tight = selectLoreEntries(bookOf([
+  // 常驻与关键词**分开预算**（2026-10-31 真卡修复）：关键词预算吃紧不影响常驻，反之亦然
+  const separately = selectLoreEntries(bookOf([
     entry({ id: 'k', keys: ['命中'], content: '◯'.repeat(300), insertion_order: 1 }),
     entry({ id: 'c', keys: [], content: '◎'.repeat(300), constant: true, insertion_order: 2 }),
   ]), ['命中'], { budgetChars: 320 })
-  check(tight.entries.length === 1 && tight.entries[0].id === 'c', '预算吃紧时 constant 优先于关键词命中')
+  check(separately.entries.length === 2,
+    `常驻与关键词各自独立预算：两条都进（实际 ${separately.entries.length}）`)
+  check(separately.diag.constantUsedChars === 300 && separately.diag.usedChars === 300,
+    '两本预算各自记账（constantUsedChars / usedChars）')
+
+  // 关键词预算极紧：首条仍注入（不能"命中了却什么都没给"），后续进 keywordDropped
+  const tightKeyword = selectLoreEntries(bookOf([
+    entry({ id: 'k1', keys: ['命中'], content: '◯'.repeat(300), insertion_order: 1 }),
+    entry({ id: 'k2', keys: ['命中'], content: '◍'.repeat(300), insertion_order: 2 }),
+  ]), ['命中'], { budgetChars: 100 })
+  check(tightKeyword.entries.length === 1, `关键词预算极紧只留 1 条（实际 ${tightKeyword.entries.length}）`)
+  check(tightKeyword.diag.forcedOverBudget === true, '首条关键词超预算强制注入并标记')
+  check(tightKeyword.diag.keywordDropped.length === 1, '被裁的那条进 keywordDropped 明细')
 }
 
 section('V9 · 大小写 / 正则 / 坏正则')
@@ -911,7 +923,11 @@ section('V24 · PromptController 四段装配（激活 → L1/世界书/时间�
     const withLore = render()
     check(withLore['aiwu:lore']?.includes('黄色的便利贴'), '命中后世界书段有内容')
     check(!withLore['aiwu:active-character']?.includes('黄色的便利贴'), '世界书内容不在 L1 段里（分段隔离）')
-    check(logs.some(([level, msg]) => level === 'info' && String(msg).includes('世界书命中 1 条')), '日志记录命中条数（不记正文）')
+    // 日志口径（2026-10-31 起）：同时报「候选/注入」两套数，并列出被预算裁掉的条目名
+    check(logs.some(([level, msg]) => level === 'info' && String(msg).includes('世界书注入 1 条')),
+      '日志记录命中条数（不记正文）')
+    check(logs.some(([, msg]) => /常驻 \d+\/\d+、关键词 \d+\/\d+/.test(String(msg))),
+      '日志同时给出常驻/关键词的「注入/候选」数')
     check(!logs.some(([, msg]) => String(msg).includes('今晚吃什么')), '日志里没有世界书正文')
 
     // 4) 同一轮再刷新一次：命中集合复用，不重复计算（防抖）
@@ -1274,6 +1290,167 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
     await routeOf('/mode').handler(fakeReq({ mode: 'text', name: NAME }), res)
     check(res.out.status === 200 && res.out.body?.scope === 'session', `④ 空闲态带 name → scope=session（${res.out.status}）`)
     check((await store.readSession(NAME)).mode === 'text', '④ 写进了指定角色的 session.json')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
+  }
+}
+
+// ================================================================ 真酒馆卡适配 V32
+
+section('V32 · 真酒馆卡：常驻独立预算 / key 展开宏 / position 归一 / probability 顶层')
+{
+  /** 造一条**精确 n 字**的内容（预算断言要按字数算，不能靠眼睛数）。 */
+  const sized = (label, n) => label + '·'.repeat(Math.max(0, n - [...label].length))
+
+  // 合成 fixture（不塞真卡 1.7MB）：89 条 = 7 常驻（7×2000=14000 字，超默认 12000）+ 82 关键词候选
+  const constants = Array.from({ length: 7 }, (_, i) => entry({
+    id: `c${i}`,
+    keys: [],
+    name: `常驻${i}`,
+    content: sized(`常驻设定${i}`, 2000),
+    constant: true,
+    insertion_order: i,
+    // 混合 position：数字 0 / 数字 1 都出现过（老 ST 导出写法）
+    position: i % 2 === 0 ? 0 : 1,
+  }))
+  const keywords = Array.from({ length: 77 }, (_, i) => entry({
+    id: `k${i}`,
+    keys: ['管理员'],
+    name: `关键词${i}`,
+    content: sized(`关键词设定${i}`, 40),
+    insertion_order: 100 + i,
+    position: i % 3 === 0 ? 'before_char' : 1,
+  }))
+  // 特殊条目（优先级高 → 一定排进前 12 个关键词名额）
+  const macroKey = entry({
+    id: 'macro-key', keys: ['{{user}}即是管理员'], name: '宏键条目',
+    content: '宏键命中的设定', priority: 999, insertion_order: 500, position: 0,
+  })
+  const unknownMacro = entry({
+    id: 'unknown-macro', keys: ['{{未知宏}}xyz'], name: '未知宏键',
+    content: '不该命中（未知宏原样保留）', priority: 998, insertion_order: 501,
+  })
+  const emptyMacro = entry({
+    id: 'empty-macro', keys: ['{{// 注释}}'], name: '空宏键',
+    content: '不该命中（空 key 不能误命中一切）', priority: 997, insertion_order: 502,
+  })
+  const badRegex = entry({
+    id: 'bad-regex', keys: ['管理员(('], name: '坏正则', use_regex: true,
+    content: '不该命中（坏正则退化成字面量）', priority: 996, insertion_order: 503,
+  })
+  const depthEntry = entry({
+    id: 'depth-4', keys: ['管理员'], name: '深度注入条目', content: sized('深度注入设定', 40),
+    priority: 995, insertion_order: 504, position: 4,
+  })
+  const book = bookOf([...constants, ...keywords, macroKey, unknownMacro, emptyMacro, badRegex, depthEntry])
+  check(book.entries.length === 89, `fixture 是 89 条（实际 ${book.entries.length}）`)
+
+  const sel = selectLoreEntries(book, ['你即是管理员'], { userName: '你', charName: '虞照' })
+  const byId = new Set(sel.entries.map(e => e.id))
+
+  // ---- 1) 常驻独立预算：14000 字 → 只保留 12000 字（6 条），被裁的 1 条有明细
+  const constantKept = sel.entries.filter(e => e.id.startsWith('c')).length
+  check(constantKept === 6, `常驻按自己的额度裁剪：7 条裁到 6 条（实际 ${constantKept}）`)
+  check(sel.diag.constantUsedChars === LORE_DEFAULTS.constantBudgetChars,
+    `常驻占用 ${sel.diag.constantUsedChars} = 额度 ${LORE_DEFAULTS.constantBudgetChars}`)
+  check(sel.diag.constantBudgetChars === LORE_DEFAULTS.constantBudgetChars,
+    `默认常驻额度 ${sel.diag.constantBudgetChars}`)
+  check(sel.diag.constantDropped.length === 1,
+    `被裁常驻进 constantDropped（${sel.diag.constantDropped.length} 条）`)
+  const droppedItem = sel.diag.constantDropped[0]
+  check(droppedItem !== undefined && typeof droppedItem.id === 'string'
+    && droppedItem.name !== '' && droppedItem.chars === 2000,
+  `constantDropped 形状 {id,name,chars}：${JSON.stringify(droppedItem)}`)
+
+  check(sel.diag.constantKeptCount === 6 && sel.diag.constantCount === 7,
+    `候选/注入两个数都在：常驻 ${sel.diag.constantKeptCount}/${sel.diag.constantCount}`)
+  check(sel.diag.keywordKeptCount === LORE_DEFAULTS.maxEntries && sel.diag.hitCount === 79,
+    `关键词 ${sel.diag.keywordKeptCount}/${sel.diag.hitCount}`)
+
+  // ---- 2) 关键词预算不受常驻影响：仍按 maxEntries=12（其中 2 个名额被 macro-key / depth-4 占用）
+  const keywordKept = sel.entries.filter(e => e.id.startsWith('k')).length
+  check(sel.diag.hitCount === 77 + 2, `关键词候选 ${sel.diag.hitCount} 条（77 普通 + 宏键 + 深度键）`)
+  check(keywordKept === LORE_DEFAULTS.maxEntries - 2,
+    `关键词名额仍按 maxEntries=${LORE_DEFAULTS.maxEntries}（普通命中 ${keywordKept} + 特殊 2）`)
+  check(sel.entries.length === 6 + LORE_DEFAULTS.maxEntries,
+    `总注入 ${sel.entries.length} 条 = 常驻 6 + 关键词 ${LORE_DEFAULTS.maxEntries}`)
+  check(sel.diag.keywordDropped.length === 79 - LORE_DEFAULTS.maxEntries,
+    `被裁关键词进 keywordDropped（${sel.diag.keywordDropped.length} 条）`)
+  check(sel.diag.droppedByBudget.length === sel.diag.constantDropped.length + sel.diag.keywordDropped.length,
+    'droppedByBudget 仍是两池并集（向后兼容）')
+  check(sel.diag.usedChars <= sel.diag.budgetChars,
+    `关键词占用 ${sel.diag.usedChars} ≤ 预算 ${sel.diag.budgetChars}`)
+
+  // ---- 3) key 上展开宏：{{user}} 命中；未知宏 / 空宏 / 坏正则都不误命中
+  check(byId.has('macro-key'), '{{user}} 键展开后能命中（修复前永远匹配不到）')
+  check(sel.text.includes('宏键命中的设定'), '宏键条目的内容真的进了提示词')
+  check(!byId.has('unknown-macro'), '未知宏原样保留 → 不产生误匹配')
+  check(!byId.has('empty-macro'), '展开成空串的 key 被丢弃 → 不误命中一切')
+  check(!byId.has('bad-regex'), '坏正则退化成字面量，不误命中也不抛错')
+
+  // ---- 4) position：数字 0/1 与字符串都归一；before/after 分段且顺序正确
+  const beforeEntries = sel.entries.filter(e => e.position === 'before_char')
+  check(beforeEntries.length > 0, `before_char 段有条目（${beforeEntries.length} 条）`)
+  check(sel.entries.filter(e => e.id.startsWith('c')).every(e => typeof e.position === 'string'),
+    '数字 position 0/1 已归一成 before_char / after_char')
+  const beforeTitle = sel.text.indexOf('▎先读这些设定')
+  const afterTitle = sel.text.indexOf('▎相关设定')
+  check(beforeTitle >= 0 && afterTitle > beforeTitle, 'before_char 段排在 after_char 段之前')
+
+  // ---- 5) 深度注入：本轮不实现，但按普通设定注入 + 计数
+  check(byId.has('depth-4'), 'position:4 的条目仍被注入（内容不丢）')
+  check(sel.diag.unsupportedDepthN === 1, `unsupportedDepthN=${sel.diag.unsupportedDepthN}（该条按普通设定注入）`)
+
+  // ---- 6) probability：顶层优先于 extensions（顶层 100 = 不参与概率，必定进）
+  const probBook = bookOf([entry({
+    id: 'top-prob', keys: ['管理员'], name: '顶层概率', content: '顶层 probability=100',
+    probability: 100, extensions: { probability: 1 }, priority: 900,
+  })])
+  const probSel = selectLoreEntries(probBook, ['管理员'])
+  check(probSel.entries.some(e => e.id === 'top-prob'),
+    '顶层 probability 优先（100 不参与概率；若错读 extensions 的 1 会被裁）')
+  const extProb = selectLoreEntries(bookOf([entry({
+    id: 'ext-prob', keys: ['管理员'], content: 'extensions probability=0', extensions: { probability: 0 },
+  })]), ['管理员'])
+  check(extProb.entries.some(e => e.id === 'ext-prob'), 'extensions.probability 仍然生效（0 = 不筛）')
+
+  // ---- 7) 卡级覆盖：extensions.aiwu.prompt.lore.constantBudgetChars 走到真实渲染路径
+  const { Store } = await import(lib('store.js'))
+  const { PromptController } = await import(lib('prompt.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v32-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const store = new Store(sandbox)
+    const NAME = '常驻额度卡'
+    const wideBudgetCard = normalizeCard({
+      spec: 'chara_card_v3',
+      spec_version: '3.0',
+      data: {
+        name: NAME,
+        description: '身份：常驻额度自检卡',
+        character_book: bookOf(constants),
+        extensions: { aiwu: { schema: 1, prompt: { lore: { constantBudgetChars: 14000 } } } },
+      },
+    })
+    await store.saveCard({ name: NAME, ccv3: wideBudgetCard })
+    const sections = new Map()
+    const pc = new PromptController(store, {
+      sys: { section: (input) => { sections.set(input.name, input); return () => sections.delete(input.name) } },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    await pc.activate(NAME)
+    pc.install()
+    await pc.refresh()
+    const preview = pc.preview()
+    check(preview.lore.constantBudgetChars === 14000,
+      `卡级 constantBudgetChars 生效（${preview.lore.constantBudgetChars}）`)
+    check(preview.lore.count === 7, `额度放大后 7 条常驻全进（实际 ${preview.lore.count}）`)
+    check(Array.isArray(preview.lore.constantDropped) && preview.lore.constantDropped.length === 0,
+      '没有条目被裁时 constantDropped 为空数组')
+    check(preview.lore.usedChars === 0 && preview.lore.keywordDropped.length === 0,
+      '关键词侧没候选时不报假数据')
+    pc.uninstall()
   } finally {
     await rm(sandbox, { recursive: true, force: true })
     process.env['AIWU_STORAGE_ROOT'] = ''

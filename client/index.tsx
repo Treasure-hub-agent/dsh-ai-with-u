@@ -28,6 +28,7 @@ import {
   fetchCharacter,
   fetchCharacters,
   fetchOverview,
+  fetchPreview,
   importCharacter,
   saveCharacter,
   saveCharacterCcv3,
@@ -89,6 +90,8 @@ import {
   IconText,
   IconTrash,
 } from './icons'
+import { hasDroppedLore, readLoreDroppedFromDetail, readLoreDroppedFromPreview } from './lore-diag'
+import type { LoreDroppedInfo } from './lore-diag'
 import { toLoreDraftFromCard } from './lorebook-schema'
 import { PromptPreview } from './preview'
 import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
@@ -712,6 +715,36 @@ function NewCharacterDialog(props: {
 
 // ---------------------------------------------------------------- 导入角色卡弹层
 
+// ---------------------------------------------------------------- 导入警告分组
+
+/** 导入弹层的警告分组：解析提示 / 世界书提示 / 不支持的酒馆特性（正则脚本、立绘等）。 */
+type ImportWarnGroup = 'parse' | 'lore' | 'unsupported'
+
+/** 每组最多先显示几条（其余折成「还有 N 条」）。 */
+const IMPORT_WARN_PREVIEW = 3
+
+/**
+ * 分组靠文案关键字匹配，**顺序有讲究**：
+ * 「不支持的酒馆特性」先判 —— 「包内还有 N 个其它条目（assets 等）」这种句子同时含「条目」，
+ * 归到世界书里就错了。宿主新加的警告只要提到这些词就能落进对应组。
+ */
+const IMPORT_WARN_MATCHERS: Array<{ group: ImportWarnGroup; pattern: RegExp }> = [
+  { group: 'unsupported', pattern: /assets|立绘|regex|正则|脚本|深度|depth|递归|probability|weight/i },
+  { group: 'lore', pattern: /世界书|character_book|条目|设定|预算|token|关键词/i },
+]
+
+/** 把一串警告按组归类（组顺序固定，空组不出现）。 */
+function groupImportWarnings(warnings: string[]): Array<{ group: ImportWarnGroup; items: string[] }> {
+  const buckets: Record<ImportWarnGroup, string[]> = { parse: [], lore: [], unsupported: [] }
+  for (const warning of warnings) {
+    const matched = IMPORT_WARN_MATCHERS.find(matcher => matcher.pattern.test(warning))
+    buckets[matched?.group ?? 'parse'].push(warning)
+  }
+  return (['parse', 'lore', 'unsupported'] as const)
+    .filter(group => buckets[group].length > 0)
+    .map(group => ({ group, items: buckets[group] }))
+}
+
 /** 人类可读的文件大小（1024 进制，保留一位小数）。 */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -967,11 +1000,25 @@ function ImportDialog(props: {
                     : t('import.warnings', { n: parsed.warnings.length })}
                 </div>
                 {parsed.warnings.length > 0 && (
-                  <ul className="awu-importWarns">
-                    {parsed.warnings.map((warning, index) => (
-                      <li key={`${index}-${warning}`}>{warning}</li>
-                    ))}
-                  </ul>
+                  <div className="awu-importWarnGroups">
+                    {groupImportWarnings(parsed.warnings).map(({ group, items }) => {
+                      const shown = items.slice(0, IMPORT_WARN_PREVIEW)
+                      const rest = items.length - shown.length
+                      return (
+                        <div className="awu-importWarnGroup" key={group}>
+                          <div className="awu-importWarnGroupTitle">{t(`import.warnGroup.${group}`)}</div>
+                          <ul className="awu-importWarns">
+                            {shown.map((warning, index) => (
+                              <li key={`${group}-${index}-${warning}`}>{warning}</li>
+                            ))}
+                          </ul>
+                          {rest > 0 && (
+                            <div className="awu-importWarnMore">{t('import.warnGroup.more', { n: rest })}</div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
               </>
             )}
@@ -1651,6 +1698,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [editorDirty, setEditorDirty] = useState(false)
   // 递增信号：面板要求编辑器「走一遍未保存确认」（点入口/点遮罩时用）
   const [editorCloseSignal, setEditorCloseSignal] = useState(0)
+  /**
+   * 「本轮被世界书预算裁掉」的条目（打开编辑器时解析一次）。
+   *
+   * 来源优先 `GET /character` 的 diag（宿主新加），拿不到才去问 `GET /preview` 的 `lore`；
+   * 都没有就保持 undefined → 世界书分区里那块警示**整块不显示**（不报错、不打扰）。
+   */
+  const [droppedLore, setDroppedLore] = useState<LoreDroppedInfo | undefined>(undefined)
 
   // 编辑器关掉后清脏标记，避免下次打开误拦
   useEffect(() => {
@@ -2194,6 +2248,34 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     return { tag, meta }
   }, [diaryDetail, liveName, relation, t])
 
+  /**
+   * 打开卡片编辑器时解析「本轮被裁掉」的世界书条目。
+   *
+   * 两路数据都容错：`GET /character` 的 diag 优先；没有就退 `GET /preview` 的 `lore`；
+   * 两路都拿不到（老宿主 / 接口未就绪 / 只读失败）就保持 undefined，世界书里那块警示不渲染。
+   * 失败**不打扰用户**（console 留痕即可）——这只是锦上添花的诊断。
+   */
+  useEffect(() => {
+    if (!editing || currentDetail === undefined) { setDroppedLore(undefined); return undefined }
+    const fromDetail = readLoreDroppedFromDetail(currentDetail)
+    if (hasDroppedLore(fromDetail)) {
+      setDroppedLore(fromDetail)
+      return undefined
+    }
+    let cancelled = false
+    setDroppedLore(undefined)
+    void fetchPreview()
+      .then(preview => {
+        if (cancelled || !aliveRef.current) return
+        const fromPreview = readLoreDroppedFromPreview(preview)
+        setDroppedLore(hasDroppedLore(fromPreview) ? fromPreview : undefined)
+      })
+      .catch((error: unknown) => {
+        console.warn('[ai-with-u] 读 /preview 的世界书预算明细失败（不显示被裁条目）', error)
+      })
+    return () => { cancelled = true }
+  }, [editing, currentDetail])
+
   /** 胶囊当前高亮哪个：启用角色以后端为准，否则用本地偏好（默认「文本+动作」）。 */
   const mode: InteractionMode = live
     ? (active.mode ?? 'text+action')
@@ -2319,6 +2401,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             <CardEditor
               card={currentDetail.card}
               ccv3={currentDetail.ccv3}
+              droppedLore={droppedLore}
               name={currentDetail.name}
               source={sourceOf(currentDetail.card)}
               busy={busy}

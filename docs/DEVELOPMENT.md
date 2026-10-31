@@ -502,7 +502,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 784 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 840 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -519,7 +519,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **784 项**（截至 v0.3.x 预览轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **840 项**（截至真酒馆卡适配轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -1063,3 +1063,172 @@ window.addEventListener('dragend', reset)     // ← 唯一的「拖拽结束」
 3. **拖过面板外的页面区域**：宿主 `dragenter` 会 +1（遮罩亮一下），drop 被捕获拦下并复位 → 理论上会「闪一下」，看视觉是否刺眼。
 4. 预览面板在**未启用角色**时点开：五段都应是空态、总字符 0，而不是报错或空白弹层。
 5. 日记导出：下载文件名形如 `{角色}-日记-YYYYMMDD.md`，内容能对上磁盘上的 `diary.md` 结构。
+
+---
+
+## 十三、2026-11-01 · 真酒馆卡适配（Wave 1）
+
+第一次拿**别人的真卡**跑全链路：CCv3、89 条世界书、98869 字、7 条常驻、89 条 `use_regex`、关键词里带 `{{user}}`。
+四个问题全是我们自己造的假设被真卡同时撞破——这也是为什么之前 720 多项自检全绿却仍有体感问题：
+自检用的是我们写的卡，真卡用的是 ST 的写法。
+
+### 1. 体检报 323 条，真问题只有 2 条
+
+旧规则对这张卡刷出 **323 条**问题，其中只有 **2 条**要动手（两条「非常驻且没关键词」——永远命不中）。
+其余全是我们把**自己手搓书的规矩**当成了 ST 的规矩：
+
+| 旧规则 | 旧等级 | 为什么是误报 | 现在的处理 |
+|---|---|---|---|
+| `order-collision` | 问题 | ST 里 `insertion_order` 撞车**极常见**（真卡 22 条同为 20）。同序按数组顺序排，本来就不冲突 | **整条删掉** |
+| `selective-without-secondary` | 问题 | `selective:true` + 空 `secondary_keys` 在 ST 里等于该字段无效，功能完全正常（真卡 57 条命中） | **整条删掉** |
+| `duplicate-keys` | 问题（逐条） | 多条共用关键词在 ST 里是**正常设计**，会一起注入；真卡 110 条命中其实只来自少数几个词 | 降 info，且**按关键词聚合成一条** |
+| `content-too-long` | 问题 | 真卡单条 800–2600 字是常态。这是「占本轮预算多少」的信息，不是硬伤 | 降 info，并附「N 字 · 占预算 X%」 |
+| `too-many-entries` / `book-too-large` | 问题 | 89 条 / 9.9 万字正是阈值之外，属于「知道就好」 | 降 info |
+
+**为什么必须删 `order-collision` 而不是降级**：它没有可执行动作。用户看到「插入顺序冲突」只能去改顺序，
+而改完发现行为没有任何变化（同序本来就按数组顺序注入）——**一条只制造动作、不改变结果的告警，比不报更有害**，
+因为它会训练用户忽略体检面板。判断标准是：**这条提示背后有没有一个用户能做的动作，且做了确实有差别**。
+
+### 2. 常驻条目被关键词预算挤掉
+
+真卡 7 条 `constant: true`，合计 **10512 字**；旧实现里常驻与关键词命中**共用**同一口 6000 字预算，
+于是排序靠后的 **2 条常驻被静默裁掉**。这类失效最难察觉：常驻条目「本来就该一直生效」，
+用户不会去怀疑它，模型也只是「偶尔记不起某个设定」。
+
+修法两层：
+
+- **预算分离**：新增 `LORE_DEFAULTS.constantBudgetChars`（默认 **12000**，卡级可用
+  `extensions.aiwu.prompt.lore.constantBudgetChars` 覆盖），常驻走自己的额度，不再和关键词抢；
+  关键词仍是 12 条 / 6000 字。10512 < 12000，真卡 7 条全进。
+- **不再静默**：diagnostics 里 `droppedByBudget` 拆成 `constantDropped` / `keywordDropped`（保留旧字段做兼容），
+  面板体检里按等级列出被裁条目，宿主日志也带条目名（**只带名字，不带正文**）。
+
+判据：**任何「因为预算而消失」的内容都必须能被看见**。预算可以裁，静默不行。
+
+### 3. `{{user}}` 写在关键词里 → 永不命中
+
+`matchesKey` 拿到的是**原始 key 字符串**，而扫描文本是展开过宏的正文。卡里把关键词写成 `{{user}}`（ST 里很常见）时，
+一边是字面量 `{{user}}`、一边是用户名，永远对不上 → 该条目**从来没生效过**，而且没有任何报错。
+修法是匹配前对 key 也走 `expandMacros`，`secondary_keys` 同理（同一类坑的下一层：只修主 key 会漏掉次级键）。
+
+### 4. `regex_scripts` 检查位置错了 + 「不执行」的字段到底该不该删
+
+ST 把正则脚本放在 **`data.extensions.regex_scripts`**，而旧代码查的是 `data.regex_scripts`（顶层）——
+于是真卡的脚本既没被处理、也没告警，安安静静留在卡里，用户以为它在工作。
+
+**修法（Lead 2026-11-01 裁决，与原来的「剥掉」相反）**：
+
+- 两个位置（`data.regex_scripts` 与 `data.extensions.regex_scripts`）**都保留**，**不删字段**；
+- 导入预览出一条告警：`本插件不执行酒馆正则脚本（N 条）：提示词侧与显示侧都不执行；显示层 DSH 没有扩展点（详见 README 兼容矩阵）`；
+- 矩阵里的口径是「**保留但不执行**」，不是「剥离」。
+
+**为什么翻了这个决定**：最初的实现是 `delete` + 告警，看起来更「干净」——反正不执行，留着干嘛。
+但 ST 卡是**用户资产**，删字段是**不可逆的数据损失**：用户将来把卡导出回酒馆、或者换插件，正则脚本就没了。
+而「用户以为它在工作」这个问题，用**告警 + 面板标注**就能解决，不需要删数据。
+
+判据：**面对「我们不支持但对方有」的字段，默认动作是「保留 + 明示不支持」，不是「清理掉」**。
+删除只在两种情况下合理：字段会**引发错误行为**（比如 `assets` 里塞了会让按字节解析出错的东西），
+或者**保留会直接违背隐私/安全**。仅仅「用不上」不构成删除理由。
+
+### ST 正则的两类语义，以及 DSH 为什么做不了显示侧
+
+酒馆的 `regex_scripts` 是**两套完全不同的东西**，混在一起谈就会得出错误结论：
+
+| 类别 | 作用位置 | 我们能不能做 |
+|---|---|---|
+| **提示词侧**（发送前改写 prompt） | 组装系统提示词之后、发给模型之前 | **能做，但选择不做**：它改的是模型实际收到的内容，用户看不见，出问题时几乎无法排查 |
+| **显示侧**（收到回复后改写展示文本） | 助手消息**已经渲染成 DOM 之后** | **做不了**：DSH 没有「消息正文变换」扩展点 |
+
+DSH 侧的实证（三条，都能查到）：
+
+1. 客户端插槽 `conversation.chat.node` **只能注册新的聊天行**（配 `ctx.uiConversation.events.register()`），
+   它不能修改宿主已经渲染出来的助手消息内容；
+2. `agent/request` 钩子只覆盖 **provider / model / reasoningEffort** 的路由，完全不碰文本；
+3. 插件规范明写「不要读写组件外的 DOM、不要读别的插件的 DOM」——想「渲染完再改」就得违反这一条。
+
+生态的做法是**交割**，不是硬做：`dsh-tavern@2.7.23` 把显示层整块交给 `dsh-muv-engine`
+（`package.json` 里是 dependencies `^0.4.1`，README 有专门一节「渲染职责交割给 dsh-muv-engine」），
+原因是两家的 `beautifyContentEl` 会互相覆盖，tavern 索性把自己那套删了。muv-engine 的取样口是渲染后的
+`[class*="_markdown_"]` 容器——**这正是插件规范允许边界内的做法**（它自己就是那个渲染器）。
+
+所以本插件的结论是：**不执行 `regex_scripts`，也不假装支持**。导入时剥离并告警；想美化显示请装 muv 系引擎。
+把「提示词侧」也停掉，是为了守住「用户看到的提示词 = 实际注入的提示词」这条底线（`/preview` 就是在守它）。
+
+### 这一轮的断言（verify-wiring [18]–[21]）
+
+- `[18]` 常驻预算分离：tavern 有 `constantBudgetChars` 之类 → diag 拆出 `constantDropped` / `keywordDropped`
+  → prompt 的世界书日志引用被裁列表（否则只记条数等于没记）
+- `[19]` key 匹配前展开宏：`matchesKey` 函数体（或调用点）出现 `expandMacros`；`secondaryPasses` 同理（缺了只记 note）
+- `[20]` 体检分级：`LoreIssue` 的接口体里有 `level` 且 `LoreIssueLevel` 三档齐全 → 代码里**不再有** `'order-collision'`
+  字符串字面量 → 编辑器真的**消费** level（`issue.level` / `data-level` / `errors-warns-infos` 汇总）
+- `[21]` 不执行的字段要「保留 + 告警」：`import-card.ts` 认 `data.extensions.regex_scripts` → 全文**没有**
+  `delete … regex_scripts` → 导入警告同时含「不执行 + 正则 + 显示侧」→ `depth_prompt` 附近有 `warnings.push`
+
+> 断言自己踩的三个坑，记下来：① `order-collision` 删掉后，**注释里还写着「已删掉 order-collision」**，
+> 按裸词搜会当成残留 → 改成只认字符串字面量；② 「issue 带 level」不能在全文里搜 `level:`（别的地方也可能有），
+> 必须取 `interface LoreIssue { … }` 的括号体来判；③ `[21]` 的「有告警」第一版是**假绿**——
+> 旧代码在 `delete` 分支里恰好有一句「本插件不执行酒馆的正则脚本」，文案对得上，但那条分支只在
+> **认错的顶层位置**才会触发。于是把判据从「有句提到不执行」收紧成「同时含 不执行 + 正则 + 显示侧」，
+> 才对得上裁决里要求的口径。**文案命中 ≠ 行为正确**，这条和 `common.close` 那次是同一类教训。
+
+### 兼容矩阵的诚实度自查（哪些其实是半支持）
+
+README 的矩阵里，「支持」全部对应**代码里真的生效**；下面这几条属于**半支持或不报错**，别读成支持：
+
+| 条目 | 真实状态 | 依据 / 后续 |
+|---|---|---|
+| `position` 写成数字（`0`/`1`） | **半支持**：只有字符串值被识别，数字一律落到 `after_char` | 渲染侧只有 `entry.position === 'before_char' ? … : 'after_char'`。**已列为行动项**（要做数字映射，老 ST 导出常见 0/1） |
+| `probability` | **半支持**：只读 `entry.extensions.probability`，顶层同名不生效 | 取值处只查 `entryExtensions(entry)['probability']`。**已列为行动项**（同时读顶层 `entry.probability`） |
+| `@@depth` / `@@position` / `@@role` / `@@probability` / `@@cooldown` | **认识但不生效**：会从正文剥掉（绝不注入正文），但不改变行为 | `parseDecorators` 收集这些键，实际只消费 `activate` / `dont_activate`。**矩阵里必须明写**，别让读者以为是支持 |
+| `regex_scripts` | **保留但不执行**（两个位置都保留，导入出告警） | 裁决见上文 §4。断言 `[21]` 守着「不删字段 + 必须告警」 |
+| `depth_prompt` | **保留但不生效**：随卡存进 `data` 不丢，不读不注入 | 全仓无消费点；CCv3 归一不清未知键。`[21]` 要求导入时告警 |
+| `recursive_scanning` | **不执行**：字段认得，明确不做 | `LORE_DEFAULTS.recursive = false` 且选择逻辑里没有递归分支 |
+
+**一句话口径**：「不报错」≠「支持」；「字段保留」≠「功能生效」。矩阵里只有标 ✅ 的那几行属于真正生效。
+这条已进项目纪律；判 `position` 数字值、`probability` 顶层位置两条在修好之前，矩阵里保持 ⚠️ 半支持，不许提前升级。
+
+### 集成验收记录（I4，九套全量）
+
+`npm run build` 一次过，**840 项通过 / 0 失败**（`exit=0`）：`bundle 9 + wiring 54 + verify 15 + tavern 289 + distill 121 + import 58 + session 212 + host 82`。
+产物抽查 18 项全命中（`lib/import-card.js` 里 `data['regex_scripts']` / `extensions['regex_scripts']` / 「本插件不执行酒馆正则脚本」/「深度提示（depth_prompt」；`lib/tavern.js` 里 `constantBudgetChars` / `constantDropped` / `keywordDropped` / `expandKeyList` / `lorePositionOf`；`lib/client.js` 里 `data-level` / `lore.level.` / `constantDropped`）。
+
+四行矩阵在本轮**从 ⚠️/❌ 升级为 ✅**，每条都有代码依据：
+
+| 行 | 升级依据 |
+|---|---|
+| `position` 数字值 | `lorePositionOf()` 把 `0`/`'0'`/`'before'` → `before_char`，`1`/`'1'`/`'after'` → `after_char`，未知/`4` → `after_char` + `depthUnsupported` |
+| `probability` | 取证：**顶层优先**，`topLevelProbability ?? extensions.probability` |
+| `regex_scripts` | 两个位置都读、计条数、**不删字段**，导入出「不执行」告警 |
+| `depth_prompt` | 读 `extensions.depth_prompt`，非空则告警「暂不支持、字段已保留」 |
+
+### 真卡复算（只读探针，未把卡片内容写入仓库）
+
+用主人那张真卡（CCv3 / 89 条 / 98869 字 / 全 `use_regex`）在 `lib/` 产物上跑了一遍只读探针：
+
+| 指标 | 修复前（宿主报告） | 现在（探针实测） |
+|---|---|---|
+| 面板体检问题数 | 323 条（真问题 2 条） | **106 条，error 0 / warn 2 / info 104** |
+| └ 构成 | order-collision / duplicate-keys / content-too-long / selective-without-secondary 混在一起 | `content-too-long` ×67 · `duplicate-keys` ×37（按关键词聚合）· `too-many-entries` ×1（warn）· `book-too-large` ×1（warn） |
+| 常驻注入 | 6 条有效常驻里 2 条被关键词预算静默挤掉 | **6/6 全注入，`constantDropped: []`**，9577 / 12000 字 |
+| 关键词被裁 | — | `keywordDropped: []`（这轮没触发） |
+| `droppedByBudget`（兼容字段，两池并集） | `["5","86"]` | `[]` |
+
+**一处口径纠正**：宿主报的「7 条常驻 / 10512 字 / 7-7 全注入」把一条 `enabled: false` 的常驻也算进去了。
+按真实选择路径（`selectLoreEntries` 会先跳过 `enabled === false`），有效常驻是 **6 条 / 9577 字**（差额来自那条第 890 字的停用条目 + 装饰器剥离）。
+**结论不变**：常驻池 0 条被裁、全部注入；但对外数字应写 6/6，不是 7/7。
+
+**一处现象纠正**：这张卡的 `{{user}}` 出现在 **3 条条目的正文**里，**没有任何 key / secondary_key 含 `{{user}}`**（实测 0 条）。
+也就是说「key 里带 `{{user}}` 永不匹配」这个诊断**对这张卡不成立**（可能是主人记混了，或指的是正文宏）。
+功能本身确实修好了，用合成 fixture 三元验证：主 key `{{user}}的剑` ✓、`secondary_keys + selective` 里的 `{{user}}` ✓、`use_regex` + key `{{user}}` ✓。
+
+### 三处语义变更（对外文档已同步，维护者要记住）
+
+1. **日志文案**：「世界书命中 N 条」→「世界书**注入** N 条」。`hitCount` 是「关键词命中的候选数」，注入数要扣预算，两者不是一回事，旧文案会让人误以为命中的都进了。
+2. **常驻不再吃关键词预算**：旧行为「预算吃紧时只剩常驻」彻底消失——常驻有自己的额度（默认 12000），关键词超预算只会裁关键词。**任何依赖旧行为的判断都要重新算**。
+3. **`diag.droppedByBudget` 语义变了**：字段保留（向后兼容），但含义变成 **`constantDropped` + `keywordDropped` 的两池并集**；新代码一律读后两者，读 `droppedByBudget` 分不清是谁被裁。
+
+### 本轮仍待真机复看
+
+1. 用这张真卡做一次真实对话：面板体检显示「0 必须处理 / 2 条提醒 / 104 条提示」是否符合预期观感（104 条 info 默认折叠，是否仍然吵）。
+2. 世界书诊断区显示「本轮注入 N 条 / 常驻 6 条 9577 字」是否与对话实际一致。
+3. **三档的定级判据（Lead 已定，别再摇摆）**：`error` = 这条设定**永远不会生效**（非常驻且无关键词、内容为空）；`warn` = 这条设定**会因为预算/条数而进不去**（`too-many-entries`、`book-too-large`）；`info` = 会影响手感但不会失效（`content-too-long`、`duplicate-keys`）。判据一句话：**会不会真的丢内容**——会丢的给 warn，不会丢的给 info。

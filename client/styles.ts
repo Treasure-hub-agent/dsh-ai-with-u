@@ -2874,6 +2874,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   text-align: center;
 }
 
+/* 徽记按等级换色：error 红 / warn 金 / info 灰点（真卡的规模提示不该抢眼） */
+.awu-loreRowFlag[data-level="warn"] { background: color-mix(in srgb, var(--awu-gold) 22%, transparent); color: var(--awu-gold); }
+.awu-loreRowFlag[data-level="info"] { background: var(--awu-surface-3); color: var(--awu-ink-mute); }
+
 .awu-loreRowActions { flex: none; display: inline-flex; align-items: center; gap: var(--awu-gap-1); }
 
 .awu-loreRowSwitch { display: inline-flex; align-items: center; padding: 0 var(--awu-gap-2); cursor: pointer; }
@@ -2939,6 +2943,96 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-loreHealth { display: flex; flex-wrap: wrap; align-items: center; gap: var(--awu-gap-4); }
 
+/* 一行总览：条数 · 字数 · 常驻 · 预算 */
+.awu-loreSummary {
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-mute);
+  word-break: break-word;
+}
+
+/* 提示级问题的展开/收起容器 */
+.awu-loreInfoBlock { display: flex; flex-direction: column; gap: var(--awu-gap-3); align-items: flex-start; }
+
+/* 问题行前的等级徽记（错误/提醒/提示） */
+.awu-loreIssueLevel {
+  flex: none;
+  margin-right: var(--awu-gap-2);
+  font-style: normal;
+  font-size: var(--awu-fs-micro);
+  font-weight: 600;
+  padding: 0 var(--awu-gap-2);
+  border-radius: var(--awu-r-xs);
+  background: var(--awu-surface-3);
+  color: var(--awu-ink-mute);
+}
+
+.awu-loreIssueList li[data-level="error"] .awu-loreIssueLevel { color: var(--awu-danger); background: color-mix(in srgb, var(--awu-danger) 14%, transparent); }
+.awu-loreIssueList li[data-level="warn"] .awu-loreIssueLevel { color: var(--awu-gold); background: color-mix(in srgb, var(--awu-gold) 14%, transparent); }
+.awu-loreIssueList li[data-level="error"] { color: var(--awu-ink-dim); }
+.awu-loreIssueList li[data-level="info"] { color: var(--awu-ink-mute); }
+
+/* 「被预算裁掉」的警示块（可折叠） */
+.awu-loreDropped {
+  border: 1px solid color-mix(in srgb, var(--awu-gold) 40%, transparent);
+  border-radius: var(--awu-r-md);
+  background: color-mix(in srgb, var(--awu-gold) 10%, transparent);
+  overflow: hidden;
+}
+
+.awu-loreDroppedHead {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-3);
+  width: 100%;
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: none;
+  background: transparent;
+  color: var(--awu-gold);
+  font: inherit;
+  font-size: var(--awu-fs-label);
+  text-align: left;
+  cursor: pointer;
+}
+
+.awu-loreDroppedHead:hover { background: color-mix(in srgb, var(--awu-gold) 12%, transparent); }
+.awu-loreDroppedHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-loreDropped[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
+
+.awu-loreDroppedTitle { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.awu-loreDroppedMeta {
+  margin-left: auto;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-micro);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+.awu-loreDroppedList {
+  margin: 0;
+  padding: var(--awu-gap-2) var(--awu-gap-4) var(--awu-gap-4);
+  border-top: 1px solid color-mix(in srgb, var(--awu-gold) 26%, transparent);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-2);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.awu-loreDroppedList li { display: flex; align-items: baseline; gap: var(--awu-gap-3); font-size: var(--awu-fs-label); color: var(--awu-ink-dim); }
+.awu-loreDroppedName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.awu-loreDroppedOrigin { flex: none; font-size: var(--awu-fs-micro); color: var(--awu-ink-mute); }
+.awu-loreDroppedChars { flex: none; margin-left: auto; font-family: var(--awu-mono); font-size: var(--awu-fs-micro); color: var(--awu-ink-mute); }
+
+/* 条目行/折叠卡的等级暗示：错误红、提醒金、提示不描边（只靠行内小点） */
+.awu-loreRow[data-level="error"] { box-shadow: inset 2px 0 0 var(--awu-danger), var(--awu-specular); }
+.awu-loreRow[data-level="warn"] { box-shadow: inset 2px 0 0 var(--awu-gold), var(--awu-specular); }
+.awu-loreEntry[data-level="error"] { box-shadow: inset 2px 0 0 var(--awu-danger), var(--awu-specular); }
+.awu-loreEntry[data-level="warn"] { box-shadow: inset 2px 0 0 var(--awu-gold), var(--awu-specular); }
+
 .awu-loreDirtyDot {
   flex: none;
   width: 6px;
@@ -2961,7 +3055,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-ink-dim);
 }
 
-.awu-loreEntryIssues { color: var(--awu-gold); }
+.awu-loreEntryIssues { color: var(--awu-ink-dim); }
+.awu-loreEntryIssues li[data-level="error"] { color: var(--awu-danger); }
+.awu-loreEntryIssues li[data-level="warn"] { color: var(--awu-gold); }
+.awu-loreEntryIssues li[data-level="info"] { color: var(--awu-ink-mute); }
 .awu-loreIssueList b { color: var(--awu-ink); font-weight: 600; }
 
 /* ---- 导入角色卡弹层（index.tsx 的 ImportDialog） ---- */
@@ -3030,6 +3127,29 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-importConflict b { color: var(--awu-ink); font-weight: 600; }
 
 .awu-importWarnHead { font-size: var(--awu-fs-label); font-weight: 600; color: var(--awu-ink-mute); }
+
+/* 警告分组：解析 / 世界书 / 不支持的酒馆特性 —— 警示色标题，正文保持中性 */
+.awu-importWarnGroups { display: flex; flex-direction: column; gap: var(--awu-gap-4); }
+
+.awu-importWarnGroup {
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid color-mix(in srgb, var(--awu-gold) 30%, transparent);
+  border-radius: var(--awu-r-md);
+  background: color-mix(in srgb, var(--awu-gold) 7%, transparent);
+}
+
+.awu-importWarnGroupTitle {
+  margin-bottom: var(--awu-gap-2);
+  font-size: var(--awu-fs-label);
+  font-weight: 600;
+  color: var(--awu-gold);
+}
+
+.awu-importWarnMore {
+  margin-top: var(--awu-gap-2);
+  font-size: var(--awu-fs-label);
+  color: var(--awu-ink-mute);
+}
 
 .awu-importWarns {
   margin: 0;

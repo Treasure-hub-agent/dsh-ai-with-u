@@ -1110,6 +1110,211 @@ head('[17] 记忆回顾（日记搜索 / 按月折叠 / 导出 markdown）')
   }
 }
 
+// ================================================================ 18. 常驻预算分离
+head('[18] 常驻条目独立预算（constant allowance，不再和关键词命中抢同一口 6000 字）')
+{
+  const tavern = await readSource('src/tavern.ts')
+  if (tavern === undefined) {
+    bad('src/tavern.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    // ① 有常驻专属预算
+    const constantBudget = /constantBudgetChars|constantBudget|constantAllowance|constantChars/u.test(tavern)
+    if (constantBudget) {
+      ok('tavern 有常驻专属预算')
+    } else {
+      bad('tavern 有常驻专属预算',
+        '找不到常驻专属预算（constantBudgetChars 之类）：`constant: true` 的条目只能和关键词命中共用同一个 6000 字预算。'
+        + '真卡实测 7 条常驻共 10512 字 → 2 条被静默裁掉，而常驻条目本来就是「必须一直生效」的那类，被裁是最难察觉的失效。'
+        + '该找 host-core（常驻单独给一份 allowance，且优先于关键词命中占预算）')
+    }
+
+    // ② 诊断里要把「被裁」拆成两类，否则用户/日志分不清是谁抢了预算
+    if (/constantDropped/u.test(tavern) && /keywordDropped/u.test(tavern)) {
+      ok('diag 分开了 constantDropped / keywordDropped')
+    } else if (/droppedByBudget/u.test(tavern)) {
+      bad('diag 分开了 constantDropped / keywordDropped',
+        '只有笼统的 `droppedByBudget`：分不清被裁的是常驻还是命中条目，面板和日志都没法给出可执行的解释。'
+        + '该找 host-core（diagnostics 里拆成 constantDropped 与 keywordDropped）')
+    } else {
+      bad('diag 分开了 constantDropped / keywordDropped',
+        'diagnostics 里看不到任何「被裁条目」的记录：超出预算的条目会彻底消失，用户只会觉得「设定怎么没生效」。该找 host-core')
+    }
+  }
+
+  // ③ 日志要带上被裁条目名（只记条数等于什么都没记）
+  const promptSrc = await readSource('src/prompt.ts')
+  if (promptSrc === undefined) {
+    bad('src/prompt.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else if (/constantDropped|keywordDropped|droppedByBudget/u.test(promptSrc)) {
+    ok('世界书日志会带被裁条目名')
+  } else {
+    bad('世界书日志会带被裁条目名',
+      'prompt.ts 的世界书日志没有引用任何「被裁」列表：预算不足时日志里只有命中条数，用户与维护者都不知道少了哪几条。'
+      + '该找 host-core（日志带上 constantDropped / keywordDropped 的名字，正文仍不记）')
+  }
+}
+
+// ================================================================ 19. key 宏展开
+head('[19] key 匹配前展开宏（{{user}} / {{char}} 写在关键词里也能命中）')
+{
+  const tavern = await readSource('src/tavern.ts')
+  if (tavern === undefined) {
+    bad('src/tavern.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    // matchesKey 的函数体（用括号配对取，别写行号）
+    const defAt = /function\s+matchesKey\s*\(/u.exec(tavern)
+    let body = ''
+    if (defAt !== null) {
+      const braceAt = tavern.indexOf('{', defAt.index + defAt[0].length)
+      body = braceAt < 0 ? '' : (sliceBalanced(tavern, braceAt) ?? '')
+    }
+    if (defAt === null) {
+      bad('matchesKey 可定位', 'src/tavern.ts 里找不到 function matchesKey —— 匹配函数改名了？该找 host-core')
+    } else {
+      const expandsInMatch = /expandMacros/u.test(body)
+      // 也允许在调用点展开（matchesKey(expandMacros(key, ctx), …)）
+      const callSites = [...tavern.matchAll(/matchesKey\s*\(/gu)]
+        .filter(m => !/function\s*$/u.test(tavern.slice(Math.max(0, m.index - 20), m.index)))
+      const expandsAtCall = callSites.some(m => /expandMacros/u.test(tavern.slice(m.index, m.index + 160)))
+      // 也允许「先把 key 列表整体展开再传进来」——这是比函数内展开更省事的写法：
+      // 一个 expandKeyList(keys, ctx) 同时覆盖主 key 与 secondary_keys（本轮 D 的实现就是这种）。
+      const keyListHelper = /function\s+expandKey\w*\s*\(/u.test(tavern)
+        || /expandMacros\(\s*key\b|key\s*=>\s*expandMacros\(/u.test(tavern)
+      const helperWired = keyListHelper
+        && /expandKey\w*\(\s*entry\.keys|expandKey\w*\(\s*keys/u.test(tavern)
+      if (expandsInMatch || expandsAtCall || helperWired) {
+        ok('key 在匹配前展开宏',
+          expandsInMatch ? 'matchesKey 内部展开' : expandsAtCall ? '调用点展开' : '先把 key 列表整体展开（expandKeyList）')
+      } else {
+        bad('key 在匹配前展开宏',
+          'matchesKey 拿到的是**原始 key 字符串**：卡里把关键词写成 `{{user}}`（酒馆卡里很常见）时，'
+          + '匹配文本里是展开后的用户名，两边永远对不上 → 该条目永不命中，用户只会觉得「这条设定从来没生效过」。'
+          + '该找 host-core（匹配前对 key 走 expandMacros，secondary_keys 同理）')
+      }
+
+      // 次级关键词：同一类问题，容易只修主 key 忘了它
+      const secAt = /function\s+secondaryPasses\s*\(/u.exec(tavern)
+      const secExpandedAtList = /expandKey\w*\(\s*entry\.secondary_keys|expandKey\w*\(\s*secondary/u.test(tavern)
+      if (secExpandedAtList) {
+        ok('secondary_keys 也展开宏', '在 key 列表层展开（expandKeyList(entry.secondary_keys)）')
+      } else if (secAt === null) {
+        skipped('secondary_keys 也展开宏', '找不到 secondaryPasses —— 可能改名或内联了')
+      } else {
+        const secBrace = tavern.indexOf('{', secAt.index + secAt[0].length)
+        const secBody = secBrace < 0 ? '' : (sliceBalanced(tavern, secBrace) ?? '')
+        const secExpands = /expandMacros/u.test(secBody)
+          || [...tavern.matchAll(/secondaryPasses\s*\(/gu)].some(m => /expandMacros/u.test(tavern.slice(m.index, m.index + 200)))
+        if (secExpands) ok('secondary_keys 也展开宏', 'secondaryPasses 内部或调用点')
+        else if (expandsInMatch || helperWired) note('主 key 已展开，但 secondary_keys 看不到展开：次级关键词含 {{user}} 时仍会永不命中（同一类坑的下一层）')
+        else skipped('secondary_keys 也展开宏', '主 key 还没展开，先修上面那条')
+      }
+    }
+  }
+}
+
+// ================================================================ 20. 体检分级
+head('[20] 世界书体检分级（error / warn / info，且删掉 ST 语义误报的 order-collision）')
+{
+  const schema = await readSource('client/lorebook-schema.ts')
+  if (schema === undefined) {
+    bad('client/lorebook-schema.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    // ① issue 带 level（只看 LoreIssue 的接口体，不当全文搜）
+    const issueAt = /export\s+interface\s+LoreIssue\s*\{/u.exec(schema)
+    const issueBody = issueAt === null ? '' : (sliceBalanced(schema, schema.indexOf('{', issueAt.index)) ?? '')
+    const levelType = /export\s+type\s+LoreIssueLevel\s*=\s*([^\n]+)/u.exec(schema)?.[1] ?? ''
+    const tiers = ['error', 'warn', 'info'].filter(tier => levelType.includes(tier))
+    if (/\blevel\s*:/u.test(issueBody) && tiers.length === 3) {
+      ok('issue 类型带 level（三档）', 'error / warn / info')
+    } else if (/\blevel\s*:/u.test(issueBody)) {
+      bad('issue 类型带 level（三档）',
+        `LoreIssue 有 level 字段，但等级类型里只看到 ${tiers.length}/3 档（${tiers.join(' / ') || '无'}）——`
+        + '分不清「必须改」和「知道就行」。该找 client-ui')
+    } else {
+      bad('issue 类型带 level（三档）',
+        'LoreIssue 没有 `level`：所有提示都是同一档，用户分不清「必须改」和「知道就行」——'
+        + '真卡上 323 条提示里只有 2 条是真问题，其余全是噪音，就是没有分级的直接后果。该找 client-ui')
+    }
+
+    // ② order-collision 已删。只看**代码里的字符串字面量**：注释里往往正写着「已删掉 order-collision」，
+    //    按裸词搜会把解释性注释当成残留（本轮自己踩过一次）。
+    if (/['"]order-collision['"]/u.test(schema) || /code:\s*['"]order-collision/u.test(schema)) {
+      bad('order-collision 误报已删',
+        '`order-collision` 还在检查表里：酒馆卡的 `insertion_order` 撞车是合法且常见的写法（真卡 22 条同为 20，同序按数组顺序排），'
+        + '把它当问题报，一张真卡就能刷出上百条假告警，冲掉真正要看的那两条。该找 client-ui 删掉这条检查')
+    } else {
+      ok('order-collision 误报已删')
+    }
+  }
+
+  // ③ 面板要真的**消费** level（只看数据层有 level 不等于界面分了档）
+  const editor = (await readSource('client/lorebook-editor.tsx')) ?? ''
+  const editorUsesLevel = /issue\.level|data-level=|LEVEL_RANK|\berrors\b|\bwarns\b|\binfos\b/u.test(editor)
+  if (editorUsesLevel) {
+    ok('面板按三档分组渲染')
+  } else {
+    bad('面板按三档分组渲染',
+      '数据层有 level，但编辑器里看不到任何按等级分组/标注的痕迹（没有 issue.level / data-level / errors·warns·infos）——'
+      + '用户看到的还是一条平铺长列表：323 条里那 2 条真问题照样会被埋掉。该找 client-ui（「N 条必须处理 / M 条建议 / K 条提示」分组）')
+  }
+}
+
+// ================================================================ 21. 不执行但不删
+head('[21] 不执行的正则脚本要「保留 + 告警」（ST 卡是用户资产，删字段不可逆）')
+{
+  const imp = await readSource('src/import-card.ts')
+  if (imp === undefined) {
+    bad('src/import-card.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    // ① ST 把正则脚本放在 data.extensions.regex_scripts，只认顶层等于没检查
+    const knowsStLocation = /extensions[^\n]{0,40}regex_scripts/u.test(imp)
+      || /regex_scripts/u.test(imp) && /data\.extensions/u.test(imp)
+    if (knowsStLocation) {
+      ok('识别 ST 位置 data.extensions.regex_scripts')
+    } else {
+      bad('识别 ST 位置 data.extensions.regex_scripts',
+        'import-card.ts 只认顶层 `data.regex_scripts`：酒馆卡实际把脚本放在 `data.extensions.regex_scripts`，'
+        + '于是真卡的脚本既不告警也不被处理，用户以为它在工作。该找 host-core（两个位置都认）')
+    }
+
+    // ② 不再删字段：删了将来导出/回灌 ST 就缺东西（Lead 2026-11-01 裁决）
+    const deletes = [...imp.matchAll(/delete\s+[^\n]*regex_scripts/gu)].map(m => m[0].trim())
+    if (deletes.length === 0) {
+      ok('不再 delete regex_scripts（保留字段）')
+    } else {
+      bad('不再 delete regex_scripts（保留字段）',
+        `还在删字段（${deletes.join(' / ')}）：ST 卡是用户资产，删了不可逆——将来导出/回灌酒馆会缺东西。`
+        + '「用户以为它在工作」应该用告警 + 面板标注解决，而不是删数据。该找 host-core（保留两个位置，只出告警）')
+    }
+
+    // ③ 导入预览要明说「不执行」，且要说清两侧都不做（否则用户会以为是「暂时没接」）
+    const warnNear = [...imp.matchAll(/warnings\.push\(\s*[`'"]([^`'"]{0,200})/gu)].map(m => m[1])
+    const saysNoExec = warnNear.some(text => /不执行/.test(text) && /正则|regex/u.test(text) && /显示/.test(text))
+    if (saysNoExec) {
+      ok('导入预览警告说明「不执行酒馆正则脚本（提示词侧与显示侧）」')
+    } else {
+      bad('导入预览警告说明「不执行酒馆正则脚本（提示词侧与显示侧）」',
+        '没有一条警告同时说清「不执行 + 正则 + 显示侧」——只写「已忽略」用户会以为以后会支持；'
+        + '必须写明「提示词侧与显示侧都不执行；显示层 DSH 没有扩展点」，指向 README 兼容矩阵。该找 host-core')
+    }
+
+    // ④ depth_prompt 保留但不生效，非空时必须提示
+    const depthAt = imp.indexOf('depth_prompt')
+    if (depthAt < 0) {
+      bad('depth_prompt 非空时出警告',
+        'import-card.ts 里没有 depth_prompt 的检查：字段随卡留着，但既不生效也不提示，用户会以为深度提示词生效了。该找 host-core')
+    } else {
+      const window = imp.slice(Math.max(0, depthAt - 500), depthAt + 900)
+      if (/warnings\.push/u.test(window)) {
+        ok('depth_prompt 非空时出警告')
+      } else {
+        bad('depth_prompt 非空时出警告',
+          '提到了 depth_prompt 但附近没有 warnings.push：警告要么没写、要么写在别处没法判。该找 host-core（非空时提示「保留但不生效」）')
+      }
+    }
+  }
+}
+
 // ================================================================ 汇总
 console.log('')
 if (fail > 0) {

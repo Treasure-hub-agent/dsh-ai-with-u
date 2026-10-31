@@ -19,8 +19,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
 import { FocusEditor } from './editor-focus'
-import { IconChevron, IconPlus, IconTrash } from './icons'
+import { IconAlert, IconChevron, IconPlus, IconTrash } from './icons'
 import {
+  LORE_BUDGET,
   LORE_LIMITS,
   countChars,
   createEntry,
@@ -29,8 +30,10 @@ import {
   moveEntry,
   nextInsertionOrder,
   normalizeKeys,
+  worstLevel,
 } from './lorebook-schema'
-import type { LoreBookDraft, LoreEntryDraft, LoreIssue } from './lorebook-schema'
+import type { LoreBookDraft, LoreEntryDraft, LoreIssue, LoreIssueLevel } from './lorebook-schema'
+import type { LoreDroppedInfo } from './lore-diag'
 import type { Translate } from './text'
 
 export interface LorebookSectionProps {
@@ -42,6 +45,13 @@ export interface LorebookSectionProps {
   dirty: boolean
   /** 卡里有没有可写的 CCv3 信封（false 时整块只给说明，不给控件） */
   supported: boolean
+  /**
+   * 「本轮被预算裁掉」的条目（宿主给才显示）。
+   *
+   * 数据来源见 `lore-diag.ts`：优先 `GET /character` 的 diag，取不到时面板会退到
+   * `GET /preview` 的 `lore`；两路都没有就是 `undefined` → 整块不渲染，不报错。
+   */
+  dropped?: LoreDroppedInfo
   onChangeBook: (patch: Partial<LoreBookDraft>) => void
   onChangeEntries: (next: LoreEntryDraft[]) => void
   t: Translate
@@ -91,7 +101,8 @@ function LoreEntryCard(props: {
 
   const label = entryLabel(entry)
   const shownLabel = label !== '' ? label : t('lore.issueUnnamed', { n: index + 1 })
-  const hasIssue = issues.length > 0
+  /** 这条最严重的等级（只挂一枚徽记，不逐条刷文字；info 只给一个小点） */
+  const level: LoreIssueLevel | undefined = worstLevel(issues)
 
   const changeKeys = (raw: string): void => {
     setKeyText(raw)
@@ -103,8 +114,8 @@ function LoreEntryCard(props: {
   }
 
   return (
-    <div className="awu-loreEntry" data-open={open ? 'true' : 'false'} data-issue={hasIssue ? 'true' : 'false'}>
-      <div className="awu-loreRow" data-enabled={entry.enabled ? 'true' : 'false'} data-issue={hasIssue ? 'true' : 'false'}>
+    <div className="awu-loreEntry" data-open={open ? 'true' : 'false'} data-level={level ?? 'none'}>
+      <div className="awu-loreRow" data-enabled={entry.enabled ? 'true' : 'false'} data-level={level ?? 'none'}>
         <button
           type="button"
           className="awu-loreRowMain"
@@ -114,13 +125,14 @@ function LoreEntryCard(props: {
         >
           <span className="awu-loreRowTitleWrap">
             <span className="awu-loreRowTitle">{shownLabel}</span>
-            {hasIssue && (
+            {level !== undefined && (
               <span
                 className="awu-loreRowFlag"
-                title={t('lore.healthIssues', { n: issues.length })}
-                aria-label={t('lore.healthIssues', { n: issues.length })}
+                data-level={level}
+                title={t('lore.levelBadge', { level: t(`lore.level.${level}`), n: issues.length })}
+                aria-label={t('lore.levelBadge', { level: t(`lore.level.${level}`), n: issues.length })}
               >
-                !
+                {level === 'info' ? '·' : '!'}
               </span>
             )}
           </span>
@@ -175,11 +187,16 @@ function LoreEntryCard(props: {
 
       {open && (
         <div className="awu-loreBody">
-          {hasIssue && (
+          {issues.length > 0 && (
             <ul className="awu-loreEntryIssues">
               {issues.map((issue, i) => (
-                <li key={`${issue.code}-${i}`}>
-                  {t(`lore.issue.${issue.code}`, { detail: issue.detail ?? '', max: limitOf(issue.code) })}
+                <li key={`${issue.code}-${i}`} data-level={issue.level}>
+                  <em className="awu-loreIssueLevel">{t(`lore.level.${issue.level}`)}</em>
+                  {t(`lore.issue.${issue.code}`, {
+                    detail: issue.detail ?? '',
+                    max: limitOf(issue.code),
+                    count: issue.count ?? 0,
+                  })}
                 </li>
               ))}
             </ul>
@@ -314,12 +331,16 @@ function LoreEntryCard(props: {
 
 /** 世界书分区本体。 */
 export function LorebookSection(props: LorebookSectionProps): JSX.Element {
-  const { book, entries, issues, dirty, supported, onChangeBook, onChangeEntries, t, onFocusLayerChange } = props
+  const { book, entries, issues, dirty, supported, dropped, onChangeBook, onChangeEntries, t, onFocusLayerChange } = props
 
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState('')
   /** 全屏长文本层正在编辑哪一条（`''` = 没开） */
   const [focusId, setFocusId] = useState('')
+  /** 「提示」级问题默认折叠（真卡动辄几十条规模提示，展开会淹没真问题） */
+  const [showInfo, setShowInfo] = useState(false)
+  /** 「被预算裁掉」明细默认折叠 */
+  const [showDropped, setShowDropped] = useState(false)
   // 新条目的本地 id 计数：`lore-0/1…` 已经被既有条目占用，这里换个前缀避免撞 key
   const localSeq = useRef(0)
 
@@ -337,6 +358,31 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
     }
     return map
   }, [issues])
+
+  /** 按等级分组：默认只展开 error + warn，info 折叠（真卡的规模提示动辄几十条） */
+  const errorIssues = useMemo(() => issues.filter(issue => issue.level === 'error'), [issues])
+  const warnIssues = useMemo(() => issues.filter(issue => issue.level === 'warn'), [issues])
+  const infoIssues = useMemo(() => issues.filter(issue => issue.level === 'info'), [issues])
+
+  /** 一条问题的显示：等级徽记 + 归属条目 + 文案（params 一次性给全，模板按需取） */
+  const renderIssue = (issue: LoreIssue, keySuffix: string): JSX.Element => {
+    const owner = issue.entryId === '' ? undefined : entries.find(entry => entry.id === issue.entryId)
+    const ownerIndex = owner === undefined ? -1 : entries.indexOf(owner)
+    const name = owner !== undefined
+      ? (entryLabel(owner) !== '' ? entryLabel(owner) : t('lore.issueUnnamed', { n: ownerIndex + 1 }))
+      : undefined
+    return (
+      <li key={`${issue.code}-${keySuffix}`} data-level={issue.level}>
+        <em className="awu-loreIssueLevel">{t(`lore.level.${issue.level}`)}</em>
+        {name !== undefined && <b>{t('lore.issueFor', { name })}</b>}
+        {t(`lore.issue.${issue.code}`, {
+          detail: issue.detail ?? '',
+          max: limitOf(issue.code),
+          count: issue.count ?? 0,
+        })}
+      </li>
+    )
+  }
 
   const patchEntry = useCallback((id: string, patch: Partial<LoreEntryDraft>): void => {
     onChangeEntries(entries.map(entry => (entry.id === id ? { ...entry, ...patch } : entry)))
@@ -385,29 +431,106 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
             <>
               <div className="awu-editGroupHint">{t('lore.hint')}</div>
 
-              {/* 体检：永远在分区顶部，只提示 */}
-              <div className="awu-loreHealth">
-                <span className="awu-exportPill" data-state={issues.length === 0 ? 'ok' : 'warn'}>
-                  {t('lore.health')} · {issues.length === 0 ? t('lore.healthOk') : t('lore.healthIssues', { n: issues.length })}
-                </span>
-                {issues.length === 0 && <span className="awu-hint">{t('lore.healthHint')}</span>}
+              {/*
+                本轮被预算裁掉的条目（宿主提供才显示）。数据来自 lore-diag.ts：
+                优先 GET /character 的 diag，取不到退 GET /preview.lore，两路都没有就整块不渲染。
+              */}
+              {dropped !== undefined && dropped.entries.length > 0 && (
+                <div className="awu-loreDropped" data-open={showDropped ? 'true' : 'false'}>
+                  <button
+                    type="button"
+                    className="awu-loreDroppedHead"
+                    aria-expanded={showDropped}
+                    onClick={() => setShowDropped(current => !current)}
+                  >
+                    <span className="awu-editGroupChevron" aria-hidden="true">
+                      <IconChevron size={12} />
+                    </span>
+                    <IconAlert size={13} />
+                    <span className="awu-loreDroppedTitle">
+                      {t('lore.dropped.title', { n: dropped.entries.length })}
+                    </span>
+                    <span className="awu-loreDroppedMeta">
+                      {/* 宿主把常驻与关键词拆成两本预算了：有这个字段就分开显示，否则用合并口径 */}
+                      {dropped.constantBudgetChars !== undefined
+                        ? t('lore.dropped.budgetBoth', {
+                          entries: dropped.maxEntries ?? LORE_BUDGET.entries,
+                          chars: dropped.budgetChars ?? LORE_BUDGET.chars,
+                          constant: dropped.constantBudgetChars,
+                        })
+                        : t('lore.dropped.budget', {
+                          entries: dropped.maxEntries ?? LORE_BUDGET.entries,
+                          chars: dropped.budgetChars ?? LORE_BUDGET.chars,
+                        })}
+                    </span>
+                  </button>
+                  {showDropped && (
+                    <ul className="awu-loreDroppedList">
+                      {dropped.entries.map(entry => (
+                        <li key={entry.id}>
+                          <span className="awu-loreDroppedName">{entry.name}</span>
+                          <span className="awu-loreDroppedOrigin">{t(`lore.dropped.${entry.origin}`)}</span>
+                          {entry.chars !== undefined && (
+                            <span className="awu-loreDroppedChars">{t('lore.chars', { n: entry.chars })}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* 一行总览：条数 · 字数 · 常驻 · 本轮预算（预算优先用宿主给的实测值） */}
+              <div className="awu-loreSummary">
+                {t('lore.summary', {
+                  count: totals.count,
+                  chars: t('lore.chars', { n: totals.chars }),
+                  constant: totals.constantCount,
+                  budgetEntries: dropped?.maxEntries ?? LORE_BUDGET.entries,
+                  budgetChars: dropped?.budgetChars ?? LORE_BUDGET.chars,
+                })}
               </div>
-              {issues.length > 0 && (
+
+              {/* 体检分组摘要 + 列表：错误/提醒默认展开，提示默认折叠 */}
+              <div className="awu-loreHealth">
+                <span className="awu-exportPill" data-state={totals.errors > 0 ? 'bad' : totals.errors + totals.warns > 0 ? 'warn' : 'ok'}>
+                  {t('lore.level.error')} {totals.errors}
+                </span>
+                <span className="awu-exportPill" data-state={totals.warns > 0 ? 'warn' : 'none'}>
+                  {t('lore.level.warn')} {totals.warns}
+                </span>
+                <span className="awu-exportPill" data-state={totals.infos > 0 ? 'warn' : 'none'}>
+                  {t('lore.level.info')} {totals.infos}
+                </span>
+                {totals.errors + totals.warns === 0 && (
+                  <span className="awu-hint">{t('lore.healthOk')}</span>
+                )}
+              </div>
+
+              {(errorIssues.length > 0 || warnIssues.length > 0) && (
                 <ul className="awu-issueList awu-loreIssueList" role="status" aria-live="polite">
-                  {issues.map((issue, i) => {
-                    const owner = issue.entryId === '' ? undefined : entries.find(entry => entry.id === issue.entryId)
-                    const ownerIndex = entries.findIndex(entry => entry.id === issue.entryId)
-                    const name = owner !== undefined
-                      ? (entryLabel(owner) !== '' ? entryLabel(owner) : t('lore.issueUnnamed', { n: ownerIndex + 1 }))
-                      : undefined
-                    return (
-                      <li key={`${issue.entryId}-${issue.code}-${i}`}>
-                        {name !== undefined && <b>{t('lore.issueFor', { name })}</b>}
-                        {t(`lore.issue.${issue.code}`, { detail: issue.detail ?? '', max: limitOf(issue.code) })}
-                      </li>
-                    )
-                  })}
+                  {[...errorIssues, ...warnIssues].map((issue, i) => renderIssue(issue, `main-${i}`))}
                 </ul>
+              )}
+
+              {infoIssues.length > 0 && (
+                <div className="awu-loreInfoBlock">
+                  <button
+                    type="button"
+                    className="awu-btn"
+                    data-size="sm"
+                    data-kind="ghost"
+                    aria-expanded={showInfo}
+                    onClick={() => setShowInfo(current => !current)}
+                  >
+                    {showInfo ? t('lore.issues.hideInfo') : t('lore.issues.showInfo', { n: infoIssues.length })}
+                  </button>
+                  {showInfo && (
+                    <ul className="awu-issueList awu-loreIssueList" data-level="info">
+                      {infoIssues.map((issue, i) => renderIssue(issue, `info-${i}`))}
+                    </ul>
+                  )}
+                </div>
               )}
               {entries.length === 0 ? (
                 <div className="awu-loreEmpty">

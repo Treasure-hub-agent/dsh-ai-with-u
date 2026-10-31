@@ -32,6 +32,7 @@ import { RELATION_BANDS, intimacyOf, resolveInteractionMode } from './store.js'
 import {
   type CharacterCardV3,
   type L1Extras,
+  type LoreDroppedEntry,
   type LoreSelection,
   CARD_CONTENT_GUARD,
   LORE_DEFAULTS,
@@ -185,8 +186,31 @@ export interface PreviewSnapshot {
   segments: PreviewSegment[]
   /** 各段 chars 之和（未启用时为 0）。 */
   total: number
-  /** 世界书命中快照（未启用 / 尚未刷新时全 0，budgetChars 给默认预算）。 */
-  lore: { count: number; constantCount: number; hitCount: number; usedChars: number; budgetChars: number }
+  /**
+   * 世界书命中快照。
+   *
+   * 常驻与关键词是**两本预算**，所以有两组数（`usedChars/budgetChars` 是关键词，
+   * `constantUsedChars/constantBudgetChars` 是常驻）；`constantDropped` / `keywordDropped`
+   * 直接列出「哪些设定没进提示词」，面板可以原样展示，不要只报条数。
+   */
+  lore: {
+    count: number
+    constantCount: number
+    hitCount: number
+    /** 实际注入的条数（候选数见 constantCount / hitCount）。 */
+    constantKeptCount: number
+    keywordKeptCount: number
+    usedChars: number
+    budgetChars: number
+    constantUsedChars: number
+    constantBudgetChars: number
+    constantDropped: LoreDroppedEntry[]
+    keywordDropped: LoreDroppedEntry[]
+    /** 本轮按「深度注入」声明、但被当普通设定注入的条数（ST position 4 / @@depth）。 */
+    unsupportedDepthN: number
+    /** 首条常驻超额度仍被注入（说明人设比预算重要）。 */
+    forcedConstantOverBudget: boolean
+  }
 }
 
 /**
@@ -560,6 +584,8 @@ export class PromptController {
         enabled: loreConfig?.enabled !== false,
         scanDepth: typeof loreConfig?.scanDepth === 'number' ? loreConfig.scanDepth : undefined,
         budgetChars: typeof loreConfig?.budgetChars === 'number' ? loreConfig.budgetChars : undefined,
+        // 常驻与关键词分开预算：卡级可覆盖常驻额度（默认 12000，见 LORE_DEFAULTS）
+        constantBudgetChars: typeof loreConfig?.constantBudgetChars === 'number' ? loreConfig.constantBudgetChars : undefined,
         maxEntries: typeof loreConfig?.maxEntries === 'number' ? loreConfig.maxEntries : undefined,
         charName: cardName(card),
         userName: typeof aiwu?.userPersona?.displayName === 'string' && aiwu.userPersona.displayName.trim() !== ''
@@ -588,9 +614,19 @@ export class PromptController {
     // 只有最新一代的刷新才提交（invalidate 之后开工的旧任务直接丢弃）
     if (generation === this.generation) this.cache = next
     if (!reuse && lore.entries.length > 0) {
-      // 只记条数与**条目名**，绝不记正文（正文进日志 = 把卡的内容泄露到可分享的地方）
+      // 只记条数与**条目名**，绝不记正文（正文进日志 = 把卡的内容泄露到可分享的地方）。
+      // 被预算裁掉的条目也要点名：真卡里「7 条常驻被裁 2 条」静默发生过，日志是唯一排查线索。
       const names = lore.entries.map(item => item.name).join('、')
-      const line = `世界书命中 ${lore.entries.length} 条（常驻 ${lore.diag.constantCount} / 关键词 ${lore.diag.hitCount}），占用 ${lore.diag.usedChars}/${lore.diag.budgetChars} 字：${names}`
+      const diag = lore.diag
+      const cut = [...diag.constantDropped, ...diag.keywordDropped]
+      const cutText = cut.length === 0
+        ? ''
+        : `；被裁 ${cut.length} 条（${cut.map(item => item.name).join('、')}）`
+      const depthText = diag.unsupportedDepthN > 0 ? `；${diag.unsupportedDepthN} 条按深度注入（本轮按普通设定注入）` : ''
+      const line = `世界书注入 ${lore.entries.length} 条（常驻 ${diag.constantKeptCount}/${diag.constantCount}、`
+        + `关键词 ${diag.keywordKeptCount}/${diag.hitCount}）`
+        + `，关键词占用 ${diag.usedChars}/${diag.budgetChars} 字，常驻占用 ${diag.constantUsedChars}/${diag.constantBudgetChars} 字`
+        + `${cutText}${depthText}：${names}`
       ;(host?.info ?? host?.warn ?? host?.error)?.call(host, line)
     }
   }
@@ -691,12 +727,23 @@ export class PromptController {
         count: cache?.lore?.entries.length ?? 0,
         constantCount: diag?.constantCount ?? 0,
         hitCount: diag?.hitCount ?? 0,
+        constantKeptCount: diag?.constantKeptCount ?? 0,
+        keywordKeptCount: diag?.keywordKeptCount ?? 0,
         usedChars: diag?.usedChars ?? 0,
         // `selectLoreEntries` 在「卡里没有世界书」时返回的 diag 全是 0（早退分支），
         // 这里回落到默认预算——否则面板会显示「预算 0」，看着像坏了。
         budgetChars: diag?.budgetChars !== undefined && diag.budgetChars > 0
           ? diag.budgetChars
           : LORE_DEFAULTS.budgetChars,
+        constantUsedChars: diag?.constantUsedChars ?? 0,
+        constantBudgetChars: diag?.constantBudgetChars !== undefined && diag.constantBudgetChars > 0
+          ? diag.constantBudgetChars
+          : LORE_DEFAULTS.constantBudgetChars,
+        // 被裁条目明细：面板要能逐条说「这条设定没进提示词」，只报条数等于没说
+        constantDropped: diag?.constantDropped ?? [],
+        keywordDropped: diag?.keywordDropped ?? [],
+        unsupportedDepthN: diag?.unsupportedDepthN ?? 0,
+        forcedConstantOverBudget: diag?.forcedConstantOverBudget ?? false,
       },
     }
   }

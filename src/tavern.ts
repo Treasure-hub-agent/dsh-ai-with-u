@@ -44,10 +44,18 @@ export const LENGTH_LIMITS = {
 export const LORE_DEFAULTS = {
   /** 扫最近几条角色消息（近似 D0..Dn 槽位；`dsh-tavern` 默认 4、universal-worldbook 默认 3 槽）。 */
   scanDepth: 4,
-  /** 单轮最多注入几条（`dsh-bard` 默认 12）。 */
+  /** 单轮最多注入几条**关键词命中**（`dsh-bard` 默认 12）。 */
   maxEntries: 12,
-  /** 单轮字符预算（`dsh-bard` 默认 maxChars=6000；我们没有 tokenizer，按字符算）。 */
+  /** 单轮**关键词命中**的字符预算（`dsh-bard` 默认 maxChars=6000；我们没有 tokenizer，按字符算）。 */
   budgetChars: 6000,
+  /**
+   * 单轮**常驻条目**的字符预算（与关键词命中分开算）。
+   *
+   * 为什么单独给：常驻（`constant: true`）是「不说就不像他」的设定，被关键词预算挤掉
+   * 等于人设缺一块——实测真酒馆卡 7 条常驻共 10512 字，在 6000 的共享预算下被静默裁掉 2 条。
+   * 默认 12000：容得下常见卡的全部常驻；卡级可用 `extensions.aiwu.prompt.lore.constantBudgetChars` 覆盖。
+   */
+  constantBudgetChars: 12000,
   /** 递归激活：第一版**明确不做**（报告 §4.3.3：收益低、放大预算风险）。 */
   recursive: false,
   /** `token_budget`（token）→ 字符的换算系数（中文保守估计 1 token ≈ 1.5 字）。 */
@@ -96,11 +104,14 @@ export interface CharacterBookEntry {
   case_sensitive?: boolean
   name?: string
   priority?: number
+  /** ST 导出常见写法：顶层 `probability`（0-100，稳定哈希触发率）。老卡也会塞进 `extensions`。 */
+  probability?: number | string
   id?: number | string
   comment?: string
   selective?: boolean
   secondary_keys?: string[]
-  position?: 'before_char' | 'after_char'
+  /** ST 的注入位置：`'before_char'`(0) / `'after_char'`(1) / 数字 4 = 深度注入（本轮不支持）。 */
+  position?: 'before_char' | 'after_char' | number | string
 }
 
 /** 世界书（CCv3 `character_book`）。 */
@@ -185,9 +196,11 @@ export interface AiwuLoreConfig {
   enabled?: boolean
   /** 扫最近几条角色消息（null = 用默认 4）。 */
   scanDepth?: number | null
-  /** 单轮字符预算（null = 用默认 6000）。 */
+  /** 单轮**关键词命中**的字符预算（null = 用默认 6000）。 */
   budgetChars?: number | null
-  /** 单轮最多注入几条（null = 用默认 12）。 */
+  /** 单轮**常驻条目**的字符预算（null = 用默认 12000）。 */
+  constantBudgetChars?: number | null
+  /** 单轮最多注入几条关键词命中（null = 用默认 12）。 */
   maxEntries?: number | null
   /** 递归激活（未实现；留字段是为了将来不用改卡）。 */
   recursive?: boolean | null
@@ -1300,28 +1313,61 @@ export function parseDecorators(content: string): { content: string; decorators:
 
 // ============================================================================ 世界书选择（⏳ 默认值待调研定稿）
 
+/** 被预算裁掉的一条（面板/日志用它告诉你「哪条设定没进提示词」）。 */
+export interface LoreDroppedEntry {
+  id: string
+  name: string
+  chars: number
+}
+
 export interface LoreSelectionDiagnostics {
   scannedChars: number
+  /** 关键词命中的**候选**条数（超预算/超条数被裁的也计在内）。 */
   hitCount: number
+  /** 常驻条目的**候选**条数（同上，是候选不是最终注入数）。 */
   constantCount: number
+  /** 关键词命中**实际注入**的条数（≤ hitCount）。 */
+  keywordKeptCount: number
+  /** 常驻**实际注入**的条数（≤ constantCount）。 */
+  constantKeptCount: number
+  /** 关键词命中实际占用的字符数（不含常驻）。 */
   usedChars: number
+  /** 关键词命中的预算（与常驻分开算）。 */
   budgetChars: number
+  /** 常驻条目实际占用的字符数（与关键词分开算）。 */
+  constantUsedChars: number
+  /** 常驻条目的预算（卡级可覆盖，默认 {@link LORE_DEFAULTS.constantBudgetChars}）。 */
+  constantBudgetChars: number
+  /** 关键词命中的条数上限（不含常驻）。 */
   maxEntries: number
-  /** 首条超预算仍被注入（保证"命中了却什么都没给"不会发生）。 */
+  /** 首条关键词命中超预算仍被注入（保证"命中了却什么都没给"不会发生）。 */
   forcedOverBudget: boolean
+  /** 首条常驻超额度仍被注入（保证"有常驻却一条都没注入"不会发生）。 */
+  forcedConstantOverBudget: boolean
+  /** 被预算裁掉的**常驻**条目（按 `{id,name,chars}` 列出，面板直接可显示）。 */
+  constantDropped: LoreDroppedEntry[]
+  /** 被预算/条数裁掉的**关键词命中**条目。 */
+  keywordDropped: LoreDroppedEntry[]
+  /** 本轮被裁条目的 id 列表（**向后兼容**：= constantDropped + keywordDropped 的 id）。 */
   droppedByBudget: string[]
+  /** 候选里带「深度注入」语义（`position: 4` / `@@depth` / `role+depth`）且本轮被注入的条数。 */
+  unsupportedDepthN: number
   deduped: string[]
 }
 
 export interface LoreSelection {
-  entries: Array<{ id: string; name: string; position: 'before_char' | 'after_char'; text: string }>
+  entries: Array<{ id: string; name: string; position: LorePosition; text: string }>
   text: string
   diag: LoreSelectionDiagnostics
 }
 
 export interface LoreSelectOptions {
   scanDepth?: number
+  /** 关键词命中的字符预算（不含常驻）。 */
   budgetChars?: number
+  /** 常驻条目的字符预算（不含关键词；缺省 {@link LORE_DEFAULTS.constantBudgetChars}）。 */
+  constantBudgetChars?: number
+  /** 关键词命中的条数上限（不含常驻）。 */
   maxEntries?: number
   /** 递归激活（未实现，占位；调用方传 true 会在实现里被忽略并留注释）。 */
   recursive?: boolean
@@ -1339,11 +1385,13 @@ interface ScoredEntry {
   /** 对外暴露的 id（原始 id / name / 内容摘要）。 */
   id: string
   name: string
-  position: 'before_char' | 'after_char'
+  position: LorePosition
   text: string
   constant: boolean
   priority: number
   order: number
+  /** 这条带「深度注入」语义（position 4 / @@depth / role+depth）：本轮按普通设定注入并计数。 */
+  depthUnsupported: boolean
 }
 
 function entryIdentity(entry: CharacterBookEntry): string {
@@ -1354,6 +1402,62 @@ function entryIdentity(entry: CharacterBookEntry): string {
 
 function entryExtensions(entry: CharacterBookEntry): Json {
   return isRecord(entry.extensions) ? entry.extensions : {}
+}
+
+/** 世界书条目的注入位置（ST `position`：只有 before/after 两种，深度注入本轮不支持）。 */
+export type LorePosition = 'before_char' | 'after_char'
+
+/**
+ * 归一 `position` 字段（ST 的写法有好几种，不能只认字符串）。
+ *
+ * - `0` / `'before_char'` / `'before'` → 角色定义**之前**
+ * - `1` / `'after_char'` / `'after'` → 角色定义**之后**（ST 缺省值）
+ * - `4` / `'at_depth'` / `'depth'` → 深度注入（本轮不支持：**仍然注入**，按 after 摆，并标记 `depthUnsupported`）
+ * - 其它未知值 → 同上（不认识就按 after 摆，绝不静默丢设定——丢设定比位置不准更糟）
+ */
+export function lorePositionOf(rawEntry: CharacterBookEntry | Json): { position: LorePosition; depthUnsupported: boolean } {
+  const raw = (rawEntry as Json)['position']
+  if (raw === 0 || raw === '0' || raw === 'before_char' || raw === 'before') {
+    return { position: 'before_char', depthUnsupported: false }
+  }
+  if (raw === 1 || raw === '1' || raw === 'after_char' || raw === 'after') {
+    return { position: 'after_char', depthUnsupported: false }
+  }
+  if (raw === undefined || raw === null || raw === '') return { position: 'after_char', depthUnsupported: false }
+  return { position: 'after_char', depthUnsupported: true }
+}
+
+/**
+ * 条目是否要求「按深度注入」（`@@depth` 装饰器 / `extensions.depth` + `role`）。
+ *
+ * 本轮不做深度注入：内容照常注入，只统计条数并在导入时说一句，所以这里只判"要不要计数"。
+ */
+export function entryWantsDepth(entry: CharacterBookEntry | Json, decorators: Record<string, string> = {}): boolean {
+  if (decorators['depth'] !== undefined) return true
+  const record = entry as Json
+  const extensions = isRecord(record['extensions']) ? record['extensions'] : {}
+  if (typeof extensions['depth'] === 'number') return true
+  if (typeof record['depth'] === 'number') return true
+  if (typeof record['role'] === 'string' && record['role'].trim() !== '') return true
+  if (typeof extensions['role'] === 'string' && extensions['role'].trim() !== '') return true
+  return false
+}
+
+/**
+ * 导入时用：这本书里有多少条带「深度注入」语义（`position: 4` / `@@depth` / `role+depth`）。
+ *
+ * 只统计、不改数据——导入侧的警告文案靠它说清「有 N 条本插件会按普通设定注入」。
+ */
+export function countDepthEntries(book?: CharacterBook): number {
+  if (book === undefined || !Array.isArray(book.entries)) return 0
+  let count = 0
+  for (const raw of book.entries) {
+    if (!isRecord(raw)) continue
+    const entry = raw as unknown as CharacterBookEntry
+    const parsed = parseDecorators(str(entry.content))
+    if (lorePositionOf(entry).depthUnsupported || entryWantsDepth(entry, parsed.decorators)) count += 1
+  }
+  return count
 }
 
 /**
@@ -1449,8 +1553,22 @@ function selectiveLogicOf(entry: CharacterBookEntry): number {
   return SELECTIVE_LOGIC.AND_ANY
 }
 
-function secondaryPasses(entry: CharacterBookEntry, scanned: string): boolean {
-  const secondary = list(entry.secondary_keys)
+/**
+ * 关键词上展开宏（`{{user}}` / `{{char}}` / `{{random:…}}`）。
+ *
+ * 为什么必须做：真酒馆卡的常驻条目 key 就写成 `{{user}}即是管理员`，直接拿原始 key 匹配
+ * **永远命中不到**（用户看到的是"这条设定怎么没了"）。未知宏由 `expandMacros` 原样保留，
+ * 所以展开后不会变成空串；万一真的变空（例如 `{{// 注释}}`），调用方必须丢掉这条 key——
+ * **空 key 会误命中一切**。
+ */
+function expandKeyList(keys: unknown, ctx: MacroContext): string[] {
+  return list(keys)
+    .map(key => expandMacros(key, ctx).trim())
+    .filter(key => key !== '')
+}
+
+function secondaryPasses(entry: CharacterBookEntry, scanned: string, ctx: MacroContext): boolean {
+  const secondary = expandKeyList(entry.secondary_keys, ctx)
   if (secondary.length === 0) return true
   const hits = secondary.filter(key => matchesKey(key, scanned, entry)).length
   switch (selectiveLogicOf(entry)) {
@@ -1489,11 +1607,19 @@ export function selectLoreEntries(
       scannedChars: 0,
       hitCount: 0,
       constantCount: 0,
+      keywordKeptCount: 0,
+      constantKeptCount: 0,
       usedChars: 0,
       budgetChars: 0,
+      constantUsedChars: 0,
+      constantBudgetChars: 0,
       maxEntries: 0,
       forcedOverBudget: false,
+      forcedConstantOverBudget: false,
+      constantDropped: [],
+      keywordDropped: [],
       droppedByBudget: [],
+      unsupportedDepthN: 0,
       deduped: [],
     },
   }
@@ -1516,6 +1642,14 @@ export function selectLoreEntries(
     explicitBudget === undefined && tokenBudget === undefined ? LORE_DEFAULTS.budgetChars : Number.MAX_SAFE_INTEGER,
   ))
   const maxEntries = positiveInt(options.maxEntries) ?? LORE_DEFAULTS.maxEntries
+  // 常驻与关键词**分开预算**：常驻有自己的 allowance，不吃 maxEntries / budgetChars
+  const constantBudgetChars = positiveInt(options.constantBudgetChars) ?? LORE_DEFAULTS.constantBudgetChars
+  // 关键词（含次级键）与内容用同一个宏上下文：`{{user}}` 之类展开后才能匹配得上
+  const macroCtx: MacroContext = {
+    char: options.charName ?? '',
+    user: options.userName ?? '你',
+    mode: 'stable',
+  }
 
   const seen = new Set<string>()
   const seenContent = new Set<string>()
@@ -1532,11 +1666,7 @@ export function selectLoreEntries(
     if (entryExtensions(entry)['disable'] === true) continue
 
     const parsed = parseDecorators(str(entry.content))
-    const text = expandMacros(parsed.content, {
-      char: options.charName ?? '',
-      user: options.userName ?? '你',
-      mode: 'stable',
-    })
+    const text = expandMacros(parsed.content, macroCtx)
     if (text.trim() === '') continue
 
     const identity = entryIdentity(entry)
@@ -1548,16 +1678,23 @@ export function selectLoreEntries(
 
     // 装饰器覆盖：@@dont_activate = 不参与关键词激活，只靠 constant
     const blocked = parsed.decorators['dont_activate'] !== undefined
-    const keysHit = !blocked && list(entry.keys).some(key => matchesKey(key, scanned, entry))
+    // 🔴 key 必须先展开宏：真卡里 `{{user}}即是管理员` 这种 key 不展开就永远匹配不到
+    const keys = blocked ? [] : expandKeyList(entry.keys, macroCtx)
+    const keysHit = keys.some(key => matchesKey(key, scanned, entry))
     // 次级关键词只在 `selective: true` 时生效：SillyTavern 里 selective 关掉就代表
     // 「次级键只是备注，不参与激活」。旧实现无条件套用次级键，导致导入卡里
     // 「写了次级键但没勾选择性」的条目静默不激活（用户看到的是「设定怎么没了」）。
-    const useSecondary = entry.selective === true && list(entry.secondary_keys).length > 0
-    let active = isConstant || (keysHit && (!useSecondary || secondaryPasses(entry, scanned)))
+    const useSecondary = entry.selective === true && expandKeyList(entry.secondary_keys, macroCtx).length > 0
+    let active = isConstant || (keysHit && (!useSecondary || secondaryPasses(entry, scanned, macroCtx)))
 
-    // probability：稳定哈希，同一轮内结果固定（Math.random 会毁缓存）
+    // probability：稳定哈希，同一轮内结果固定（Math.random 会毁缓存）。
+    // ST 导出里这个字段两个位置都出现过：**顶层优先**，没有再读 extensions（老卡常见）。
     if (active) {
-      const probability = Number(entryExtensions(entry)['probability'])
+      const topLevelProbability = (entry as unknown as Json)['probability']
+      const raw = topLevelProbability !== undefined && topLevelProbability !== null
+        ? topLevelProbability
+        : entryExtensions(entry)['probability']
+      const probability = Number(raw)
       if (Number.isFinite(probability) && probability > 0 && probability < 100) {
         active = fnv1a(`${turnSeed}:${identity}`) % 100 < probability
       }
@@ -1573,16 +1710,18 @@ export function selectLoreEntries(
 
     if (isConstant) constantCount += 1
     else hitCount += 1
+    const placed = lorePositionOf(entry)
     scored.push({
       entry,
       key: identity,
       id: displayId,
       name: isEmptyText(entry.name) ? displayId : str(entry.name).trim(),
-      position: entry.position === 'before_char' ? 'before_char' : 'after_char',
+      position: placed.position,
       text,
       constant: isConstant,
       priority: typeof entry.priority === 'number' ? entry.priority : 0,
       order: typeof entry.insertion_order === 'number' ? entry.insertion_order : 100,
+      depthUnsupported: placed.depthUnsupported || entryWantsDepth(entry, parsed.decorators),
     })
   }
 
@@ -1594,29 +1733,78 @@ export function selectLoreEntries(
   })
 
   const kept: ScoredEntry[] = []
+  const constantDropped: LoreDroppedEntry[] = []
+  const keywordDropped: LoreDroppedEntry[] = []
   const dropped: string[] = []
+  let unsupportedDepthN = 0
+  const keep = (item: ScoredEntry): void => {
+    kept.push(item)
+    if (item.depthUnsupported) unsupportedDepthN += 1
+  }
+  const drop = (item: ScoredEntry, bucket: LoreDroppedEntry[]): void => {
+    bucket.push({ id: item.id, name: item.name, chars: item.text.length })
+    dropped.push(item.id)
+  }
+
+  // ---------------- 常驻：自己的 allowance，不吃 maxEntries / budgetChars ----------------
+  let constantUsed = 0
+  let constantKept = 0
+  let forcedConstantOverBudget = false
+  for (const item of scored) {
+    if (!item.constant) continue
+    const size = item.text.length
+    if (constantKept === 0 && size > constantBudgetChars) {
+      // 第一条常驻即使超额度也进：绝不出现「有常驻却一条都没注入」这种静默缺人设
+      forcedConstantOverBudget = true
+      keep(item)
+      constantUsed += size
+      constantKept += 1
+      continue
+    }
+    if (constantKept > 0 && constantUsed + size > constantBudgetChars) {
+      drop(item, constantDropped)
+      continue
+    }
+    keep(item)
+    constantUsed += size
+    constantKept += 1
+  }
+
+  // ---------------- 关键词命中：仍走 maxEntries / budgetChars ----------------
   let used = 0
+  let keywordKept = 0
   let forcedOverBudget = false
   for (const item of scored) {
-    if (kept.length >= maxEntries) { dropped.push(item.id); continue }
-    if (used + item.text.length > budgetChars) {
+    if (item.constant) continue
+    const size = item.text.length
+    if (keywordKept >= maxEntries) { drop(item, keywordDropped); continue }
+    if (used + size > budgetChars) {
       // 首条超预算也注入：宁可超一点，也不能"命中了却什么都没给模型"
-      if (kept.length === 0) {
-        kept.push(item)
-        used += item.text.length
+      if (keywordKept === 0) {
+        keep(item)
+        used += size
+        keywordKept += 1
         forcedOverBudget = true
         continue
       }
-      dropped.push(item.id)
+      drop(item, keywordDropped)
       continue
     }
-    used += item.text.length
-    kept.push(item)
+    keep(item)
+    used += size
+    keywordKept += 1
   }
 
+  // 渲染时按 position 分两段：常驻在前（它们决定"像不像他"），关键词命中在后
   const sections: Array<{ title: string; items: ScoredEntry[] }> = [
-    { title: '▎先读这些设定（世界书 · before_char）', items: kept.filter(i => i.position === 'before_char') },
-    { title: '▎相关设定（世界书命中）', items: kept.filter(i => i.position === 'after_char') },
+    {
+      title: '▎先读这些设定（世界书 · before_char）',
+      items: kept.filter(i => i.position === 'before_char'),
+    },
+    {
+      title: '▎相关设定（世界书命中）',
+      items: kept.filter(i => i.position === 'after_char'),
+    },
   ]
   const blocks: string[] = []
   for (const section of sections) {
@@ -1631,11 +1819,19 @@ export function selectLoreEntries(
       scannedChars: scanned.length,
       hitCount,
       constantCount,
+      keywordKeptCount: keywordKept,
+      constantKeptCount: constantKept,
       usedChars: used,
       budgetChars,
+      constantUsedChars: constantUsed,
+      constantBudgetChars,
       maxEntries,
       forcedOverBudget,
+      forcedConstantOverBudget,
+      constantDropped,
+      keywordDropped,
       droppedByBudget: dropped,
+      unsupportedDepthN,
       deduped,
     },
   }

@@ -25,6 +25,7 @@ import { IconChevron, IconPlus, IconQuill, IconTrash } from './icons'
 import { LorebookSection } from './lorebook-editor'
 import { loreIssues, mergeLoreIntoCard, toLoreDraftFromCard } from './lorebook-schema'
 import type { LoreBookDraft, LoreEntryDraft } from './lorebook-schema'
+import type { LoreDroppedInfo } from './lore-diag'
 import type { Translate } from './text'
 
 /**
@@ -231,6 +232,8 @@ export function CardEditor(props: {
   card: Card
   /** 完整 CCv3（世界书 / 未知键都在这里）；旧后端只给 card 时为空 */
   ccv3?: Card
+  /** 本轮被世界书预算裁掉的条目（宿主给才显示；见 lore-diag.ts） */
+  droppedLore?: LoreDroppedInfo
   name: string
   source: string
   busy: boolean
@@ -243,7 +246,7 @@ export function CardEditor(props: {
   /** 草稿脏状态变化：面板据此在收起前先问一句。 */
   onDirtyChange?: (dirty: boolean) => void
 }): JSX.Element {
-  const { card, ccv3, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
+  const { card, ccv3, droppedLore, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
 
   const [draft, setDraft] = useState<Draft>(() => toDraft(card))
   // 默认展开：基本信息 + 声线（灵魂字段），其余折叠，避免一屏全是输入框
@@ -405,6 +408,7 @@ export function CardEditor(props: {
           issues={loreIssueList}
           dirty={loreDirty}
           supported={loreSupported}
+          dropped={droppedLore}
           onChangeBook={patch => setLore(current => ({ ...current, book: { ...current.book, ...patch } }))}
           onChangeEntries={next => setLore(current => ({ ...current, entries: next }))}
           onFocusLayerChange={setLoreFocus}

@@ -49,25 +49,57 @@ export interface LoreBookDraft {
   unknown: Record<string, unknown>
 }
 
-/** 问题码。前两条是「静默永不命中」——architect 实测撞过，必须在面板上提示。 */
+/**
+ * 体检等级。
+ *
+ * 真卡（89 条 / 9.9 万字）在旧规则下报了 **323 条「问题」**，而真正会失效的只有 2 条。
+ * 所以规则必须分级：
+ *  - `error`：这条/这本书**真的不会生效**（没关键词也不是常驻、内容为空）；
+ *  - `warn`：多半是配置失误，但玩法上还成立；
+ *  - `info`：只是「知道一下」的规模提示（真卡常态，不该刷屏）。
+ */
+export type LoreIssueLevel = 'error' | 'warn' | 'info'
+
+/**
+ * 问题码。
+ *
+ * ⚠️ 2026-10-31 真卡适配后**删掉了两条规则**：
+ *  - `order-collision`：ST 的 `insertion_order` 同值极常见（真卡里 22 条同为 20），
+ *    同序按数组顺序排，本来就不冲突 —— 报它是纯噪声。
+ *  - `selective-without-secondary`：`selective:true` + 空 secondary 在 ST 里等于该字段无效，
+ *    功能完全正常（真卡 57 条命中），没有可执行动作，干脆不报。
+ */
 export type LoreIssueCode =
   | 'no-keys'
-  | 'selective-without-secondary'
   | 'empty-content'
   | 'duplicate-keys'
-  | 'order-collision'
   | 'content-too-long'
   | 'too-many-entries'
   | 'book-too-large'
 
 export interface LoreIssue {
+  /** 条目级问题给条目 id；书级/聚合类问题给空串 */
   entryId: string
   code: LoreIssueCode
-  /** 给 UI 直接显示的补充信息（关键词、字数等），已格式化 */
+  level: LoreIssueLevel
+  /** 给 UI 直接显示的补充信息（关键词、字数、占比等），已格式化 */
   detail?: string
+  /** 聚合类问题（如重复关键词）带上的条数 */
+  count?: number
 }
 
-/** 与架构稿 §5.1 对齐的阈值（客户端只做提示，不阻断保存）。 */
+/**
+ * 注入预算（与宿主 `selectLoreEntries` 的默认值一致：**12 条 / 6000 字**）。
+ *
+ * 体检用它来判断"这条占了多少预算"——真卡单条 800~2600 字是常态，
+ * 拿 800 字当硬线只会制造噪声。
+ */
+export const LORE_BUDGET = {
+  entries: 12,
+  chars: 6000,
+} as const
+
+/** 体积参考线（只用于 info 提示，不阻断保存）。 */
 export const LORE_LIMITS = {
   contentChars: 800,
   totalChars: 20_000,
@@ -367,82 +399,104 @@ export function moveEntry(entries: LoreEntryDraft[], index: number, delta: -1 | 
 // ---------------------------------------------------------------- 体检
 
 /**
- * 结构问题检测。
+ * 结构问题检测（分级版）。
  *
  * 只报"用户很可能没意识到"的问题；**不阻断保存**（架构稿 §5.2：不拒绝保存）。
- * 前两条是「静默永不命中」，必须在面板上显式提示。
+ * 真卡（89 条 / 9.9 万字 / 89 条 use_regex）实测：旧规则 323 条，其中只有 2 条真问题；
+ * 现在 error 只留「真的不会生效」这两种，其余降为 info，且重复关键词**按关键词聚合成一条**。
  */
 export function loreIssues(entries: LoreEntryDraft[]): LoreIssue[] {
   const issues: LoreIssue[] = []
 
-  const keyOwners = new Map<string, string[]>()
-  const orderOwners = new Map<number, string[]>()
+  /** 关键词 → 拥有它的条目（聚合用；ST 允许多条共用关键词，这不是错） */
+  const keyOwners = new Map<string, { key: string; ids: string[] }>()
 
   for (const entry of entries) {
     const keys = entry.keys.map(key => key.trim()).filter(key => key !== '')
-    const secondary = entry.secondaryKeys.map(key => key.trim()).filter(key => key !== '')
 
-    // ① 没关键词：常驻条目不需要关键词，其余就是"永远命不中"
+    // error ①：非常驻且没关键词 —— 永远命不中（architect 实测撞过，必须报）
     if (!entry.constant && keys.length === 0) {
-      issues.push({ entryId: entry.id, code: 'no-keys' })
+      issues.push({ entryId: entry.id, code: 'no-keys', level: 'error' })
     }
 
-    // ② selective 要求次级关键词同时命中；没有次级就是永不命中
-    if (entry.selective && !entry.constant && secondary.length === 0) {
-      issues.push({ entryId: entry.id, code: 'selective-without-secondary' })
-    }
-
+    // error ②：内容为空 —— 注入了也等于没注入
     if (entry.content.trim() === '') {
-      issues.push({ entryId: entry.id, code: 'empty-content' })
+      issues.push({ entryId: entry.id, code: 'empty-content', level: 'error' })
     }
 
+    // info：单条偏大。真卡 800~2600 字是常态，所以只报"占本轮预算多少"，不是硬伤
     const chars = countChars(entry.content)
     if (chars > LORE_LIMITS.contentChars) {
-      issues.push({ entryId: entry.id, code: 'content-too-long', detail: String(chars) })
+      const percent = Math.round((chars / LORE_BUDGET.chars) * 100)
+      issues.push({
+        entryId: entry.id,
+        code: 'content-too-long',
+        level: 'info',
+        detail: `${chars} 字 · ${percent}%`,
+      })
     }
 
     for (const key of keys) {
       const lower = key.toLowerCase()
-      const owners = keyOwners.get(lower)
-      if (owners === undefined) keyOwners.set(lower, [entry.id])
-      else owners.push(entry.id)
-    }
-
-    const orderOwnersList = orderOwners.get(entry.insertionOrder)
-    if (orderOwnersList === undefined) orderOwners.set(entry.insertionOrder, [entry.id])
-    else orderOwnersList.push(entry.id)
-  }
-
-  for (const [key, owners] of keyOwners) {
-    if (owners.length > 1) {
-      for (const entryId of owners) issues.push({ entryId, code: 'duplicate-keys', detail: key })
+      const bucket = keyOwners.get(lower)
+      if (bucket === undefined) keyOwners.set(lower, { key, ids: [entry.id] })
+      else bucket.ids.push(entry.id)
     }
   }
 
-  for (const [order, owners] of orderOwners) {
-    if (owners.length > 1) {
-      for (const entryId of owners) issues.push({ entryId, code: 'order-collision', detail: String(order) })
+  // info：多个条目共享关键词 —— ST 里本来就会一起注入，是按关键词**聚合报一条**
+  //（真卡里 110 条命中其实只来自少数几个词，逐条报就是刷屏）
+  for (const { key, ids } of keyOwners.values()) {
+    if (ids.length > 1) {
+      issues.push({ entryId: '', code: 'duplicate-keys', level: 'info', detail: key, count: ids.length })
     }
   }
 
   const totalChars = entries.reduce((sum, entry) => sum + countChars(entry.content), 0)
+  // warn：这两条不是"知道就好"，而是**内容真的会进不去提示词**（超条数/超总量会被预算裁掉）。
+  // 判据与「任何因预算而消失的内容都必须能被看见」一致：会丢内容的给 warn，只是体量偏大的给 info。
   if (entries.length > LORE_LIMITS.entries) {
-    issues.push({ entryId: '', code: 'too-many-entries', detail: String(entries.length) })
+    issues.push({ entryId: '', code: 'too-many-entries', level: 'warn', detail: String(entries.length) })
   }
   if (totalChars > LORE_LIMITS.totalChars) {
-    issues.push({ entryId: '', code: 'book-too-large', detail: String(totalChars) })
+    issues.push({ entryId: '', code: 'book-too-large', level: 'warn', detail: String(totalChars) })
   }
 
   return issues
 }
 
-/** 世界书汇总（给 UI 显示 "5 条 · 1,234 字"）。 */
-export function loreTotals(entries: LoreEntryDraft[]): { count: number; chars: number; issues: number } {
+/** 等级排序：给条目行挑"最严重的那级"用。 */
+const LEVEL_RANK: Record<LoreIssueLevel, number> = { info: 1, warn: 2, error: 3 }
+
+/** 一组问题里最严重的等级（没有问题时返回 undefined）。 */
+export function worstLevel(issues: LoreIssue[]): LoreIssueLevel | undefined {
+  let worst: LoreIssueLevel | undefined
+  for (const issue of issues) {
+    if (worst === undefined || LEVEL_RANK[issue.level] > LEVEL_RANK[worst]) worst = issue.level
+  }
+  return worst
+}
+
+/** 世界书汇总（给 UI 显示一行总览 + 分组计数）。 */
+export interface LoreTotals {
+  count: number
+  chars: number
+  /** 常驻条目数（不看关键词，每轮都带） */
+  constantCount: number
+  errors: number
+  warns: number
+  infos: number
+}
+
+export function loreTotals(entries: LoreEntryDraft[]): LoreTotals {
   const issues = loreIssues(entries)
   return {
     count: entries.length,
     chars: entries.reduce((sum, entry) => sum + countChars(entry.content), 0),
-    issues: issues.filter(issue => issue.code === 'no-keys' || issue.code === 'selective-without-secondary').length,
+    constantCount: entries.filter(entry => entry.constant).length,
+    errors: issues.filter(issue => issue.level === 'error').length,
+    warns: issues.filter(issue => issue.level === 'warn').length,
+    infos: issues.filter(issue => issue.level === 'info').length,
   }
 }
 

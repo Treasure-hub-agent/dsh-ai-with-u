@@ -16,6 +16,7 @@
  * @module dsh-ai-with-u/import-card
  */
 import { inflateRawSync, inflateSync } from 'node:zlib'
+import { type CharacterBook, countDepthEntries } from './tavern.js'
 
 // ---------------------------------------------------------------- 类型
 
@@ -450,10 +451,45 @@ function toCardV3(value: unknown, format: CardFormat, warnings: string[]): Chara
     delete data.assets
   }
 
-  // ---- regex_scripts：muv 系的东西，明确不接，剥掉 ----
-  if ('regex_scripts' in data) {
-    delete data.regex_scripts
-    warnings.push('已忽略 regex_scripts（本插件不执行酒馆的正则脚本，仅作提示）')
+  // ---- regex_scripts：ST 的显示/提示词正则，本插件**不执行**；但字段一律**保留**（数据保真） ----
+  //
+  // 为什么不再删除：卡是用户资产，删字段不可逆——将来导出/回灌 ST 会缺东西。
+  // 「以为它在工作」这个风险用**告警 + 面板标注**解决，而不是偷偷把数据抹掉。
+  const extensions = isPlainObject(data.extensions) ? data.extensions : undefined
+  const topLevelScripts = data['regex_scripts']
+  const extensionScripts = extensions?.['regex_scripts']
+  const scriptCountOf = (value: unknown): number => {
+    if (value === undefined || value === null) return 0
+    return Array.isArray(value) ? value.length : 1
+  }
+  const scriptCount = scriptCountOf(topLevelScripts) + scriptCountOf(extensionScripts)
+  if (scriptCount > 0) {
+    warnings.push(
+      `本插件不执行酒馆正则脚本（${scriptCount} 条）：提示词侧与显示侧都不执行；`
+      + '显示层 DSH 没有扩展点，详见 README 兼容矩阵',
+    )
+  }
+
+  // ---- depth_prompt：ST 的「按深度插入」提示词，本轮不支持；保留字段 + 明示 ----
+  const depthPrompt = extensions?.['depth_prompt']
+  if (isPlainObject(depthPrompt)) {
+    const promptText = typeof depthPrompt['prompt'] === 'string' ? depthPrompt['prompt'].trim() : ''
+    if (promptText !== '') {
+      const depth = typeof depthPrompt['depth'] === 'number' ? ` · depth=${depthPrompt['depth']}` : ''
+      warnings.push(
+        `深度提示（depth_prompt${depth}）暂不支持：本插件只做「常驻 / 关键词命中」两路注入，`
+        + '这段提示词不会进系统提示词（字段已保留，导出时不会丢）',
+      )
+    }
+  }
+
+  // ---- 世界书里的「深度注入」条目：本轮按普通设定注入，导入时先说清 ----
+  const depthEntries = countDepthEntries(data.character_book as CharacterBook | undefined)
+  if (depthEntries > 0) {
+    warnings.push(
+      `世界书有 ${depthEntries} 条声明了「按深度注入」（position 4 / @@depth 一类）：`
+      + '本插件暂不支持深度语义，会当成普通设定注入（内容不丢，只是位置不同）',
+    )
   }
 
   return {

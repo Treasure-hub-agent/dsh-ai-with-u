@@ -197,6 +197,8 @@ export interface CharacterDetail {
    * `current` 是落盘的当前档（宿主新加），缺失时只能退回 `tag` / `baseline`（起点锚定）。
    */
   relation?: DetailRelation
+  /** 世界书预算诊断（宿主新加；老宿主没有 → 面板整块不显示） */
+  diag?: LoreDiagPayload
   openingState?: OpeningState
 }
 
@@ -211,6 +213,24 @@ export interface DetailRelation {
   current?: string
   /** 档位变更留痕（可选） */
   log?: Array<{ at?: string; from?: string; to?: string; why?: string }>
+}
+
+/**
+ * 世界书预算诊断（宿主新加，老宿主没有）。
+ *
+ * 字段刻意写成 `unknown[]`：宿主给的是 `{id,name,chars}`，也可能临时退化成字符串数组；
+ * 真正的解析在 `client/lore-diag.ts` 里做容错，这里只锁「大概长什么样」。
+ */
+export interface LoreDiagPayload {
+  /** 常驻条目里超出预算、本轮没注入的 */
+  constantDropped?: unknown[]
+  /** 关键词命中但超出预算、本轮没注入的 */
+  keywordDropped?: unknown[]
+  /** 老字段：只给名字 / id，没分类也没字数 */
+  droppedByBudget?: unknown[]
+  maxEntries?: number
+  budgetChars?: number
+  usedChars?: number
 }
 
 /** 关系：`baseline` 只是卡片文字推断出的「起点锚定」，实际档位由模型现算、不落盘。 */
@@ -324,6 +344,11 @@ export interface PreviewData {
   mode?: string
   /** 纪律包档位（off / lite / full），老宿主可能没有 */
   discipline?: string
+  /**
+   * 世界书命中快照。`dropped*` 是宿主新加的「被预算裁掉」明细；
+   * 老宿主只给计数（count / hitCount / usedChars / budgetChars），此时面板不显示被裁条目。
+   */
+  lore?: LoreDiagPayload & { count?: number; constantCount?: number; hitCount?: number }
 }
 
 /**

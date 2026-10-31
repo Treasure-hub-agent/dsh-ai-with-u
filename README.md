@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-784%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-840%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -205,7 +205,37 @@ New-Item -ItemType Junction `
 
 - **旧 34 字段卡**：直接放进 `characters/<名>/card.json`，读时自动归一成 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`
 - **酒馆卡导入**：支持 `.png`（`tEXt` / `iTXt` 的 `ccv3`、`chara` 段）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 自动升到 V3）
-- **世界书超限**：不再拒绝导入或保存，改为返回 warnings（实际字数 + 上限）并在预览里逐条列出。世界书按需注入，超出 12 条 / 6000 字预算的部分不会进提示词——书是完整的，只是这一轮用不到那么多
+- **世界书超限**：不再拒绝导入或保存，改为返回 warnings（实际字数 + 上限）并在预览里逐条列出。世界书按需注入，超出预算的部分不会进提示词——书是完整的，只是这一轮用不到那么多
+
+### 酒馆卡兼容矩阵（SillyTavern 字段级）
+
+一张真卡（CCv3、89 条世界书、98869 字）跑过一遍之后逐字段核对的结论。**「支持」= 功能真的生效**，不是「没报错」。
+
+| ST 字段 / 特性 | 状态 | 说明 |
+|---|---|---|
+| `description` `personality` `scenario` `first_mes` `alternate_greetings` | ✅ 支持 | 原样保留并进 L1；开场白里的 `{{char}}` / `{{user}}` 按角色名展开 |
+| `system_prompt` / `post_history_instructions` | ✅ 支持 | 前者作为「角色自带指令」进 L1（优先级低于系统提示词、高于角色描写），后者进收尾提醒 |
+| `mes_example` | ✅ 支持（有截断） | 进 L1「示例对话」，单卡上限 1200 字，超出截断并告警 |
+| `creator_notes` `tags` `creator` `character_version` `group_only_greetings` 等元字段 | ✅ 保留不丢 | 不参与注入；认不出的键进 `extensions.aiwu.legacy.extra`，一个字节都不丢 |
+| `character_book`（89 条 / 9.8 万字这种规模） | ✅ 支持（按需注入 + 双预算） | 每轮命中上限 12 条 / 6000 字；`constant` 条目走**独立 allowance**；被裁的条目在面板体检里列名字、日志里也带名字 |
+| `use_regex`（key 当正则） | ✅ 支持（带护栏） | 模式长度上限、只扫最近文本前 8000 字、明显灾难回溯的构造退化成字面量、坏正则不抛错（否则整轮对话进不去） |
+| `secondary_keys` + `selective` | ✅ 支持 | 四值 `selectiveLogic`（AND_ANY / NOT_ALL / NOT_ANY / AND_ALL）；`selective:false` 时次级键不参与激活（与 ST 一致） |
+| `position: before_char / after_char` | ✅ 支持 | 分两个区块注入：「先读这些设定」与「相关设定」 |
+| `position` 写成数字（`0` / `1`）或 `'before'` / `'after'` | ✅ 支持 | 统一归一到 `before_char` / `after_char`（老 ST 导出常见数字写法） |
+| `@D` 深度注入 / `position: 4` / `depth` / `role` | ❌ 不支持（**内容不丢**） | 不做按消息深度插槽：这类条目仍会注入，只是当普通设定摆（默认 after 块），导入时统计条数并告警 |
+| `constant` | ✅ 支持（独立预算） | 常驻走自己的额度（默认 12000 字，卡级可覆盖），不再和关键词命中抢 6000 字。真卡实测 6 条有效常驻 9577 字，全部注入、0 条被裁 |
+| `probability` | ✅ 支持 | **顶层 `probability` 优先**，没有再读 `extensions.probability`（两种写法都有卡在用）；稳定哈希，同一轮结果固定，不会每轮抖动 |
+| `scan_depth` / `token_budget` | ✅ 支持 | 前者默认扫最近 4 条（近似 D0..Dn 槽），后者按 1 token ≈ 1.5 字换算成字符预算 |
+| `recursive_scanning` | ❌ 不支持 | 字段认了但不执行：递归激活会放大预算与耗时，第一版明确不做 |
+| `regex_scripts`（正则脚本） | ❌ **不执行**（字段 **保留**） | 提示词侧与显示侧都不做，`data.regex_scripts` 与 `data.extensions.regex_scripts` **两个位置都保留、不删**：ST 卡是用户资产，删了将来导出/回灌酒馆会缺东西。导入预览会出一条告警：「本插件不执行酒馆正则脚本（N 条）：提示词侧与显示侧都不执行」。原因见 `docs/DEVELOPMENT.md` §十三 |
+| `depth_prompt` | ❌ 不支持（**字段保留**） | `extensions.depth_prompt` 随卡保留、写入不丢，但不读、不注入；非空时导入会明确告警「深度提示暂不支持，字段已保留」。需要的话把内容放进世界书常驻条目 |
+| `assets`（立绘） | ❌ 不支持 | 导入时剥离并告警：本轮不做立绘落地，卡片其余内容不受影响 |
+| `@@activate` / `@@dont_activate` 装饰器 | ✅ 支持 | 影响该条目是否参与激活 |
+| `@@depth` / `@@position` / `@@role` / `@@probability` / `@@cooldown` 装饰器 | ⚠️ 认识但不生效 | 已知装饰器会从正文剥掉（绝不注入正文），但不改变注入行为；未知 `@@xxx` 整行丢弃 |
+| `extensions.match_whole_words` | ✅ 支持 | 打开后按整词匹配（汉字里不误命中子串） |
+
+> 三条最容易踩的：**① `regex_scripts` 不是「支持但没用到」，是不执行**（DSH 侧没有可插入的渲染点）；
+> **② `position` 数字值会退化**成 `after_char`；**③ 世界书再大也不会整本注入**，这是设计而非缺陷。
 
 ### 文件拖放归谁管
 
@@ -317,13 +347,13 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 784 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 840 项）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：17 组契约（42 项；后端做了前端没接 / 验收项回归）
-npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 软警告（254 项）
+npm run verify:wiring    # 接线体检：21 组契约（54 项；后端做了前端没接 / 验收项回归）
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容（289 项）
 npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
-npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
+npm run verify:import    # PNG / CHARX / JSON 导入解析 / 字段保真（58 项）
 npm run verify:session   # 会话、指令、纪律包、关系与预览只读（212 项）
 npm run verify:host      # 真实 cordis 宿主装配（82 项）
 npm run typecheck:client # 只查浏览器侧类型
@@ -331,7 +361,7 @@ npm run typecheck:client # 只查浏览器侧类型
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 784 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 42 + verify 15 + tavern 254 + distill 121 + import 49 + session 212 + host 82`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的 840 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 54 + verify 15 + tavern 289 + distill 121 + import 58 + session 212 + host 82`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 
@@ -394,9 +424,31 @@ desktop profile 由 Electron 独占管理，CLI 会直接报 `managed exclusivel
 
 因为世界书是**按需注入**的，不是整本塞进提示词。命中预算默认 12 条 / 6000 字（`LORE_DEFAULTS`），超出预算的条目这一轮就不进上下文——卡本身一个字都没被改，磁盘上仍是完整的世界书，你在编辑器里能看到全部条目。
 
-这是刻意的：一张 9.8 万字的世界书全量注入，要么撑爆上下文、要么每轮烧掉一大笔费用，而真正用得上的往往只有当轮提到的那几条。想提高命中率就把关键词写准、把常驻条目留给「必须一直生效」的设定。
+`constant: true` 的常驻条目走**独立额度**，不和关键词命中抢那 6000 字（真卡实测：7 条常驻共 10512 字，修之前有 2 条被静默挤掉，而常驻正是「必须一直生效」的那类）。
+
+**哪里能看到被裁的条目**：打开角色卡编辑器 → 世界书分区顶部的体检行，会按等级列出「这一轮被预算裁掉的条目」；宿主日志里也会带条目名（只带名字，不写正文）。想提高命中率就把关键词写准、把常驻留给「必须一直生效」的设定。
+
+这是刻意的：一张 9.8 万字的世界书全量注入，要么撑爆上下文、要么每轮烧掉一大笔费用，而真正用得上的往往只有当轮提到的那几条。
 
 现在导入/保存这类大书只会出警告（附实际字数与上限），不再拦你——v0.3.0 之前这里是硬拦，属于过严。
+
+</details>
+
+<details>
+<summary>为什么我的卡里正则（<code>regex_scripts</code>）不起作用？</summary>
+
+因为**本插件不执行酒馆的正则脚本**，而且这不是「暂时没接」——是宿主侧没有可插入的点。
+
+酒馆的 `regex_scripts` 有两类用法，我们分开说：
+
+- **提示词侧**（发送前改写 prompt 文本）：能做但**没做**。理由很简单：它改的是发给模型的内容，属于「用户不知道自己在看什么」的黑箱，真出问题时极难排查。
+- **显示侧**（收到回复后改写显示文本，比如把 `*笑*` 变成斜体、把某些词替换掉）：**做不了**。DSH 的客户端插槽 `conversation.chat.node` 只能**新增**聊天行，改不了已经渲染出来的助手消息；`agent/request` 钩子只管 provider / model / reasoningEffort 路由，不碰文本；插件规范也明写不许读写组件外的 DOM。
+
+生态里的做法是把这个能力**交割出去**：`dsh-tavern` 从 2.7.x 起把显示层整块交给 `dsh-muv-engine`（自己那套渲染器删掉了，因为两边的 `beautifyContentEl` 会互相覆盖）。想用正则美化显示，装 muv 系引擎即可，本插件不重复造第二套。
+
+**你的卡不会因此丢东西**：`regex_scripts` **原样保留**在卡里（`data.regex_scripts` 与 `data.extensions.regex_scripts` 两个位置都不动），只是不被执行。导入预览会给一条告警说清这一条——留着字段是为了你将来导出/回灌酒馆时不缺东西，「以为它在工作」则用告警解决，而不是删数据。
+
+如果你依赖的是提示词侧的正则效果，请把规则改写进角色卡的 `system_prompt` 或世界书条目——那是我们能保证生效的地方。详见 `docs/DEVELOPMENT.md` §十三。
 
 </details>
 
