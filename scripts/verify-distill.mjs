@@ -64,30 +64,29 @@ const makeToolService = () => {
 
 /**
  * 造一个 arm + 配套的工具服务。
- * `hooks.mount` 里当场 new 工具（模拟 index.ts 里 `tools.register(createCardSaveTool(store, arm))`）。
+ *
+ * 模拟 index.ts 的**常驻注册**：工具在「插件作用域」注册一次，`mount` 只检查服务就绪，
+ * `unmount` 不注销工具（门控在 `arm.armed`）。这正是不再触发 INACTIVE_EFFECT 的关键。
  */
 function makeArm(options = {}) {
   const service = options.service ?? makeToolService()
   let clock = options.now ?? Date.parse('2026-10-30T22:00:00+08:00')
   let arm
-  const mounted = []
+  const disposers = []
   arm = new DistillArm({
-    mount: () => {
-      if (options.toolsReady === false) return false
-      mounted.push(service.register(createCardSaveTool(store, arm)))
-      return true
-    },
-    unmount: () => {
-      const disposer = mounted.pop()
-      if (typeof disposer === 'function') disposer()
-    },
+    mount: () => options.toolsReady !== false,
+    unmount: () => {},
   }, () => clock)
+  if (options.toolsReady !== false) {
+    disposers.push(service.register(createCardSaveTool(store, arm)))
+  }
   return {
     arm,
     service,
     registry: service.registry,
     advance(ms) { clock += ms },
     now: () => clock,
+    dispose() { for (const d of disposers.reverse()) d() },
   }
 }
 
@@ -112,29 +111,31 @@ const MINIMAL = {
 
 // ================================================================ 1. 未武装
 
-section('1. 未武装：工具不可见、调用被拒、不写盘')
+section('1. 未武装：工具常驻但门控关闭、调用被拒、不写盘')
 {
   const { arm, registry } = makeArm()
-  check(registry.size === 0, '未武装时工具服务里没有 awu_card_save')
+  check(registry.size === 1 && registry.has('awu_card_save'), '插件作用域内已注册 awu_card_save（常驻）')
   check(arm.snapshot().armed === false, '未武装时 armed=false')
 
-  const tool = createCardSaveTool(store, arm)
+  const tool = registry.get('awu_card_save')
   const result = await tool.execute({ name: '未武装角色', data: MINIMAL }, {})
   check(result.ok === false && result.code === 'not-armed', `直接调用被拒（code=${result.code}）`)
   check(!(await exists(cardPathOf('未武装角色'))), '未武装时没有写盘')
 }
 
-// ================================================================ 2. 武装 → 工具可见
+// ================================================================ 2. 武装 → 工具可用
 
-section('2. arm → 工具可见（参数 schema / 描述要点）')
+section('2. arm → 门控打开（参数 schema / 描述要点）')
 {
   const { arm, registry } = makeArm()
+  const before = registry.size
   const snapshot = arm.arm()
   check(snapshot.armed === true, 'arm 后 armed=true')
   check(typeof snapshot.expiresAt === 'string' && snapshot.expiresAt !== '', `返回 expiresAt：${snapshot.expiresAt}`)
+  check(registry.size === before, `arm 不改变注册数（${before} → ${registry.size}，注册只发生在插件作用域）`)
 
   const tool = registry.get('awu_card_save')
-  check(tool !== undefined, 'arm 后工具服务里出现 awu_card_save')
+  check(tool !== undefined, '工具服务里有 awu_card_save')
   check(tool?.parameters?.name?.required === true, '参数 name 必填')
   check(tool?.parameters?.data?.required === true, '参数 data 必填')
   check(tool?.parameters?.data?.additionalProperties === true, 'data 是开放对象（additionalProperties: true）')
@@ -171,7 +172,7 @@ section('3. save → CCv3 落盘 + 索引更新 + 自动 disarm')
   const index = await store.readIndex()
   check(index[NAME] !== undefined, '索引已更新（面板列表能读到）')
 
-  check(registry.size === 0, `保存成功后工具自动卸下（registry=${registry.size}）`)
+  check(registry.size === 1, `保存成功后工具仍注册（registry=${registry.size}；只关时间窗）`)
   check(arm.snapshot().armed === false, '保存成功后 armed=false（自动 disarm）')
   check(arm.snapshot().lastSaved?.name === NAME, `lastSaved.name = ${arm.snapshot().lastSaved?.name}`)
 }
@@ -252,7 +253,7 @@ section('6. 非法名字 → invalid-name 且不写盘')
 
 // ================================================================ 7. TTL 到期
 
-section('7. TTL 到期 → 工具自动卸下、状态 false、再调用被拒')
+section('7. TTL 到期 → 状态 false、工具仍常驻、再调用被拒')
 {
   const { arm, registry, advance } = makeArm()
   arm.arm(DISTILL_ARM_TTL_MS)
@@ -262,7 +263,7 @@ section('7. TTL 到期 → 工具自动卸下、状态 false、再调用被拒')
   advance(1001)
   const expired = arm.snapshot()
   check(expired.armed === false, '到期后 armed=false')
-  check(registry.size === 0, `到期后工具被自动卸下（registry=${registry.size}）`)
+  check(registry.size === 1, `到期后工具仍注册（registry=${registry.size}；靠 armed 门控）`)
 
   const tool = createCardSaveTool(store, arm)
   const outcome = await tool.execute({ name: '过期角色', data: MINIMAL }, {})
@@ -309,7 +310,7 @@ section('8. 路由：/distill/arm · /distill/state · /distill/disarm（含方�
     'arm 返回指令文本（含 flow.md 路径）')
   check(typeof res1.out.body?.path === 'string', 'arm 返回 flow 绝对路径')
   check(typeof res1.out.body?.expiresAt === 'string' && res1.out.body.expiresAt !== '', 'arm 返回到期时间')
-  check(registry.size === 1, 'arm 之后工具已挂载')
+  check(registry.size === 1, 'arm 之后工具仍在（常驻注册，只开时间窗）')
 
   const res2 = fakeRes()
   await route('/distill/state').handler(fakeReq('GET'), res2)
@@ -322,7 +323,12 @@ section('8. 路由：/distill/arm · /distill/state · /distill/disarm（含方�
   const res4 = fakeRes()
   await route('/distill/disarm').handler(fakeReq('POST'), res4)
   check(res4.out.status === 200 && res4.out.body?.armed === false, 'POST /distill/disarm 解除武装')
-  check(registry.size === 0, 'disarm 之后工具已卸下')
+  check(registry.size === 1, `disarm 之后工具仍注册（registry=${registry.size}），不再注销`)
+
+  // 真正的门控：disarm 后直接调用必须被拒（工具还在，但权力收回）
+  const gated = await registry.get('awu_card_save').execute({ name: '解除后角色', data: MINIMAL }, {})
+  check(gated.ok === false && gated.code === 'not-armed', `disarm 后调用被拒（code=${gated.code}）`)
+  check(!(await exists(cardPathOf('解除后角色'))), 'disarm 后没有写盘')
 
   const res5 = fakeRes()
   await route('/distill/state').handler(fakeReq('GET'), res5)

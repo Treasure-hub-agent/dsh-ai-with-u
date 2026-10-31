@@ -28,3 +28,6 @@ Thumbs.db
 .ai-with-u/
 *.db
 *.sqlite
+
+# 蒸馏过程的临时产物（卡数据 / 旁路脚本）
+distill/out/

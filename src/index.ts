@@ -190,31 +190,39 @@ export function apply(context: Context): () => void {
 
   // ---------------------------------------------------------------- 0. 蒸馏武装（内存态）
   /**
-   * 「临时武装」：蒸馏期间才把 `awu_card_save` 挂上，成功保存一次 / TTL 到期 / 手动取消即卸下。
+   * 「时间窗武装」：`awu_card_save` 常驻挂载，`armed` 只控制它是否可用。
    *
    * 三条设计约束（主人拍板）：
    *   1. **不落盘**：重启即失效——避免模型在任何会话里突然获得写卡能力；
    *   2. **与角色启用无关**：蒸馏不需要先启用角色，所以这条挂载路径不经过 `createTools`；
    *   3. **工具服务未就绪就武装失败**：不能"面板说武装了、模型却没有工具"。
+   *
+   * 与早期版本的差别只有一处：注册时机从「HTTP 请求里动态挂载」改成「插件 apply 时注册一次」。
+   * 门控（`not-armed`）没有变，模型在未武装期依然拿不到写卡能力。
    */
   let toolsService: AnyCtx['tools'] | undefined
-  let armToolDisposer: (() => void) | undefined
+  let cardSaveDisposer: (() => void) | undefined
+  /**
+   * ⚠️ 2026-10-31 修：`awu_card_save` 改为**插件作用域内一次性注册**，不再由
+   * `POST /distill/arm` 动态挂载。
+   *
+   * 原因：HTTP 处理器里调 `tools.register()` 会在**请求作用域**里建 effect，请求结束
+   * 该作用域销毁，工具被连带移除（会话里的表现就是「已添加工具 → 很快又已移除」）；
+   * 再次武装时还会撞上 `cannot create effect on inactive context`（400）。
+   *
+   * 现在的门控在工具内部：`arm.armed` 为 false 时 `awu_card_save` 一律返回 `not-armed`，
+   * 与「工具不存在」对模型的效果一致，但注册发生在活跃的插件 fiber 里，不可能失效。
+   */
   const distillArm = new DistillArm({
     mount: (): boolean => {
       if (toolsService === undefined) {
         log.warn('蒸馏武装失败：工具服务未就绪')
         return false
       }
-      if (armToolDisposer !== undefined) return true
-      armToolDisposer = toolsService.register(createCardSaveTool(store, distillArm))
-      log.info('蒸馏武装：已挂载 awu_card_save（TTL 2 小时，保存一次后自动卸下）')
       return true
     },
     unmount: (): void => {
-      if (armToolDisposer === undefined) return
-      armToolDisposer()
-      armToolDisposer = undefined
-      log.info('蒸馏武装：已卸下 awu_card_save')
+      log.info('蒸馏武装：时间窗已关闭（awu_card_save 保留，调用会返回 not-armed）')
     },
   })
 
@@ -245,6 +253,11 @@ export function apply(context: Context): () => void {
     const tools = toolCtx.get?.('tools') as AnyCtx['tools']
     if (tools === undefined) return
     toolsService = tools
+    // 写卡工具在插件作用域内注册一次即可（见上面对 INACTIVE_EFFECT 的说明）
+    if (cardSaveDisposer === undefined) {
+      cardSaveDisposer = tools.register(createCardSaveTool(store, distillArm))
+      log.info('已挂载 awu_card_save（常驻，仅蒸馏武装期可用）')
+    }
     let toolDisposers: Array<() => void> = []
     const sync = (): void => {
       const should = pc.characterName !== undefined
@@ -260,8 +273,12 @@ export function apply(context: Context): () => void {
     pendingSync.push(() => { sync() })
     sync()
     disposers.push(() => {
-      // 先卸蒸馏工具再卸常驻工具，最后把服务引用清掉（避免卸载后还能 mount）
+      // 先关时间窗，再卸常驻工具，最后把服务引用清掉（避免卸载后还能 mount）
       distillArm.disarm()
+      if (cardSaveDisposer !== undefined) {
+        cardSaveDisposer()
+        cardSaveDisposer = undefined
+      }
       toolsService = undefined
       for (const d of toolDisposers.reverse()) d()
     })

@@ -26,6 +26,10 @@
 联网核实：{默认执行 / 用户说过别联网}
 规则：不扮演、不编造、每条提取带证据等级；最后调 awu_card_save({ name, data }) 保存；
       保存前若工具报 not-armed，先 POST {插件地址}/_dsh/ai-with-u/distill/arm 重新武装再存。
+      若 arm 仍失败（400 / cannot create effect on inactive context），不要反复重试：
+      把完整 data 写到文件，并 POST {插件地址}/_dsh/ai-with-u/character/save
+      （{"name":"<卡名>","ccv3":{...}}）走面板保存路由落卡，然后如实告诉用户
+      「官方武装通道故障，已用面板保存路由入库」。
 回报：卡名、证据覆盖度、未裁决冲突、⚠️待确认项。
 ```
 

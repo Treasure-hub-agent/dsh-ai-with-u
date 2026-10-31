@@ -6,7 +6,7 @@
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-511%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-515%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -236,8 +236,8 @@ npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
 npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 忘却（218 项）
 npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
 npm run verify:session   # 会话、指令与来源栅栏（111 项）
-npm run verify:host      # 真实 cordis 宿主装配（34 项）
-npm run verify:distill   # 蒸馏武装与 TTL（90 项）
+npm run verify:host      # 真实 cordis 宿主装配（35 项）
+npm run verify:distill   # 蒸馏武装与 TTL（93 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
 npm run typecheck:client # 只查浏览器侧类型
 ```

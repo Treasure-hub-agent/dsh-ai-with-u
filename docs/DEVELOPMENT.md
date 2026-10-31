@@ -505,7 +505,7 @@ npm run verify:host    # 真实 cordis 宿主验证
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
 > **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
-> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(111 项) → `verify-host`(34 项)**，
+> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(111 项) → `verify-host`(35 项)**，
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 ### 安装到 DSH（desktop profile）

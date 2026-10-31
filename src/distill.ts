@@ -106,7 +106,7 @@ export async function distillFlowInfo(): Promise<DistillFlowInfo> {
   return { path: flow.path, instruction, chars: instruction.length, flowChars: flow.chars }
 }
 
-// ============================================================================ v3：全自动蒸馏（临时武装 + awu_card_save）
+// ============================================================================ v3：全自动蒸馏（时间窗门控 + 常驻 awu_card_save）
 
 /**
  * 武装有效期：2 小时。
@@ -114,10 +114,18 @@ export async function distillFlowInfo(): Promise<DistillFlowInfo> {
  */
 export const DISTILL_ARM_TTL_MS = 2 * 60 * 60 * 1000
 
-/** 武装需要对工具服务做的事（由 `index.ts` 提供：注册/卸下 `awu_card_save`）。 */
+/**
+ * 时间窗对工具服务要做的事（由 `index.ts` 提供）。
+ *
+ * ⚠️ 这里**不再注册/注销工具**：`awu_card_save` 在插件作用域内常驻注册，
+ * 由 `arm.armed` 门控（未武装时 execute 返回 `not-armed`）。
+ * 早期版本在 HTTP 请求里动态 register，请求作用域一销毁工具就被移除，
+ * 再次武装还会报 `cannot create effect on inactive context`。
+ */
 export interface DistillArmHooks {
-  /** 挂载 `awu_card_save`；工具服务未就绪时返回 false（**武装必须失败**，不能装作成功）。 */
+  /** 检查工具服务是否就绪；未就绪返回 false（**武装必须失败**，不能装作成功）。 */
   mount(): boolean
+  /** 关闭时间窗（仅日志与状态，不注销工具）。 */
   unmount(): void
 }
 
@@ -143,11 +151,11 @@ function isoNow(date: Date): string {
  * 蒸馏武装（**内存态，绝不落盘**）。
  *
  * 语义：
- *   - `arm()`：挂 `awu_card_save` + 记 TTL；工具服务不可用则抛错（不假武装）。
+ *   - `arm()`：打开时间窗 + 记 TTL；工具服务未就绪则抛错（不假武装）。
  *   - 成功保存一次 → 自动 `disarm()`（主人要求：这份"能写卡的权力"只开一次门）。
- *   - `snapshot().armed` 在 TTL 到期的瞬间自动变成 false 并**顺手卸下工具**——
- *     所以"到点了但工具还挂着"这种窗口不存在。
+ *   - `snapshot().armed` 在 TTL 到期的瞬间自动变成 false（`awu_card_save` 随即返回 `not-armed`）。
  *   - 重启即失效：没有任何状态写到磁盘上（避免模型在任何会话里突然能写卡）。
+ *   - 工具本身常驻注册，创建/销毁只发生在插件 apply/dispose 的活跃作用域里。
  */
 export class DistillArm {
   private expiresAtMs: number | undefined

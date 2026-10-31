@@ -196,17 +196,18 @@ if (routeOf('/distill/arm') === undefined) {
   fail('没有注册 /distill/arm 路由')
 } else {
   const before = registered.tools.length
+  check(registered.tools.includes('awu_card_save'), 'apply 之后 awu_card_save 常驻注册（不依赖 arm）')
   const res1 = fakeRes()
   await routeOf('/distill/arm').handler(fakeReq('POST'), res1)
   check(res1.out.status === 200 && res1.out.body?.ok === true, `POST /distill/arm → ${res1.out.status}`)
-  check(registered.tools.includes('awu_card_save'), 'arm 之后 awu_card_save 真的挂到了工具服务上')
-  check(registered.tools.length === before + 1, `工具数 ${before} → ${registered.tools.length}`)
+  check(registered.tools.includes('awu_card_save'), 'arm 之后工具仍在')
+  check(registered.tools.length === before, `arm 不改变工具数（${before}）`)
 
   const res2 = fakeRes()
   await routeOf('/distill/disarm').handler(fakeReq('POST'), res2)
   check(res2.out.body?.armed === false, 'disarm 接口报告已解除')
-  check(!registered.tools.includes('awu_card_save'), 'disarm 之后工具被卸下')
-  check(registered.tools.length === before, `工具数回到 ${before}`)
+  check(registered.tools.includes('awu_card_save'), 'disarm 之后工具仍注册（门控在工具内部，不再注销）')
+  check(registered.tools.length === before, `disarm 不改变工具数（${registered.tools.length}）`)
 }
 
 // ---------------------------------------------------------------- L0 同进同出（启用出现 / 退出归零）
