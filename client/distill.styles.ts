@@ -158,8 +158,8 @@ export const DISTILL_CSS = `
 .awu-distill-paste:focus { border-color: var(--awu-gold, #e9bd72); }
 
 /* ---- ⏸ 以下三组（分隔线 / 校验进度条 / 分组徽标 / 定名行）随「粘贴校验」一起挂起：
-   卡片格式改酒馆卡 CCv3，POST /distill/parse 与 34 字段校验等 tavern 定稿后重做。
-   样式先留着，等校验 UI 回来直接接上；在那之前 TSX 不会渲染这几个类（无副作用）。
+   2026-10-31 已确认宿主从未注册解析路由，对应的前端函数也删了，这套校验 UI 短期不会回来；
+   样式先留着（无副作用），真要回来时连 TSX 一起接。
    注意：本文件整个是一个 JS 模板串，注释里不要出现反引号。 ---- */
 .awu-distill-sep {
   height: 1px;
@@ -226,44 +226,10 @@ export const DISTILL_CSS = `
   color: var(--awu-ink-mute, #8f8172);
 }
 
-/* ================================================================ 输入框上方的小入口
-   这一块渲染在宿主的 composer 里，**完全在 .awu-scope 之外**，拿不到任何 --awu-* token，
-   所以只用 currentColor + 透明度，让宿主主题自己决定颜色（不写死色值）。 */
-.awu-distill-dock {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.awu-distill-dockBtn {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-  padding: 2px 9px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 11px;
-  line-height: 16px;
-  opacity: .58;
-  cursor: pointer;
-  transition: opacity .18s cubic-bezier(.22, .61, .36, 1);
-}
-.awu-distill-dockBtn:hover { opacity: .95; }
-.awu-distill-dockBtn:disabled { opacity: .3; cursor: default; }
-.awu-distill-dockNote {
-  min-width: 0;
-  overflow: hidden;
-  font-size: 10.5px;
-  line-height: 15px;
-  opacity: .72;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 输入框上方那个可见小入口（.awu-distill-dock 系列）随 DockEntry 一起删了：
+   它从未注册到任何席位，再留着就是给一个不存在的组件维持皮肤。 */
+
 @media (prefers-reduced-motion: reduce) {
   .awu-distill-bar > span { transition: none !important; }
-  .awu-distill-dockBtn { transition: none !important; }
 }
 `

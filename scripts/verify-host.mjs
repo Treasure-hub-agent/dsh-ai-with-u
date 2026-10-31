@@ -137,9 +137,12 @@ check(pluginFiber?.state === 2, `插件 fiber 达到 ACTIVE(2)，实际 ${plugin
 const sp = app.systemPrompt
 const sectionNames = [...sp.layers.keys()]
 check(sectionNames.includes('aiwu:baseline'), `L0 常驻段已注册：${sectionNames.join(', ')}`)
+check(sectionNames.includes('aiwu:discipline'), 'L0.5 纪律包段已注册（order 5050）')
 check(sectionNames.includes('aiwu:active-character'), 'L1 角色段已注册（未启用时为空串）')
 check(sectionNames.includes('aiwu:lore'), '世界书段已注册（垫底 order 10300）')
 check(sectionNames.includes('aiwu:clock'), '时间差段已注册（最后 order 10350）')
+const aiwuSections = sectionNames.filter(n => String(n).startsWith('aiwu:'))
+check(aiwuSections.length === 5, `aiwu 段共 5 个（四段 → 五段）：${aiwuSections.join(', ')}`)
 
 // 🔴 宿主默认会对段文本做 {{var}} 插值，未知变量直接抛错 → 我们的段必须全部 interpolate:false
 const ourSections = [...sp.layers.values()].filter(s => String(s.name).startsWith('aiwu:'))
@@ -151,8 +154,20 @@ const clockSection = sp.layers.get('aiwu:clock')
 check(loreSection?.order === 10300, `世界书段 order = ${String(loreSection?.order)}（期望 10300，易变段垫底）`)
 check((clockSection?.order ?? 0) > (loreSection?.order ?? 0),
   `时间差段在最后：clock ${String(clockSection?.order)} > lore ${String(loreSection?.order)}`)
+const disciplineSection = sp.layers.get('aiwu:discipline')
+const baselineSection = sp.layers.get('aiwu:baseline')
+const activeSection = sp.layers.get('aiwu:active-character')
+check(disciplineSection?.order === 5050, `纪律包段 order = ${String(disciplineSection?.order)}（期望 5050）`)
+check((disciplineSection?.order ?? 0) > (baselineSection?.order ?? 0)
+  && (disciplineSection?.order ?? 0) < (activeSection?.order ?? 0),
+  `纪律包段位于 baseline(${String(baselineSection?.order)}) 与 active(${String(activeSection?.order)}) 之间`)
 const renderedIdle = sp.render()
 check(!renderedIdle.includes('角色扮演底线'), '未启用时系统提示词里没有 L0 底线（L0 与角色同进同出）')
+check(!renderedIdle.includes('真人感纪律'), '未启用时也没有 L0.5 纪律包')
+const idleDiscipline = disciplineSection === undefined
+  ? ''
+  : (typeof disciplineSection.text === 'function' ? disciplineSection.text({}) : String(disciplineSection.text))
+check(idleDiscipline === '', `未启用时纪律包段返回空串（实际 ${idleDiscipline.length} 字符）`)
 check(renderedIdle.trim() === '', `未启用时宿主渲染结果为空（实际 ${renderedIdle.length} 字符）`)
 
 // webServer 路由注册成功
@@ -222,7 +237,38 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
   check(renderedOn.includes('你现在的身份'), '启用后 L1 角色段出现')
   check(renderedOn.includes('人设部分'), 'L0 文案是精简后的新版（含「人设部分」判据）')
   check(!renderedOn.includes('何时让位给任务模式'), 'L0 里不再有「何时让位给任务模式」整节')
+  check(renderedOn.includes('真人感纪律'), '启用后 L0.5 纪律包出现（缺省 lite）')
+  check(renderedOn.includes('禁止词库') && renderedOn.includes('作为一个人工智能'), '纪律包含禁止词库')
   check(renderedOn.length > 500, `启用后渲染长度 ${renderedOn.length} 字符`)
+
+  // 纪律包三档切换（REST /discipline）
+  const levels = ['full', 'off', 'lite']
+  for (const level of levels) {
+    const res = fakeRes()
+    await routeOf('/discipline').handler(fakeReq('POST', { level }), res)
+    check(res.out.status === 200 && res.out.body?.discipline === level, `POST /discipline ${level} → ${res.out.status}`)
+    const text = sp.render()
+    if (level === 'full') check(text.includes('语态锚点'), 'full 档出现语态锚点')
+    if (level === 'off') {
+      check(!text.includes('真人感纪律'), 'off 档纪律包消失')
+      check(text.includes('角色扮演底线'), 'off 档只关纪律包，L0 底线仍在')
+    }
+    if (level === 'lite') check(!text.includes('语态锚点'), 'lite 档没有 full 专属内容')
+  }
+  const badRes = fakeRes()
+  await routeOf('/discipline').handler(fakeReq('POST', { level: '超级' }), badRes)
+  check(badRes.out.status === 400, `非法纪律包档位 → ${badRes.out.status}`)
+
+  // /overview 也要暴露 discipline（面板开关状态的数据源）
+  const overviewRes = fakeRes()
+  await routeOf('/overview').handler(fakeReq('GET'), overviewRes)
+  check(overviewRes.out.body?.discipline === 'lite',
+    `GET /overview 返回 discipline=${String(overviewRes.out.body?.discipline)}`)
+
+  // 启用后 awu_* 工具（含新增的 awu_mode）真的挂上了
+  check(registered.tools.includes('awu_mode'), '启用后挂载 awu_mode 工具')
+  check(registered.tools.includes('awu_relation'), '启用后挂载 awu_relation 工具')
+  check(registered.tools.includes('awu_diary_write'), '启用后挂载 awu_diary_write 工具')
 
   const resOff = fakeRes()
   await routeOf('/deactivate').handler(fakeReq('POST'), resOff)

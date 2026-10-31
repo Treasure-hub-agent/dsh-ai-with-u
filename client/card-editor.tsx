@@ -1,26 +1,58 @@
 /**
  * AI WITH U · 角色卡编辑器
  *
- * 面板内「全屏」编辑页（不是一堆小弹窗）：面板宽度有限，把十个分组平铺成一页
- * 往下滚，比反复开关弹层顺手得多。
+ * 面板内「全屏」编辑页（不是一堆小弹窗）：面板宽度有限，把十个字段分组 + 世界书
+ * 平铺成一页往下滚，比反复开关弹层顺手得多。
  *
  * 布局：
  *  - 顶部：固定的标题栏（角色名 / 完整度 / 关闭），下面跟着分组列表滚动
- *  - 中部：每个分组一张可折叠卡片；声线基因是灵魂字段，标了金色徽记
+ *  - 中部：每个分组一张可折叠卡片；声线基因是灵魂字段，标了金色徽记；
+ *          第 11 块是世界书（`lorebook-editor.tsx`，条目列表 + 全屏长文本）
  *  - 底部：固定操作条（取消 / 保存），始终可见
  *
- * 数据层完全不在这里：草稿的读写、合并、脏检查都在 `card-schema.ts`。
+ * 数据层完全不在这里：结构草稿在 `card-schema.ts`，世界书草稿在 `lorebook-schema.ts`。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 import type { Card } from './api'
+import { ccv3Data } from './card-source'
 import { GROUPS, filledCount, isEmptyValue, isDirty, mergeCard, toDraft } from './card-schema'
 import { sourceLabelOf } from './text'
-import type { Draft, FieldSpec, GroupSpec } from './card-schema'
+import type { Draft, GroupSpec } from './card-schema'
 import { IconChevron, IconPlus, IconQuill, IconTrash } from './icons'
+import { LorebookSection } from './lorebook-editor'
+import { loreIssues, mergeLoreIntoCard, toLoreDraftFromCard } from './lorebook-schema'
+import type { LoreBookDraft, LoreEntryDraft } from './lorebook-schema'
 import type { Translate } from './text'
+
+/**
+ * 编辑器提交给面板的保存信封。
+ *
+ * 为什么要分成三条信息：世界书与结构视图**走两条不同的保存链路**（C7 的坑，见 `api.ts`
+ * 的 `saveCharacterCcv3`），面板必须先知道「谁变了」才能决定发哪些键、发几次。
+ *  `structureChanged` → 发 `{ name, card }`
+ *  `loreChanged`      → 发 `{ name, ccv3 }`（整卡回传，只改 data.character_book）
+ * 两者都变了就分两步发（先世界书、后结构），任何一步都不把 `card` 与 `ccv3` 混在一起。
+ */
+export interface CardSavePayload {
+  /**
+   * 结构视图（`mergeCard` 的产物）。
+   *
+   * 叫 `view` 而不是 `card`：它不是请求体里那个 `card` 键 —— 面板要按「结构 / 世界书」
+   * 两条链路拆开、各自单独发一次。命名沿用 `card-source.ts` 的既有叫法（`buildSavePayload(view, ccv3Next)`）。
+   */
+  view: Card
+  /** 完整 CCv3：世界书有改动时带（已合并 `data.character_book`），否则不带 */
+  ccv3?: Card
+  /** 结构视图是否有改动 */
+  structureChanged: boolean
+  /** 世界书是否有改动 */
+  loreChanged: boolean
+  /** 提交后世界书应有的条目数（回读校验用，防「界面说存了、磁盘没变」） */
+  loreEntries: number
+}
 
 /** 单行输入。 */
 function TextField(props: {
@@ -197,19 +229,21 @@ function FieldGroup(props: {
 /** 编辑器主组件。 */
 export function CardEditor(props: {
   card: Card
+  /** 完整 CCv3（世界书 / 未知键都在这里）；旧后端只给 card 时为空 */
+  ccv3?: Card
   name: string
   source: string
   busy: boolean
   error: string
   onCancel: () => void
-  onSave: (next: Card) => void
+  onSave: (next: CardSavePayload) => void
   t: Translate
   /** 父级请求关闭（点侧栏入口 / 点遮罩）：走同一套未保存确认，别无声丢草稿。 */
   closeSignal?: number
   /** 草稿脏状态变化：面板据此在收起前先问一句。 */
   onDirtyChange?: (dirty: boolean) => void
 }): JSX.Element {
-  const { card, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
+  const { card, ccv3, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
 
   const [draft, setDraft] = useState<Draft>(() => toDraft(card))
   // 默认展开：基本信息 + 声线（灵魂字段），其余折叠，避免一屏全是输入框
@@ -219,6 +253,11 @@ export function CardEditor(props: {
     return init
   })
   const [confirmLeave, setConfirmLeave] = useState(false)
+  // 世界书草稿：与 34 字段草稿分开存，靠 `loreBase` 的快照判脏
+  const [lore, setLore] = useState<{ book: LoreBookDraft; entries: LoreEntryDraft[] }>(() => toLoreDraftFromCard(ccv3))
+  const [loreBase] = useState(() => JSON.stringify(toLoreDraftFromCard(ccv3)))
+  // 全屏长文本层是否开着：开着时 Esc 归它，壳层不许顺手把编辑器关了
+  const [loreFocus, setLoreFocus] = useState(false)
   const bodyRef = useRef<HTMLDivElement | null>(null)
   // 两层 role="dialog"：编辑器本体一层，未保存确认再叠一层
   const editorRef = useRef<HTMLDivElement | null>(null)
@@ -233,7 +272,12 @@ export function CardEditor(props: {
   useInitialFocus(confirmRef, confirmLeave)
   useFocusTrap(confirmRef, confirmLeave)
 
-  const dirty = useMemo(() => isDirty(card, draft), [card, draft])
+  const structureDirty = useMemo(() => isDirty(card, draft), [card, draft])
+  const loreDirty = useMemo(() => JSON.stringify(lore) !== loreBase, [lore, loreBase])
+  /** 世界书能不能写：需要 `ccv3.data` 这层信封（`mergeLoreIntoCard` 的硬前提）。 */
+  const loreSupported = useMemo(() => Object.keys(ccv3Data(ccv3)).length > 0, [ccv3])
+  const loreIssueList = useMemo(() => loreIssues(lore.entries), [lore.entries])
+  const dirty = structureDirty || loreDirty
   // 把脏状态同步给面板：面板的入口按钮/遮罩/卸载都要先经过这里
   useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
   const progress = useMemo(() => {
@@ -270,6 +314,9 @@ export function CardEditor(props: {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      // 全屏长文本层盖在最上面：Esc 归它（它自己会处理和「返回/丢弃」），
+      // 两个 capture 监听按注册顺序跑，壳层不让步就会出现「一次 Esc 关两层」。
+      if (loreFocus) return
       event.stopPropagation()
       if (confirmLeave) { setConfirmLeave(false); return }
       if (dirty) { setConfirmLeave(true); return }
@@ -277,11 +324,24 @@ export function CardEditor(props: {
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [dirty, confirmLeave, onCancel])
+  }, [dirty, confirmLeave, loreFocus, onCancel])
 
+  /**
+   * 保存：两条链路分开走（见 `CardSavePayload` 的注释）。
+   *
+   * 世界书改动时**必须**整卡回传 `ccv3`，结构改动只发 `card`；
+   * 面板据此决定一次发一个键、还是先发 ccv3 再发 card。
+   */
   const save = (): void => {
     if (busy) return
-    onSave(mergeCard(card, draft))
+    const ccv3Next = loreDirty ? mergeLoreIntoCard(ccv3, lore.book, lore.entries) : undefined
+    onSave({
+      view: mergeCard(card, draft),
+      ...(ccv3Next === undefined ? {} : { ccv3: ccv3Next }),
+      structureChanged: structureDirty,
+      loreChanged: loreDirty,
+      loreEntries: lore.entries.length,
+    })
   }
 
   return (
@@ -338,6 +398,18 @@ export function CardEditor(props: {
             t={t}
           />
         ))}
+        {/* 第 11 个分区：世界书。数据层在 lorebook-schema.ts，保存走 ccv3（见 save()） */}
+        <LorebookSection
+          book={lore.book}
+          entries={lore.entries}
+          issues={loreIssueList}
+          dirty={loreDirty}
+          supported={loreSupported}
+          onChangeBook={patch => setLore(current => ({ ...current, book: { ...current.book, ...patch } }))}
+          onChangeEntries={next => setLore(current => ({ ...current, entries: next }))}
+          onFocusLayerChange={setLoreFocus}
+          t={t}
+        />
         <div style={{ height: 8 }} />
       </div>
 

@@ -148,3 +148,12 @@ export const IconAlert = icon(
     <path d="M8 6.6v3M8 11.2v.1" />
   </>,
 )
+
+/** 导入：托盘 + 下箭头（导入角色卡入口）。 */
+export const IconImport = icon(
+  <>
+    <path d="M8 2.6v6.4" />
+    <path d="M5.4 6.4 8 9l2.6-2.6" />
+    <path d="M2.8 10.4v1.6c0 .7.6 1.2 1.2 1.2h8c.6 0 1.2-.5 1.2-1.2v-1.6" />
+  </>,
+)

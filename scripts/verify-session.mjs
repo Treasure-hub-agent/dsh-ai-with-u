@@ -13,6 +13,10 @@
  *   6. 「关系」：非数值档位 + 起点锚定 + 不落盘
  *   7. 「换一句开场」：openings 轮换并持久化游标；有历史档案时不轮换；缺 openings 时生成
  *   8. 宿主事件钩子：agent/turn-stopping 真的会把 session.json 写出来
+ *   13. 纪律包 L0.5：off / lite / full 三档、order 5050、未启用全空串、偏好跨启停保留、REST 切换
+ *   14. awu_mode：写 session.json + _active.json 兜底、统一解析顺序、面板 POST /mode 兼容
+ *   15. topic / mood：awu_diary_write 同事务落盘，下一轮 L1 出现「未竟话题 / 此刻的情绪」
+ *   16. 亲密度：session.intimacy 写回、relation_log 上限 50、REST /relation/set 与非法入参拒绝
  *
  * 运行：node scripts/verify-session.mjs
  */
@@ -38,12 +42,81 @@ const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-verify-'))
 process.env['AIWU_STORAGE_ROOT'] = sandbox
 console.log(`沙箱存储根：${sandbox}`)
 
-const { Store, localIsoTimestamp, RELATION_BANDS } = await import(lib('store.js'))
+const {
+  Store, localIsoTimestamp, RELATION_BANDS, RELATION_LOG_LIMIT, resolveInteractionMode,
+} = await import(lib('store.js'))
 const { createTools } = await import(lib('tools.js'))
 const { buildRoutes } = await import(lib('web.js'))
+const {
+  PromptController, SECTION_BASELINE, SECTION_DISCIPLINE, SECTION_ACTIVE,
+  DISCIPLINE_TEXT, DISCIPLINE_FULL_TEXT,
+} = await import(lib('prompt.js'))
 
 const store = new Store(sandbox)
 const NAME = '测试角色'
+
+// ---------------------------------------------------------------- 新增断言共用的夹具
+
+/** 假 ServerResponse：把状态码与 JSON 体收进普通对象。 */
+const restRes = () => {
+  const out = { status: 0, body: undefined }
+  return {
+    out,
+    res: {
+      setHeader: () => {},
+      writeHead: (status) => { out.status = status },
+      end: (bytes) => {
+        try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes ?? '') }
+      },
+    },
+  }
+}
+
+/** 假 IncomingMessage：带本机 Host（来源栅栏放行）与可选 JSON 请求体。 */
+const restReq = (opts = {}) => {
+  const body = opts.body === undefined ? '' : JSON.stringify(opts.body)
+  return {
+    method: opts.method ?? 'GET',
+    url: opts.url ?? '/',
+    headers: {
+      host: '127.0.0.1:50143',
+      ...(body === '' ? {} : { 'content-type': 'application/json' }),
+      ...(opts.headers ?? {}),
+    },
+    socket: { localAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { if (body !== '') yield Buffer.from(body) },
+  }
+}
+
+/** 调一条已注册的 REST 路由（路径只写 / 之后的部分）。 */
+const restCall = async (routes, method, suffix, opts = {}) => {
+  const route = routes.find(r => r.path === `/_dsh/ai-with-u${suffix}`)
+  if (route === undefined) return { status: -1, body: undefined }
+  const { out, res } = restRes()
+  await route.handler(restReq({ method, ...opts }), res)
+  return out
+}
+
+/**
+ * 造一个最小的提示词宿主（收集 section 注册）并启用 {@link NAME}。
+ * 返回真实 `PromptController` 与 `renderOf(name)`——断言覆盖的是真渲染路径，不是字符串常量。
+ */
+const makePromptHost = async () => {
+  const sections = new Map()
+  const host = {
+    sys: { section: (input) => { sections.set(input.name, input); return () => sections.delete(input.name) } },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }
+  const pc = new PromptController(store, host)
+  await pc.activate(NAME)
+  pc.install()
+  const renderOf = (name) => {
+    const input = sections.get(name)
+    if (input === undefined) return ''
+    return typeof input.text === 'function' ? input.text({}) : String(input.text)
+  }
+  return { pc, sections, renderOf }
+}
 
 /** 造一张带 openings 的卡并落盘。 */
 const CARD = {
@@ -250,7 +323,7 @@ section('6. 「关系」：非数值档位、现算不落盘')
   check(relationBaseline('名义上的兄妹') === '亲近', '兄妹设定 → 亲近')
   check(relationBaseline('完全的陌生人，第一次见面') === '陌生', '陌生设定 → 陌生')
 
-  // 不落盘：session.json 里不能出现任何档位字段
+  // 普通对话轮不写回档位（只有里程碑事件才 set，见 §16）
   await store.commitTurn({ character: NAME, user: '我们是什么关系', turnId: 'rel' })
   const raw = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'session.json'), 'utf8'))
   const text = JSON.stringify(raw)
@@ -525,6 +598,236 @@ section('12. 彻底重置前先备份日记（不可逆操作留退路）')
   const backupText = await readFile(String(result.diaryBackup), 'utf8')
   check(backupText.includes('要保住的记忆'), '备份文件里确实有被删的日记')
   check((await store.readDiary(NAME)).length === 0, '重置后日记已清空')
+}
+
+// ---------------------------------------------------------------- 13. 纪律包 L0.5
+
+section('13. 纪律包 L0.5：三档行为、order 5050、偏好跨启停保留')
+{
+  const { pc, sections, renderOf } = await makePromptHost()
+
+  const disc = sections.get(SECTION_DISCIPLINE)
+  check(disc !== undefined, `discipline 段已注册（${[...sections.keys()].join(', ')}）`)
+  check(disc?.interpolate === false, 'discipline 段 interpolate:false（宿主 {{var}} 插值会崩）')
+  check(disc?.order === 5050, `discipline order = ${String(disc?.order)}（期望 5050）`)
+  const baseOrder = sections.get(SECTION_BASELINE)?.order ?? 0
+  const activeOrder = sections.get(SECTION_ACTIVE)?.order ?? 0
+  check((disc?.order ?? 0) > baseOrder && (disc?.order ?? 0) < activeOrder,
+    `order 落在 baseline(${baseOrder}) 与 active(${activeOrder}) 之间`)
+
+  check(pc.disciplineLevel === 'lite', `缺省档位 = lite（实际 ${pc.disciplineLevel}）`)
+  check([...DISCIPLINE_TEXT].length <= 900, `lite 文本 ${[...DISCIPLINE_TEXT].length} 字符（上限 900）`)
+  check([...DISCIPLINE_FULL_TEXT].length <= 1400, `full 文本 ${[...DISCIPLINE_FULL_TEXT].length} 字符（上限 1400）`)
+  check(renderOf(SECTION_DISCIPLINE) === DISCIPLINE_TEXT, 'lite 档渲染 DISCIPLINE_TEXT')
+
+  const liteNeed = ['禁止词库', '作为一个人工智能', '有什么可以帮你', '祝你生活愉快', '希望对你有帮助',
+    '温馨提示', '综上所述', '你觉得呢', '空行', '（动作）', '*动作*', '已删除', '克制含蓄']
+  const liteMissing = liteNeed.filter(kw => !DISCIPLINE_TEXT.includes(kw))
+  check(liteMissing.length === 0,
+    `lite 覆盖契约要点（禁止词库 / 消息形态 / 动作 / 输入识别 / 内容边界 / 指令确认）${liteMissing.length === 0 ? '' : '，缺：' + liteMissing.join(',')}`)
+
+  await pc.setDiscipline('full')
+  check(renderOf(SECTION_DISCIPLINE) === DISCIPLINE_FULL_TEXT, 'full 档渲染 DISCIPLINE_FULL_TEXT')
+  check(DISCIPLINE_FULL_TEXT.includes('语态锚点') && DISCIPLINE_FULL_TEXT.includes('每 10 轮'),
+    'full 档额外含语态锚点与每 10 轮日记自检')
+
+  await pc.setDiscipline('off')
+  check(renderOf(SECTION_DISCIPLINE) === '', 'off 档渲染空串（宿主管线过滤空段）')
+  check(renderOf(SECTION_BASELINE).includes('角色扮演底线'), 'off 只关纪律包，L0 底线仍在')
+
+  let levelErr = ''
+  try { await pc.setDiscipline('bogus') } catch (e) { levelErr = e.message }
+  check(levelErr.includes('off / lite / full'), `非法档位被拒：${levelErr}`)
+
+  // 偏好跨启停保留（与 mode 同一口径）
+  await pc.setDiscipline('full')
+  await pc.deactivate()
+  const idleDiscipline = renderOf(SECTION_DISCIPLINE)
+  check(idleDiscipline === '', `未启用时 discipline 段为空串（实际 ${idleDiscipline.length} 字符）`)
+  check(renderOf(SECTION_ACTIVE) === '', '未启用时 L1 段也为空串')
+  const activeFile = JSON.parse(await readFile(join(sandbox, '_active.json'), 'utf8'))
+  check(activeFile.enabled === false && activeFile.discipline === 'full',
+    `deactivate 保留纪律包偏好：${JSON.stringify(activeFile)}`)
+  await pc.activate(NAME)
+  check(renderOf(SECTION_DISCIPLINE) === DISCIPLINE_FULL_TEXT, '重新启用后沿用 full')
+
+  // REST：POST /discipline + GET /overview
+  const routes = buildRoutes(store, pc)
+  const setRes = await restCall(routes, 'POST', '/discipline', { body: { level: 'lite' } })
+  check(setRes.status === 200 && setRes.body?.discipline === 'lite',
+    `POST /discipline lite → ${setRes.status} ${JSON.stringify(setRes.body?.discipline)}`)
+  check((await restCall(routes, 'POST', '/discipline', { body: { level: '超强' } })).status === 400, '非法 level → 400')
+  check((await restCall(routes, 'GET', '/discipline')).status === 405, 'GET /discipline 不再有副作用（405）')
+  const overview = await restCall(routes, 'GET', '/overview')
+  check(overview.status === 200 && overview.body?.discipline === 'lite',
+    `GET /overview 返回 discipline=${String(overview.body?.discipline)}`)
+}
+
+// ---------------------------------------------------------------- 14. awu_mode
+
+section('14. awu_mode：写 session（权威）+ _active（兜底），解析顺序统一')
+{
+  const { pc, renderOf } = await makePromptHost()
+  const tools = createTools(store, pc)
+  const modeTool = tools.find(t => t.name === 'awu_mode')
+  check(modeTool !== undefined, `已注册 awu_mode 工具（${tools.map(t => t.name).join(', ')}）`)
+  check(modeTool.parameters.mode?.required === true && Array.isArray(modeTool.parameters.mode?.enum),
+    'awu_mode.mode 必填且为枚举')
+  check(modeTool.description.includes('角色口吻') && modeTool.description.includes('已切换'),
+    '工具描述要求角色口吻确认、明禁「已切换」式系统确认')
+
+  // 先有一份 session（模拟已经聊过）
+  await store.commitTurn({ character: NAME, summary: '准备切模式', turnId: 'mode-prep' })
+  const out = await modeTool.execute({ mode: 'text' }, {})
+  check(out.ok === true && out.mode === 'text', `awu_mode 返回 {ok, mode}：${JSON.stringify(out)}`)
+  const session = await store.readSession(NAME)
+  check(session.mode === 'text', `session.json.mode = ${String(session.mode)}（会话权威）`)
+  const activeFile = JSON.parse(await readFile(join(sandbox, '_active.json'), 'utf8'))
+  check(activeFile.mode === 'text', `_active.json.mode = ${String(activeFile.mode)}（兜底同步）`)
+  check(renderOf(SECTION_ACTIVE).includes('交互模式：纯文本'), 'L1 立刻反映纯文本（不必等下一轮 pre-step）')
+
+  // 统一解析顺序：session > _active > 默认
+  check(resolveInteractionMode({ mode: 'text' }, { mode: 'text+action' }) === 'text', 'session.mode 优先于 _active.mode')
+  check(resolveInteractionMode({}, { mode: 'text' }) === 'text', 'session 没写时退回 _active.mode')
+  check(resolveInteractionMode({}, {}) === 'text+action', '两处都没有时默认 text+action')
+  check(resolveInteractionMode({ mode: '乱写' }, { mode: 'text' }) === 'text', 'session 脏值不生效（退回 _active）')
+
+  let modeErr = ''
+  try { await modeTool.execute({ mode: 'voice' }, {}) } catch (e) { modeErr = e.message }
+  check(modeErr.includes('text 或 text+action'), `非法 mode 被拒：${modeErr}`)
+
+  // 面板 POST /mode 兼容（body 可带 name）
+  const routes = buildRoutes(store, pc)
+  const panel = await restCall(routes, 'POST', '/mode', { body: { mode: 'text+action', name: NAME } })
+  check(panel.status === 200 && panel.body?.mode === 'text+action', `POST /mode（body 带 name）→ ${panel.status}`)
+  check((await store.readSession(NAME)).mode === 'text+action', 'POST /mode 也写 session.json')
+  const panelLegacy = await restCall(routes, 'POST', '/mode', { body: { mode: 'text' } })
+  check(panelLegacy.status === 200, 'POST /mode 不带 name 仍可用（兼容旧面板）')
+
+  // 没有 session.json 时也要能写（新加的最小会话）
+  const FRESH = `${NAME}-mode-fresh`
+  await store.writeCard(FRESH, { ...CARD, name: FRESH })
+  const created = await store.setMode(FRESH, 'text')
+  check(created !== undefined && created.mode === 'text', '没有 session.json 时 setMode 会建一份最小会话')
+  await store.deleteCharacter(FRESH, true)
+}
+
+// ---------------------------------------------------------------- 15. topic / mood
+
+section('15. topic / mood：awu_diary_write 同事务落盘，下一轮 L1 生效')
+{
+  const { pc, renderOf } = await makePromptHost()
+  const tools = createTools(store, pc)
+  const diaryTool = tools.find(t => t.name === 'awu_diary_write')
+  const paramNames = Object.keys(diaryTool.parameters)
+  check(paramNames.includes('topic') && paramNames.includes('mood'),
+    `awu_diary_write 暴露 topic/mood（${paramNames.join(', ')}）`)
+
+  const beforeTurns = (await store.readSession(NAME))?.turn_count ?? 0
+  const out = await diaryTool.execute(
+    { timeline: ['[事实] TA 说下周三考试'], topic: '下周三考试', mood: '有点担心' }, {},
+  )
+  check(out.ok === true && out.topic === '下周三考试', `写入返回 topic：${JSON.stringify(out)}`)
+  const session = await store.readSession(NAME)
+  check(session.topic === '下周三考试', `session.topic 落盘：${String(session.topic)}`)
+  check(session.mood === '有点担心', `session.mood 落盘：${String(session.mood)}`)
+  check((session.turn_count ?? 0) === beforeTurns, '写日记不改 turn_count（不冒充对话轮）')
+
+  const l1 = renderOf(SECTION_ACTIVE)
+  check(l1.includes('未竟话题：下周三考试'), '下一轮 L1 出现「未竟话题」')
+  check(l1.includes('此刻的情绪：有点担心'), '下一轮 L1 出现「此刻的情绪」')
+
+  // 空串 = 不改（不要清掉已有话题）
+  await diaryTool.execute({ timeline: ['[事实] 又一件事'], topic: '', mood: '' }, {})
+  const after = await store.readSession(NAME)
+  check(after.topic === '下周三考试' && after.mood === '有点担心', 'topic/mood 传空串时保留原值')
+
+  // GET /character 能看到 session.topic / mood
+  const routes = buildRoutes(store, pc)
+  const detail = await restCall(routes, 'GET', '/character', { url: `/?name=${encodeURIComponent(NAME)}` })
+  check(detail.status === 200 && detail.body?.session?.topic === '下周三考试',
+    `GET /character 的 session.topic = ${String(detail.body?.session?.topic)}`)
+  check(detail.body?.session?.mood === '有点担心', 'GET /character 的 session.mood 也在')
+}
+
+// ---------------------------------------------------------------- 16. 亲密度落盘
+
+section('16. 亲密度：session.intimacy 写回、relation_log 上限、REST 与非法入参')
+{
+  const { pc } = await makePromptHost()
+  const before = await store.relationState(NAME)
+
+  const first = await store.setIntimacy(NAME, '亲近', '第一次说好一起去看海')
+  check(first.current === '亲近', `current = ${first.current}`)
+  check(first.log.length === 1, `变更日志 1 条（实际 ${first.log.length}）`)
+  check(first.log[0].from === before.baseline && first.log[0].to === '亲近',
+    `日志记录 from=${first.log[0].from} → to=${first.log[0].to}（起点档 ${before.baseline}）`)
+  check(first.log[0].why === '第一次说好一起去看海', '日志记录原因 why')
+  check(/[+-]\d{2}:\d{2}$/u.test(first.log[0].at), `日志时间戳带偏移：${first.log[0].at}`)
+  check(first.baseline === before.baseline, 'baseline 语义不变（仍是卡内起点档）')
+
+  // 追加条件：同档 + 无 why = 不追加（纯噪音）；同档 + 有 why 照记（上面 first 就是同档带 why）
+  const sameNoWhy = await store.setIntimacy(NAME, '亲近')
+  check(sameNoWhy.log.length === 1, `同档且无 why 不追加日志（仍 ${sameNoWhy.log.length} 条）`)
+  check(sameNoWhy.current === '亲近', '同档写回仍返回当前档')
+  const sameWithWhy = await store.setIntimacy(NAME, '亲近', '同档但值得留痕的里程碑')
+  check(sameWithWhy.log.length === 2 && sameWithWhy.log[1].from === '亲近' && sameWithWhy.log[1].to === '亲近',
+    '同档但带 why 照记（表白这类不进档的里程碑）')
+  // 复位到 1 条，后面的计数断言按「每条都带 why」推
+  await store.writeSession(NAME, { ...(await store.readSession(NAME)), relation_log: [sameWithWhy.log[0]] })
+
+  let badErr = ''
+  try { await store.setIntimacy(NAME, '超亲密') } catch (e) { badErr = e.message }
+  check(badErr.includes('陌生'), `非法档位被拒：${badErr}`)
+
+  const tools = createTools(store, pc)
+  const relationTool = tools.find(t => t.name === 'awu_relation')
+  const queried = await relationTool.execute({}, {})
+  check(queried.current === '亲近' && String(queried.tag).includes('亲近'),
+    `无参 = 只查询、不回写：current=${queried.current} tag=${queried.tag}`)
+  check(queried.log.length === 1, '查询不追加日志')
+  const written = await relationTool.execute({ set: '亲密', why: '第一次叫你的名字' }, {})
+  check(written.current === '亲密' && written.log.length === 2, `awu_relation set 写回并追加日志（${written.log.length} 条）`)
+  check(written.log[1].from === '亲近' && written.log[1].to === '亲密',
+    `日志 from=${written.log[1].from} → to=${written.log[1].to}`)
+
+  // REST：POST /relation/set
+  const routes = buildRoutes(store, pc)
+  const setRes = await restCall(routes, 'POST', '/relation/set',
+    { body: { name: NAME, value: '熟悉', why: '吵了一架又和好' } })
+  check(setRes.status === 200 && setRes.body?.current === '熟悉',
+    `POST /relation/set → ${setRes.status} current=${String(setRes.body?.current)}`)
+  check((await restCall(routes, 'POST', '/relation/set', { body: { name: NAME, value: '超熟' } })).status === 400,
+    '非法档位 REST → 400')
+  check((await restCall(routes, 'POST', '/relation/set', { body: { name: NAME } })).status === 400,
+    '缺 value REST → 400')
+
+  // GET /character 的 relation 字段带 current / log
+  const detail = await restCall(routes, 'GET', '/character', { url: `/?name=${encodeURIComponent(NAME)}` })
+  check(detail.body?.relation?.current === '熟悉',
+    `GET /character relation.current = ${String(detail.body?.relation?.current)}`)
+  check(Array.isArray(detail.body?.relation?.log) && detail.body.relation.log.length === 3,
+    'GET /character relation.log 有三条')
+
+  // 上限：超过 RELATION_LOG_LIMIT 条丢最旧
+  for (let i = 0; i < 60; i += 1) {
+    await store.setIntimacy(NAME, i % 2 === 0 ? '亲近' : '熟悉', `第 ${i + 1} 次`)
+  }
+  const capped = await store.relationState(NAME)
+  check(capped.log.length === RELATION_LOG_LIMIT,
+    `relation_log 上限 ${RELATION_LOG_LIMIT} 条（实际 ${capped.log.length}）`)
+  check(capped.log[capped.log.length - 1].to === '熟悉', '保留的是最新一条')
+  check(!capped.log.some(item => item.why === '第 1 次'), '最旧的条目已丢弃')
+  const raw = JSON.parse(await readFile(join(sandbox, 'characters', NAME, 'session.json'), 'utf8'))
+  check(raw.intimacy === '熟悉' && Array.isArray(raw.relation_log),
+    `session.json 里落盘 intimacy=${String(raw.intimacy)}，日志 ${raw.relation_log?.length} 条`)
+
+  // 「全新开始」保留关系里程碑，「彻底重置」才清
+  const resetKeep = await store.resetSession(NAME)
+  check(resetKeep.session.intimacy === '熟悉', '全新开始保留亲密度（关系里程碑不是聊天记录）')
+  const resetAll = await store.resetStory(NAME)
+  check(resetAll.session.intimacy === undefined && resetAll.session.relation_log === undefined,
+    '彻底重置把亲密度与日志一起清掉')
 }
 
 // ---------------------------------------------------------------- 清理

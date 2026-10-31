@@ -2529,6 +2529,245 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-switchRow input { accent-color: var(--awu-accent); cursor: pointer; }
 
+/* ---- 世界书条目（lorebook-editor.tsx 落地后补的细节层；容器仍是 .awu-loreRow） ---- */
+.awu-loreEntry {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-lg);
+  background: var(--awu-surface-2);
+  box-shadow: var(--awu-specular);
+  overflow: hidden;
+}
+
+.awu-loreEntry[data-open="true"] { border-color: var(--awu-line-strong); }
+.awu-loreEntry[data-issue="true"] { box-shadow: inset 2px 0 0 var(--awu-danger), var(--awu-specular); }
+/* 条目自带描边后，行本身不再重复画底与投影 */
+.awu-loreEntry .awu-loreRow { border-radius: 0; background: transparent; box-shadow: none; }
+.awu-loreEntry .awu-loreRow:hover { background: var(--awu-surface-3); }
+
+.awu-loreRowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--awu-gap-1);
+  padding: var(--awu-gap-2) 0;
+  border: none;
+  background: transparent;
+  color: var(--awu-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.awu-loreRowMain:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; border-radius: var(--awu-r-xs); }
+
+.awu-loreRowTitleWrap { display: flex; align-items: center; gap: var(--awu-gap-3); max-width: 100%; min-width: 0; }
+
+.awu-loreRowTitle {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--awu-sans);
+  font-size: var(--awu-fs-body);
+  font-weight: 600;
+  color: var(--awu-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.awu-loreRowMeta {
+  max-width: 100%;
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.awu-loreRowFlag {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: var(--awu-r-pill);
+  background: color-mix(in srgb, var(--awu-danger) 22%, transparent);
+  color: var(--awu-danger);
+  font-size: var(--awu-fs-micro);
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.awu-loreRowActions { flex: none; display: inline-flex; align-items: center; gap: var(--awu-gap-1); }
+
+.awu-loreRowSwitch { display: inline-flex; align-items: center; padding: 0 var(--awu-gap-2); cursor: pointer; }
+.awu-loreRowSwitch input { accent-color: var(--awu-accent); cursor: pointer; }
+
+.awu-loreRowBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--awu-r-xs);
+  background: transparent;
+  color: var(--awu-ink-mute);
+  cursor: pointer;
+  transition: color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-loreRowBtn:hover { color: var(--awu-ink); background: var(--awu-surface-3); }
+.awu-loreRowBtn:disabled { opacity: .32; cursor: default; background: transparent; }
+.awu-loreRowBtn:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+
+.awu-loreGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--awu-gap-5); }
+
+.awu-loreFold {
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-field);
+}
+
+.awu-loreFold > summary {
+  list-style: none;
+  padding: var(--awu-gap-3) var(--awu-gap-5);
+  font-size: var(--awu-fs-label);
+  font-weight: 600;
+  color: var(--awu-ink-mute);
+  cursor: pointer;
+}
+
+.awu-loreFold > summary::-webkit-details-marker { display: none; }
+.awu-loreFold > summary:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-loreFold[open] > summary { border-bottom: 1px solid var(--awu-line); color: var(--awu-ink); }
+.awu-loreFold > .awu-loreAdv { padding: var(--awu-gap-4) var(--awu-gap-5) var(--awu-gap-5); }
+
+.awu-loreFullscreen {
+  margin-left: auto;
+  min-height: 24px;
+  padding: 0 var(--awu-gap-4);
+  border: 1px solid var(--awu-line-strong);
+  border-radius: var(--awu-r-pill);
+  background: transparent;
+  color: var(--awu-ink-mute);
+  font: inherit;
+  font-size: var(--awu-fs-micro);
+  cursor: pointer;
+  transition: color var(--awu-dur-2) var(--awu-ease), border-color var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-loreFullscreen:hover { color: var(--awu-accent-text); border-color: var(--awu-accent); }
+.awu-loreFullscreen:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; }
+
+.awu-loreHealth { display: flex; flex-wrap: wrap; align-items: center; gap: var(--awu-gap-4); }
+
+.awu-loreDirtyDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--awu-r-pill);
+  background: var(--awu-accent-text);
+}
+
+.awu-loreEmpty { display: flex; flex-direction: column; gap: var(--awu-gap-4); padding: var(--awu-gap-3) 0; }
+
+.awu-loreEntryIssues,
+.awu-loreIssueList {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-2);
+  font-size: var(--awu-fs-label);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+}
+
+.awu-loreEntryIssues { color: var(--awu-gold); }
+.awu-loreIssueList b { color: var(--awu-ink); font-weight: 600; }
+
+/* ---- 导入角色卡弹层（index.tsx 的 ImportDialog） ---- */
+.awu-importDrop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--awu-gap-5);
+  padding: var(--awu-gap-9) var(--awu-gap-6);
+  border: 1.5px dashed var(--awu-line-strong);
+  border-radius: var(--awu-r-lg);
+  background: var(--awu-surface-field);
+  color: var(--awu-ink-mute);
+  text-align: center;
+  transition: border-color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-importDrop[data-busy="true"] { opacity: .6; }
+.awu-importDropTitle { font-size: var(--awu-fs-body-lg); color: var(--awu-ink-dim); line-height: var(--awu-lh-body); }
+
+/* 原生 file input：**不藏起来**（键盘用户要能 Tab 到它并回车打开选择框），只把字号收小 */
+.awu-importNative {
+  width: 100%;
+  max-width: 420px;
+  font-family: var(--awu-sans);
+  font-size: var(--awu-fs-label);
+  color: var(--awu-ink-mute);
+}
+
+.awu-importNative:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 3px; border-radius: var(--awu-r-xs); }
+
+.awu-importView { display: flex; flex-direction: column; gap: var(--awu-gap-5); }
+
+.awu-importFileRow { display: flex; align-items: baseline; gap: var(--awu-gap-3); min-width: 0; }
+.awu-importFileLabel { flex: none; font-size: var(--awu-fs-label); font-weight: 600; color: var(--awu-ink-mute); }
+.awu-importFileSize { flex: none; margin-left: auto; font-family: var(--awu-mono); font-size: var(--awu-fs-micro); color: var(--awu-ink-mute); }
+
+.awu-importMeta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-1);
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+}
+
+.awu-importConflict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--awu-gap-3);
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border: 1px solid color-mix(in srgb, var(--awu-gold) 40%, transparent);
+  border-radius: var(--awu-r-md);
+  background: color-mix(in srgb, var(--awu-gold) 10%, transparent);
+  font-size: var(--awu-fs-body);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+}
+
+.awu-importConflict[data-confirm="true"] {
+  border-color: color-mix(in srgb, var(--awu-danger) 50%, transparent);
+  background: color-mix(in srgb, var(--awu-danger) 12%, transparent);
+}
+
+.awu-importConflict b { color: var(--awu-ink); font-weight: 600; }
+
+.awu-importWarnHead { font-size: var(--awu-fs-label); font-weight: 600; color: var(--awu-ink-mute); }
+
+.awu-importWarns {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-2);
+  font-size: var(--awu-fs-body);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+}
+
 /* CCv3 预览段 */
 .awu-nativeField { display: flex; flex-direction: column; gap: var(--awu-gap-2); padding: var(--awu-gap-4) 0; border-bottom: 1px solid var(--awu-line); }
 .awu-nativeField:last-child { border-bottom: none; }

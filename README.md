@@ -2,12 +2,12 @@
 
 **给 DeepSeek Harness 的角色扮演插件。** 蒸馏任意ip角色卡并让你的大肥鱼成为TA，选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
 
-![version](https://img.shields.io/badge/version-0.2.0-d97706)
+![version](https://img.shields.io/badge/version-0.3.0-d97706)
 ![npm](https://img.shields.io/npm/v/dsh-ai-with-u?color=cb3837&logo=npm)
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-515%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-641%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -45,10 +45,15 @@
 
 | | 原 skill | 本插件 |
 |---|---|---|
-| 提示词 | `SKILL.md` 13 KB，每轮全量注入 | 启用态约 2.4 KB，不启用时为 0 |
+| 提示词 | `SKILL.md` 13 KB，每轮全量注入 | 启用态约 2.8–3.3 KB（lite 档），不启用时为 0 |
 | 文件读写 | 模型自己动手 | 插件代码保证，原子写 + 跨进程锁 |
 | 角色管理 | 在对话里说指令 | 可视化面板 |
 | 生效时机 | 一直生效 | 可插拔，退出即卸载 |
+
+有两处是**故意不做**，别当成缺功能：
+
+- **8 个场景的扮演测试**（原 skill 里那套「测一遍人设像不像」的用例）没搬。人像不像只能靠聊，靠脚本测不出来——能测的（提示词长度、字段完整性、世界书命中、导入解析）都已经进了自检，共八套。
+- **`manifest` / `full_card` 不单独落文件**，收进 `card.json` 的 `extensions.aiwu` 里。CCv3 本身只有一份真相，再存一份清单等于制造两个会互相漂移的事实来源；要读清单就 `GET /character`。
 
 ---
 
@@ -59,10 +64,12 @@ flowchart LR
     U[你的消息] --> S[DSH 会话]
     S --> A{每轮组装系统提示词}
     A --> L0[L0 底线]
+    A --> L05[L0.5 纪律包]
     A --> L1[L1 角色卡]
     A --> W[世界书命中]
     A --> D[日记与会话摘要]
     L0 --> M[模型]
+    L05 --> M
     L1 --> M
     W --> M
     D --> M
@@ -76,11 +83,14 @@ flowchart LR
 | 层级 | 什么时候在 | 内容 | 体积 |
 |---|---|---|---|
 | **L0 底线** | 启用期间 | 优先级声明 + 扮演底线 | 约 365 字符 |
+| **L0.5 纪律包** | 启用期间，按档位 | 禁止词库、消息形态、动作格式、输入识别、内容边界 | lite 555 / full 736 字符 |
 | **L1 角色** | 启用期间 | CCv3 角色卡（声线优先）+ 时间差 + 最近日记 | 约 1.9–2.4K，随卡增长 |
 | **世界书** | 命中才注入 | 关键词 / 常驻条目，预算 12 条 · 6000 字符 | 典型约 0.2K |
 | **L2 长流程** | 工具按需 | 蒸馏、建卡向导 | 不进系统提示词 |
 
-退出时四段全部返回空串，宿主会过滤掉——这是「干净拔出」的实现方式，不是靠删文件。
+退出时五段全部返回空串，宿主会过滤掉——这是「干净拔出」的实现方式，不是靠删文件。
+
+纪律包有三档：`off`（关掉）/ `lite`（默认）/ `full`（多一段「遮住名字也要猜得出是谁」的语态锚点 + 每 10 轮日记自检）。切档走 `POST /_dsh/ai-with-u/discipline`，偏好存在 `_active.json` 里，退出角色也保留。
 
 ### 插拔
 
@@ -96,10 +106,14 @@ flowchart LR
 
 四个分区：
 
-- **角色簿** — 卡片墙、详情页、完整编辑（10 组 34 字段）
+- **角色簿** — 卡片墙、导入角色卡、详情页、完整编辑
 - **日记** — 时间线、逐条改写、危险区
 - **统计** — 角色数、记忆条数、对话轮次
 - **指南** — 首次打开时的使用说明
+
+角色簿左栏有「导入角色卡」，吃酒馆卡的三种形态：带立绘的 `.png`、`.charx` 压缩包、裸 `.json`。选完文件先出预览（识别到的名字、格式、全部 warnings），同名卡会提醒冲突并要二次确认；确认后才写盘，取消不落任何文件。文件上限 11 MB——base64 会膨胀 4/3，11 MB 传到宿主正好还在 16 MB 收包线内；带立绘的 PNG 卡常见 3–10 MB。
+
+角色卡编辑器是 10 组 34 字段，第 11 个分区是**世界书**：条目名、关键词 / 副关键词（逗号分隔）、内容长文本（可全屏写）、常驻、优先级、插入顺序、逐条启用与上移下移。高级项里有位置（角色设定前 / 后）、大小写敏感、`selective`、正则。顶部体检标红五种情况：没有关键词、`selective` 缺副关键词、内容为空或超长（单条 800 字）、关键词重复、插入顺序撞车；整本还有条数 30 / 总字数 20000 的预算提醒。体检只提示，不拦保存。
 
 编辑器里「声线基因」是灵魂字段：说话节奏、自称、口头禅、禁忌词、小动作。这些决定「听起来像不像他」，所以给了金色描边和独立徽记。
 
@@ -189,13 +203,25 @@ New-Item -ItemType Junction `
 ```
 ~/.dsh/ai-with-u/
 ├── _index.json                # 角色索引
-├── _active.json               # 当前启用状态
+├── _active.json               # 当前启用状态（含 mode / discipline 偏好）
 └── characters/<角色名>/
     ├── card.json              # CCv3 角色卡
     ├── card.v1.bak.json       # 迁移前原件，回滚就拷回来
     ├── diary.md               # 日记，按天分组
     └── session.json           # 会话状态与滚动摘要
 ```
+
+`session.json` 是「这一册读到哪了」，认得这些字段：
+
+| 字段 | 含义 |
+|---|---|
+| `recent` / `turn_count` / `last_ts` | 最近几轮、累计轮次、最后一次时间 |
+| `mood` / `topic` | 此刻的情绪、未竟的话题（写日记时一并落盘，下一轮 L1 用） |
+| `mode` | `text` 或 `text+action`，**交互模式的权威位置** |
+| `intimacy` | 关系档位，五档之一：陌生 / 认识 / 熟悉 / 亲近 / 亲密 |
+| `relation_log` | 档位变化留痕：`{ at, from, to, why? }`，最多 50 条，超出丢最旧 |
+
+交互模式按 `session.json` → `_active.json` → `text+action` 的顺序解析：会话里用 `awu_mode` 切的档立刻生效，`_active.json` 只作没会话记录时的兜底。
 
 纯 markdown / JSON，可读、可改、可备份、可迁移。不联网、不注册、不收藏数据。
 
@@ -215,47 +241,68 @@ AIWU_TRUSTED_HOSTS=my.tunnel.example
 
 ## 能力清单
 
-### 模型工具（8 个，仅启用角色时挂载）
+### 模型工具（9 个，仅启用角色时挂载）
 
 | 工具 | 用途 |
 |---|---|
-| `awu_diary_write` | 追加日记 |
+| `awu_diary_write` | 追加日记（可同时记下 `topic` / `mood`） |
 | `awu_diary_read` | 读取 / 筛选日记 |
 | `awu_whoami` | 查询当前身份 |
 | `awu_forget` | 忘记某事（日记 + 会话 + 角色卡三处同步） |
 | `awu_diary_edit` | 就地改写日记条目 |
 | `awu_session_reset` | 全新开始 / 彻底重置 |
-| `awu_relation` | 查询关系档位依据 |
+| `awu_relation` | 查关系档位依据；带 `set` 时按里程碑写回档位 |
+| `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
 
 另有一个**条件挂载**的 `awu_card_save`：只在点「蒸馏角色卡」后的两小时内、且保存一次后自动失效。平时模型拿不到写卡能力。
 
-### REST 接口（21 条，`/_dsh/ai-with-u/`）
+### REST 接口（23 条，`/_dsh/ai-with-u/`）
 
 ```
 overview  characters  character  character/save  character/import  character/delete
-activate  deactivate  mode  relation  opening/next  opening/state
+activate  deactivate  mode  discipline  relation  relation/set  opening/next  opening/state
 diary/save  diary/edit  forget  session/reset  session/commit
 distill/flow  distill/arm  distill/disarm  distill/state
 ```
 
 `/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
+> 世界书的改动**必须随 `ccv3` 发**：只发 `card` 时后端以磁盘上的旧卡为底重投影，`character_book` 按原卡保留——改动会被静默吞掉，还会提示保存成功。
+
+`awu_relation` 的口径是「**查看不写回**」：用户只是问「关系如何」时只读档位、不改档；只有里程碑事件（第一次约定、第一次争吵、称呼改变、表白）才带 `set` 写回，并在 `relation_log` 留一条。对话里不出现「好感度 +1」这类数值。
+
+### 面板与提示词
+
+- **导入角色卡** —— 角色簿左栏入口，吃 PNG / CHARX / JSON，先预览后落盘
+- **世界书编辑** —— 角色卡编辑器第 11 分区，条目增删改 + 体检
+- **纪律包 L0.5** —— `off` / `lite` / `full` 三档，默认 lite，偏好落盘、退出角色也保留
+- **`awu_mode`** —— 对话里直接切纯文本 / 文本 + 动作，不需要回面板
+
 ---
 
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 七套自检
-npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
-npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 忘却（218 项）
-npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
-npm run verify:session   # 会话、指令与来源栅栏（111 项）
-npm run verify:host      # 真实 cordis 宿主装配（35 项）
-npm run verify:distill   # 蒸馏武装与 TTL（93 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 八套自检（合计 641 项）
+npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
+npm run verify:wiring    # 接线体检：后端做了、前端没接（18 项）
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 忘却（218 项）
+npm run verify:distill   # 蒸馏武装与 TTL（93 项）
+npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
+npm run verify:session   # 会话、指令、纪律包与关系落盘（184 项）
+npm run verify:host      # 真实 cordis 宿主装配（55 项）
 npm run typecheck:client # 只查浏览器侧类型
 ```
+
+`npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
+
+徽章上的 641 = 上面八套自检通过项之和，失败项必须为 0。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+
+`verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
+
+> 抽查 `lib/client.js` 时别用中文去 grep：esbuild 默认 `charset: ascii`，打包产物里的中文一律转成 `\uXXXX`（如「导入角色卡」= `\u5BFC\u5165\u89D2\u8272\u5361`）。功能无损，但**按字面搜中文会误判「产物里没有」**。
 
 宿主 API 的类型直接来自 `@deepseek-ai/dsh-system-prompt` / `dsh-tools` / `cordis` 的 devDependencies，`inject`、`PromptSection`、`ToolDefinition` 都有编译期校验——契约漂移会在构建阶段报错，而不是运行时「failed 但不给原因」。
 
@@ -284,7 +331,7 @@ AGENTS.md 是以 user 角色消息注入的，插件用的是 system prompt，�
 <details>
 <summary>退出后真的什么都不留吗？</summary>
 
-四段（L0 / L1 / 世界书 / 时间差）在退出后都返回空串，宿主会过滤空段。`awu_*` 工具同时全部卸载。数据文件仍然在磁盘上，但不参与任何提示词组装。
+五段（L0 / L0.5 纪律 / L1 / 世界书 / 时间差）在退出后都返回空串，宿主会过滤空段。`awu_*` 工具同时全部卸载。数据文件仍然在磁盘上，但不参与任何提示词组装。
 
 </details>
 
@@ -305,7 +352,7 @@ desktop profile 由 Electron 独占管理，CLI 会直接报 `managed exclusivel
 <details>
 <summary>提示词到底占多少 token？</summary>
 
-启用态约 2.4 KB 字符量级（中文按字计），未启用 0。世界书常态只注入一两百字符。重内容（卡里的详细设定、长日记）不会无条件进提示词。
+启用态约 2.8–3.3 KB 字符量级（中文按字计），未启用 0。实测：丰川祥子的卡 + lite 档，整段渲染 3286 字符。默认 lite 档的纪律包占 555 字符；切 `off` 全省，切 `full` 多 181 字符。世界书常态只注入一两百字符。重内容（卡里的详细设定、长日记）不会无条件进提示词。
 
 </details>
 

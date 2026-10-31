@@ -1,6 +1,6 @@
 {
   "name": "dsh-ai-with-u",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AI WITH U · 角色扮演管理器 —— 选卡即插即用人设注入、日记记忆与可视化角色管理（DSH 插件版）",
   "license": "MIT",
   "author": "Treasure-hub-agent",
@@ -74,13 +74,14 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify-bundle.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-distill.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/verify-bundle.mjs && node scripts/verify-wiring.mjs && node scripts/verify.mjs && node scripts/verify-tavern.mjs && node scripts/verify-distill.mjs && node scripts/verify-import.mjs && node scripts/verify-session.mjs && node scripts/verify-host.mjs",
     "prepack": "npm run build",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "verify": "node scripts/verify.mjs",
     "verify:bundle": "node scripts/verify-bundle.mjs",
+    "verify:wiring": "node scripts/verify-wiring.mjs",
     "verify:import": "node scripts/verify-import.mjs",
     "verify:session": "node scripts/verify-session.mjs",
     "verify:host": "node scripts/verify-host.mjs",

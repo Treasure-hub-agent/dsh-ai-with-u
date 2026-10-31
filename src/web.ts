@@ -12,7 +12,8 @@
  * @module dsh-ai-with-u/web
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { Store, DiaryEditInput } from './store.js'
+import type { Store, DiaryEditInput, RelationBand } from './store.js'
+import { RELATION_BANDS } from './store.js'
 import type { PromptController } from './prompt.js'
 import type { DistillArm } from './distill.js'
 import { distillFlowInfo } from './distill.js'
@@ -203,10 +204,16 @@ export function buildRoutes(
           const session = await store.readSession(item.name)
           totalTurns += Number(session?.turn_count ?? 0) || 0
         }
+        // 交互模式与 L1 渲染走同一个解析函数（session.mode > _active.mode > 'text+action'），
+        // 否则会出现「面板说纯文本、模型还在写动作」的两套口径。
+        const mode = await prompt.resolvedMode()
         send(res, 200, {
           ok: true,
           root: store.root,
-          active,
+          active: { ...active, mode },
+          mode,
+          // 纪律包档位（off / lite / full）：面板据此显示开关状态
+          discipline: prompt.disciplineLevel,
           relationTag: prompt.relationTag() ?? '',
           stats: {
             characters: list.length,
@@ -244,7 +251,14 @@ export function buildRoutes(
           ccv3,
           diary: await store.readDiary(name),
           session: (await store.readSession(name)) ?? {},
-          relation: { tag: `${name}（${relation.baseline}）`, bands: relation.bands, baseline: relation.baseline },
+          // tag 用当前档位（落盘值，缺省退回起点档）；baseline 单独给出，面板可以两个都显示
+          relation: {
+            tag: `${name}（${relation.current}）`,
+            bands: relation.bands,
+            baseline: relation.baseline,
+            current: relation.current,
+            log: relation.log,
+          },
           openingState: await store.openingState(name),
         })
       }),
@@ -341,12 +355,32 @@ export function buildRoutes(
       handler: guard(async (req, res) => {
         const body = await readBody(req)
         const mode = body['mode'] === 'text' ? 'text' : 'text+action'
-        const name = prompt.characterName
-        if (name === undefined) throw new Error('当前没有启用角色')
-        const active = await prompt.setMode(mode)
-        // 会话里的 mode 同步落盘，跨客户端口径一致（Store 内部持锁，避免与 commitTurn 抢写）
+        // 兼容旧调用：body 不带 name 时操作当前启用角色；带了 name 也可指定（面板/多存档工具）
+        const name = resolveName(body)
+        if (name === prompt.characterName) {
+          // 统一入口：session.json 写权威值，_active.json 同步兜底，并刷新 L1 的模式段
+          const result = await prompt.applyInteractionMode(mode)
+          send(res, 200, { ok: true, active: result.active, name, mode })
+          return
+        }
+        // 指定的不是当前启用角色：只写它的会话模式，同时把全局兜底对齐（保持两处口径一致）
         await store.setMode(name, mode)
-        send(res, 200, { ok: true, active })
+        const active = await prompt.setMode(mode)
+        send(res, 200, { ok: true, active, name, mode })
+      }),
+    },
+    // ------------------------------------------------------------ 纪律包档位
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/discipline`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const level = body['level']
+        if (level !== 'off' && level !== 'lite' && level !== 'full') {
+          throw new Error(`纪律包档位只能是 off / lite / full（收到 ${String(level)}）`)
+        }
+        const active = await prompt.setDiscipline(level)
+        send(res, 200, { ok: true, discipline: level, active })
       }),
     },
     // ------------------------------------------------------------ 日记编辑
@@ -436,7 +470,28 @@ export function buildRoutes(
         const name = explicit !== '' ? explicit : prompt.characterName
         if (name === undefined) throw new Error('缺少角色名，且当前没有启用角色')
         const state = await store.relationState(name)
-        send(res, 200, { ok: true, ...state, tag: `${state.character}（${state.baseline}）` })
+        send(res, 200, { ok: true, ...state, tag: `${state.character}（${state.current}）` })
+      }),
+    },
+    // ------------------------------------------------------------ 写回关系档位（里程碑）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/relation/set`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = resolveName(body)
+        const value = String(body['value'] ?? '').trim()
+        if (!(RELATION_BANDS as readonly string[]).includes(value)) {
+          // 非法档位走 guard → 400（不静默落成某个默认档）
+          throw new Error(`关系档位只能是 ${RELATION_BANDS.join(' / ')}（收到 ${value === '' ? '空' : value}）`)
+        }
+        const state = await store.setIntimacy(
+          name,
+          value as RelationBand,
+          typeof body['why'] === 'string' ? body['why'] : undefined,
+        )
+        await afterWrite(prompt)
+        send(res, 200, { ok: true, ...state, tag: `${state.character}（${state.current}）` })
       }),
     },
     // ------------------------------------------------------------ 换一句开场

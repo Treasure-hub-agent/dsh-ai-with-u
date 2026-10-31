@@ -10,7 +10,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type {
+  ChangeEvent as ReactChangeEvent,
+  CSSProperties,
+  DragEvent as ReactDragEvent,
+  JSX,
+  KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 
@@ -22,8 +28,9 @@ import {
   fetchCharacter,
   fetchCharacters,
   fetchOverview,
-  isUnavailable,
+  importCharacter,
   saveCharacter,
+  saveCharacterCcv3,
   draftCard,
   setInteractionMode,
   editDiary,
@@ -31,8 +38,10 @@ import {
   resetSession,
   fetchRelation,
   nextOpening,
+  IMPORT_LIMITS,
 } from './api'
 import { CardEditor } from './card-editor'
+import type { CardSavePayload } from './card-editor'
 import { DistillEntry } from './distill'
 import { GuideView, guideFirstRun, markGuideSeen } from './guide'
 import type {
@@ -41,6 +50,7 @@ import type {
   CharacterDetail,
   CharacterSummary,
   DiaryEntry,
+  ImportCharacterResult,
   Overview,
   RelationState,
 } from './api'
@@ -51,17 +61,18 @@ import {
   IconChevron,
   IconClose,
   IconEject,
+  IconImport,
   IconMask,
   IconMotion,
   IconPlus,
   IconPower,
   IconQuill,
   IconRefresh,
-  IconSpark,
   IconSpinner,
   IconText,
   IconTrash,
 } from './icons'
+import { toLoreDraftFromCard } from './lorebook-schema'
 import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
 import {
   blurbOf,
@@ -94,11 +105,18 @@ type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 // 尺寸由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H 统一给出，这里只负责把窗口摆到视口中间。
 // 早期版本是「贴着侧栏按钮弹出、算左侧/底部坐标」的小气泡，改成大窗后那套锚点计算已删除。
 
-/** 保存信封守卫：编辑器新形态 `{ card, ccv3 }` 与旧的裸结构卡区分开。 */
-function isSaveEnvelope(value: unknown): value is { card: Card; ccv3?: Card } {
+/**
+ * 保存信封守卫：编辑器提交的 `CardSavePayload` 与「裸结构卡」区分开。
+ *
+ * 判据是 `structureChanged` / `loreChanged` 两个布尔——它们是编辑器算出来的**链路指示**，
+ * 面板据此知道该发 `card`、发 `ccv3`，还是两步都发（见 `onSaveCard`）。
+ */
+function isSavePayload(value: unknown): value is CardSavePayload {
   if (typeof value !== 'object' || value === null) return false
-  const card = (value as { card?: unknown }).card
-  return typeof card === 'object' && card !== null
+  const payload = value as { view?: unknown; structureChanged?: unknown; loreChanged?: unknown }
+  return typeof payload.view === 'object' && payload.view !== null
+    && typeof payload.structureChanged === 'boolean'
+    && typeof payload.loreChanged === 'boolean'
 }
 
 /** 滚动锁：弹层打开时锁住 body 滚动，关掉立刻还原。 */
@@ -430,6 +448,295 @@ function NewCharacterDialog(props: {
         <button type="button" className="awu-btn" data-kind="primary" onClick={submit} disabled={busy}>
           {busy ? t('common.busy') : t('new.confirm')}
         </button>
+      </div>
+    </Overlay>
+  )
+}
+
+// ---------------------------------------------------------------- 导入角色卡弹层
+
+/** 人类可读的文件大小（1024 进制，保留一位小数）。 */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 把文件读成纯 base64（不带 `data:...;base64,` 前缀）。
+ *
+ * 用 `readAsDataURL` 而不是「arrayBuffer + btoa 手动分段」：前者是浏览器原生实现，
+ * 编解码不占 JS 主线程；后者要把 10 MB 的二进制串切块喂 `String.fromCharCode`，
+ * 逐块同步跑，面板会明显卡一下（16 MB 上限下这点很致命）。
+ */
+function readFileBase64(file: File): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => { reject(new Error(`读文件失败：${file.name}`)) }
+    reader.onload = () => {
+      const raw = typeof reader.result === 'string' ? reader.result : ''
+      const comma = raw.indexOf(',')
+      resolve(comma >= 0 ? raw.slice(comma + 1) : raw)
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+/**
+ * 导入卡：选文件 → 解析预览 → 确认保存（冲突需二次确认）。
+ *
+ * 三段状态全在一个弹层里，不写盘的那一段（解析）由后端保证；保存走
+ * `saveCharacterCcv3`（**只发 ccv3**）—— 导入卡最常带 `character_book`，
+ * 只让 ccv3 当权威，世界书就不会被「结构重投影」那条分支搅进去。存完回读校验名字与条目数。
+ */
+function ImportDialog(props: {
+  /** 面板级忙碌（别的动作在跑时，别让导入也挤进来） */
+  panelBusy: boolean
+  onCancel: () => void
+  onImported: (name: string) => void
+  t: Translate
+}): JSX.Element {
+  const { panelBusy, onCancel, onImported, t } = props
+
+  const [stage, setStage] = useState<'pick' | 'preview'>('pick')
+  const [busy, setBusy] = useState(false)
+  const [file, setFile] = useState<File | undefined>(undefined)
+  const [parsed, setParsed] = useState<ImportCharacterResult | undefined>(undefined)
+  const [error, setError] = useState('')
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false)
+
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
+
+  const locked = busy || panelBusy
+
+  /** 清空已读文件：关层/取消/重选都要落到这里，别把上一张卡的内容留在内存与输入框里。 */
+  const reset = useCallback((): void => {
+    setStage('pick')
+    setBusy(false)
+    setFile(undefined)
+    setParsed(undefined)
+    setError('')
+    setConfirmOverwrite(false)
+    // <input type=file> 的值不清掉，重选同一个文件不会触发 change
+    if (inputRef.current !== null) inputRef.current.value = ''
+  }, [])
+
+  const close = (): void => {
+    if (locked) return
+    reset()
+    onCancel()
+  }
+
+  /** 校验 + 解析。解析错误原样透出后端文案，不压成「导入失败」。 */
+  const accept = (picked: File): void => {
+    setError('')
+    setConfirmOverwrite(false)
+    if (!/\.(png|charx|json|zip)$/iu.test(picked.name)) { setError(t('import.badType')); return }
+    if (picked.size === 0) { setError(t('import.empty')); return }
+    if (picked.size > IMPORT_LIMITS.fileBytes) {
+      setError(t('import.tooLarge', { size: formatSize(picked.size), max: formatSize(IMPORT_LIMITS.fileBytes) }))
+      return
+    }
+    setFile(picked)
+    setParsed(undefined)
+    setStage('preview')
+    setBusy(true)
+    void (async () => {
+      // 读文件与解析分开 catch：前者是本地 FileReader 失败（自己出文案），
+      // 后者是后端解析失败（原样透出后端 error，别压成「导入失败」）。
+      let dataBase64 = ''
+      try {
+        dataBase64 = await readFileBase64(picked)
+      } catch (e) {
+        if (!aliveRef.current) return
+        console.error('[ai-with-u] 读卡文件失败', e)
+        setError(t('import.readFailed', { name: picked.name }))
+        setBusy(false)
+        return
+      }
+      try {
+        const result = await importCharacter({ fileName: picked.name, dataBase64 })
+        if (!aliveRef.current) return
+        setParsed(result)
+      } catch (e) {
+        if (!aliveRef.current) return
+        setError(errorText(e))
+      } finally {
+        if (aliveRef.current) setBusy(false)
+      }
+    })()
+  }
+
+  /** 确认保存：只发 ccv3，存完回读校验（名字 + 世界书条目数）。 */
+  const save = (): void => {
+    if (parsed === undefined || locked) return
+    setBusy(true)
+    setError('')
+    void (async () => {
+      try {
+        await saveCharacterCcv3(parsed.name, parsed.ccv3)
+        const fresh = await fetchCharacter(parsed.name)
+        if (!aliveRef.current) return
+        if (fresh.name !== parsed.name) {
+          throw new Error(t('import.mismatch', { expect: parsed.name, actual: fresh.name }))
+        }
+        const expect = toLoreDraftFromCard(parsed.ccv3).entries.length
+        const actual = toLoreDraftFromCard(fresh.ccv3).entries.length
+        if (expect !== actual) throw new Error(t('lore.saveMismatch', { expect, actual }))
+        onImported(parsed.name)
+      } catch (e) {
+        if (!aliveRef.current) return
+        setError(errorText(e))
+      } finally {
+        if (aliveRef.current) setBusy(false)
+      }
+    })()
+  }
+
+  const onDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    if (locked) return
+    const picked = event.dataTransfer.files[0]
+    if (picked !== undefined) accept(picked)
+  }
+
+  const onPickFile = (event: ReactChangeEvent<HTMLInputElement>): void => {
+    const picked = event.target.files?.[0]
+    if (picked !== undefined) accept(picked)
+  }
+
+  return (
+    <Overlay label={t('import.title')} onClose={close}>
+      <div className="awu-dialogHead">
+        <IconImport size={16} />
+        <span>{t('import.title')}</span>
+      </div>
+
+      <div className="awu-dialogBody">
+        <div className="awu-hint" style={{ marginBottom: 10 }}>{t('import.hint')}</div>
+
+        {stage === 'pick' ? (
+          <div
+            className="awu-importDrop"
+            data-busy={locked ? 'true' : 'false'}
+            onDragOver={event => { event.preventDefault() }}
+            onDrop={onDrop}
+          >
+            <IconImport size={24} />
+            <div className="awu-importDropTitle">{t('import.pickHint')}</div>
+            <button
+              type="button"
+              className="awu-btn"
+              data-kind="primary"
+              onClick={() => inputRef.current?.click()}
+              disabled={locked}
+            >
+              {t('import.pick')}
+            </button>
+            <input
+              id="awu-import-file"
+              ref={inputRef}
+              type="file"
+              className="awu-importNative"
+              accept=".png,.charx,.json,.zip,image/png,application/json,application/zip"
+              onChange={onPickFile}
+            />
+            <div className="awu-hint">{t('import.limit', { max: formatSize(IMPORT_LIMITS.fileBytes) })}</div>
+          </div>
+        ) : (
+          <div className="awu-importView" aria-live="polite">
+            <div className="awu-importFileRow">
+              <span className="awu-importFileLabel">{t('import.fileName')}</span>
+              <span className="awu-path">{file?.name ?? ''}</span>
+              {file !== undefined && <span className="awu-importFileSize">{formatSize(file.size)}</span>}
+            </div>
+
+            {busy && parsed === undefined && error === '' && (
+              <div className="awu-hint" role="status">{t('import.parsing')}</div>
+            )}
+
+            {error !== '' && (
+              <div className="awu-err" role="alert">
+                <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+                <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
+              </div>
+            )}
+
+            {parsed !== undefined && (
+              <>
+                <div className="awu-importMeta">
+                  <Field k={t('import.name')} v={parsed.name} />
+                  <Field k={t('import.format')} v={t(`import.format.${parsed.format}`)} />
+                </div>
+
+                {parsed.conflict !== undefined && (
+                  <div className="awu-importConflict" role="status" data-confirm={confirmOverwrite ? 'true' : 'false'}>
+                    <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <b>{t('import.conflictTitle', { name: parsed.conflict.name })}</b>
+                      <br />
+                      {confirmOverwrite
+                        ? t('import.overwriteConfirm', { name: parsed.conflict.name })
+                        : t('import.conflictBody')}
+                    </span>
+                  </div>
+                )}
+
+                <div className="awu-importWarnHead">
+                  {parsed.warnings.length === 0
+                    ? t('import.noWarnings')
+                    : t('import.warnings', { n: parsed.warnings.length })}
+                </div>
+                {parsed.warnings.length > 0 && (
+                  <ul className="awu-importWarns">
+                    {parsed.warnings.map((warning, index) => (
+                      <li key={`${index}-${warning}`}>{warning}</li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="awu-dialogFoot">
+        {stage === 'pick' ? (
+          <button type="button" className="awu-btn" onClick={close} disabled={locked}>{t('common.cancel')}</button>
+        ) : (
+          <>
+            <button type="button" className="awu-btn" onClick={close} disabled={locked}>
+              {t('common.cancel')}
+            </button>
+            <button type="button" className="awu-btn" data-kind="ghost" onClick={reset} disabled={locked}>
+              {t('import.retry')}
+            </button>
+            {parsed === undefined ? null : parsed.conflict !== undefined && !confirmOverwrite ? (
+              <button
+                type="button"
+                className="awu-btn"
+                data-kind="danger"
+                onClick={() => setConfirmOverwrite(true)}
+                disabled={locked}
+              >
+                {t('import.overwrite')}
+              </button>
+            ) : parsed.conflict !== undefined ? (
+              <button type="button" className="awu-btn" data-kind="danger" onClick={save} disabled={locked}>
+                {busy ? t('common.busy') : t('import.overwriteYes')}
+              </button>
+            ) : (
+              <button type="button" className="awu-btn" data-kind="primary" onClick={save} disabled={locked}>
+                {busy ? t('common.busy') : t('import.confirm')}
+              </button>
+            )}
+          </>
+        )}
       </div>
     </Overlay>
   )
@@ -930,7 +1237,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
   const [detailError, setDetailError] = useState('')
 
-  const [dialog, setDialog] = useState<'' | 'new' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
+  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
   const [deleteTarget, setDeleteTarget] = useState('')
   const [editTarget, setEditTarget] = useState<DiaryTarget | undefined>(undefined)
   const [dialogError, setDialogError] = useState('')
@@ -1157,7 +1464,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     void run(() => setInteractionMode(mode)).then(ok => { if (ok) setDialog('') })
   }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
-  const openDialog = (which: 'new' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
+  const openDialog = (which: 'new' | 'import' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
   // -------------------------------------------------------- 维护动作（新接口）
   const onEditDiary = (text: string): void => {
@@ -1214,38 +1521,50 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   /**
    * 保存角色卡。
    *
-   * 后端是整体覆盖写盘，所以这里传 `mergeCard` 产出的**完整 card**（含 schema 之外的
-   * 自定义键）。保存成功后**重新 GET 一次**再关闭编辑器——只有回读到的值对得上，
-   * 才算真的落盘了；否则界面显示「已保存」但磁盘没变，是最难查的那类 bug。
-   */
-  /**
-   * 保存角色卡。
+   * **两条链路分开走**（C7 语义，见 `api.ts` 的 `saveCharacterCcv3`）：
+   *  - 结构改动 → `saveCharacter(name, card)`：后端以磁盘上的 CCv3 为底重投影，
+   *    既有 `data.character_book` / `extensions` 原样保留；
+   *  - 世界书改动 → `saveCharacterCcv3(name, ccv3)`：**只发 ccv3**，整卡回传、只改
+   *    `data.character_book`。不把 `card` 一起发，世界的权威就只有一份，不用猜 store
+   *    在「结构重投影」与「原生整卡」之间取了哪份底稿。
+   * 两者都变了就分两步：先世界书（ccv3），再结构（card，此时磁盘上的 book 已是新的）。
    *
-   * 兼容两种调用形态（编辑器随 CCv3 改造逐步切换，两边都不用等）：
-   *  - `onSaveCard(card)`            —— 旧形态，只提交 34 字段结构
-   *  - `onSaveCard({ card, ccv3 })`  —— 新形态，结构 + 完整 CCv3（世界书改动必须走这个，
-   *                                     否则只发结构会把 `data.character_book` 落下）
-   * 后端契约是 `{ name, card?, ccv3? }`：只给 card 时保留既有世界书与 extensions。
+   * 保存成功后**重新 GET 一次**再关闭编辑器，并逐项校验：
+   * 世界书条目数对不上 = 假成功，直接把错误抛回编辑器顶栏，不关层。
    */
-  const onSaveCard = (next: Card | { card: Card; ccv3?: Card }): void => {
+  const onSaveCard = (next: Card | CardSavePayload): void => {
     const targetName = detailName
     if (targetName === '') return
-    // 形态判定：带 `card` 键的是新信封，否则就是裸的结构卡
-    const envelope = next as { card?: Card; ccv3?: Card }
-    const payload = isSaveEnvelope(next)
-      ? { card: envelope.card as Card, ccv3: envelope.ccv3 }
-      : { card: next as Card, ccv3: undefined }
+    // 旧调用方（如果还有）只给裸结构卡：按「结构有改动、没碰世界书」处理
+    const payload: CardSavePayload = isSavePayload(next)
+      ? next
+      : { view: next as Card, structureChanged: true, loreChanged: false, loreEntries: 0 }
     setBusy(true)
     setEditError('')
     void (async () => {
       try {
-        await saveCharacter(targetName, payload.card, payload.ccv3)
+        // 世界书改了却没带上整卡：宁可不存也不造出「假成功」
+        if (payload.loreChanged && payload.ccv3 === undefined) {
+          throw new Error(t('lore.unsupported'))
+        }
+        if (payload.loreChanged && payload.ccv3 !== undefined) {
+          await saveCharacterCcv3(targetName, payload.ccv3)
+        }
+        if (payload.structureChanged || !payload.loreChanged) {
+          await saveCharacter(targetName, payload.view)
+        }
         // 回读校验：以后端实际落盘的内容为准
         const fresh = await fetchCharacter(targetName)
         if (!aliveRef.current) return
+        if (payload.loreChanged) {
+          const actual = toLoreDraftFromCard(fresh.ccv3).entries.length
+          if (actual !== payload.loreEntries) {
+            throw new Error(t('lore.saveMismatch', { expect: payload.loreEntries, actual }))
+          }
+        }
         setDetail(fresh)
         setEditing(false)
-        setNotice(t('edit.saved'))
+        setNotice(payload.loreChanged && !payload.structureChanged ? t('lore.saved') : t('edit.saved'))
         await reload()
       } catch (error) {
         if (!aliveRef.current) return
@@ -1254,6 +1573,15 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         if (aliveRef.current) setBusy(false)
       }
     })()
+  }
+
+  /** 导入完成：关层 → 刷新列表 → 直接打开这张新卡 → 提示。 */
+  const onImported = (name: string): void => {
+    setDialog('')
+    setNotice(t('import.done', { name }))
+    setTab('roster')
+    setDetailName(name)
+    void reload()
   }
 
   const onNextOpening = (): void => {
@@ -1398,11 +1726,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         >
           {/*
             编辑态：编辑器整块接管面板内容区（头部牌子保留）。
-            面板宽度只有 452px，把十个分组塞进小弹窗会非常难用，所以做成「面板内全屏」。
+            面板宽度只有 452px，把十个分组 + 世界书塞进小弹窗会非常难用，所以做成「面板内全屏」。
           */}
           {editing && currentDetail !== undefined ? (
             <CardEditor
               card={currentDetail.card}
+              ccv3={currentDetail.ccv3}
               name={currentDetail.name}
               source={sourceOf(currentDetail.card)}
               busy={busy}
@@ -1580,12 +1909,25 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
                     {t('roster.count', { n: roster.length })}
                   </span>
+                  {/* 导入与新建同区：一个是从文件拿卡，一个是从零建卡 */}
+                  <button
+                    type="button"
+                    className="awu-btn"
+                    data-size="sm"
+                    data-kind="ghost"
+                    style={{ marginLeft: 'auto' }}
+                    onClick={() => openDialog('import')}
+                    disabled={busy}
+                    title={t('import.title')}
+                  >
+                    <IconImport size={12} />
+                    {t('import.entry')}
+                  </button>
                   <button
                     type="button"
                     className="awu-btn"
                     data-size="sm"
                     data-kind="primary"
-                    style={{ marginLeft: 'auto' }}
                     onClick={() => openDialog('new')}
                   >
                     <IconPlus size={12} />
@@ -1791,6 +2133,14 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               busy={busy}
               onCancel={() => setDialog('')}
               onCreate={onCreate}
+              t={t}
+            />
+          )}
+          {dialog === 'import' && (
+            <ImportDialog
+              panelBusy={busy}
+              onCancel={() => setDialog('')}
+              onImported={onImported}
               t={t}
             />
           )}

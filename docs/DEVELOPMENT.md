@@ -33,13 +33,20 @@
 
 ### 分层注入（核心设计）
 
-| 级别 | 何时 | 内容 | 体积 |
+| 级别 | 何时 | 内容 | 体积（静态字数） |
 |---|---|---|---|
-| **L0 底线** | 启用时 | 零系统痕迹铁律 + 优先级声明 | 约 367 字符（退出即消失） |
-| **L1 角色** | 启用时 | 酒馆卡 CCv3 渲染（声线优先）+ 时间差 + 最近日记 + 世界书命中 | 约 1.1K 字符（不含命中） |
-| **L2 长流程** | 工具按需返回 | 蒸馏/建卡向导等长文档 | 不进系统提示词 |
+| **L0 底线** | 启用期间 | 优先级声明 + 扮演底线（「只让我是谁、不让怎么做事」） | 365 字符（退出即消失） |
+| **L0.5 纪律包** | 启用期间，按档位 | 真人感纪律：禁止词库 / 消息形态 / 动作 / 输入识别 / 内容边界 / 指令确认 | lite 555、full 736，`off` 为 0 |
+| **L1 角色** | 启用期间 | 酒馆卡 CCv3 渲染（声线优先）+ 最近日记 + 会话摘要 | 约 1.9–2.4K，随卡增长 |
+| **世界书** | 命中才注入 | 关键词 / 常驻条目，12 条 · 6000 字预算 | 典型约 0.2K |
+| **时间差** | 启用期间 | 隔多久了、该用什么语气接上 | 每轮随分钟数变，垫底 |
+| **L2 长流程** | 工具按需返回 | 蒸馏 / 建卡向导等长文档 | 不进系统提示词 |
 
-对比原 skill：`SKILL.md` 13 060 字节**每轮全量注入**，现在启用态只占约 1/10。
+> v0.2.0 把「世界书命中」从 L1 里拆成了独立段（order 10300，时间差 10350 垫底）：易变段越靠后，
+> 缓存失效范围越小；混在 L1 里会导致每轮命中变化就把整段 L1 重新计费。
+> L0.5 纪律包是 2026-10-31 加的（见 §十），order 5050，夹在 L0 与 L1 之间。
+
+对比原 skill：`SKILL.md` 13 KB 每轮全量注入；本插件启用态实测 **3286 字符**（丰川祥子 + lite 档，`verify-host` 量的），未启用时为 0。
 
 ### 插拔机制
 
@@ -262,7 +269,7 @@ ellipsis 没有裁切上下文。
 }
 ```
 
-`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 七套自检`，
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 八套自检`，
 另有独立的 `npm run typecheck:client`。
 
 > 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
@@ -459,24 +466,26 @@ dsh-ai-with-u/
 
 ## 五、功能清单
 
-### 模型工具（8 个，仅启用角色时挂载）
+### 模型工具（9 个，仅启用角色时挂载）
 
 | 工具 | 用途 |
 |---|---|
-| `awu_diary_write` | 追加日记 |
+| `awu_diary_write` | 追加日记（可同时落 `topic` / `mood`） |
 | `awu_diary_read` | 读取/关键词筛选日记 |
 | `awu_whoami` | 查询当前身份 |
 | `awu_forget` | 忘记某事（卡+日记+会话三处同步） |
 | `awu_diary_edit` | 就地改写日记条目 |
 | `awu_session_reset` | 全新开始 / 彻底重置 |
-| `awu_relation` | 查询关系档位依据 |
+| `awu_relation` | 查询关系档位依据；带 `set` 时按里程碑写回 |
+| `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（21 条，`/_dsh/ai-with-u/`）
+### REST 接口（23 条，`/_dsh/ai-with-u/`）
 
-`overview` `characters` `character` `character/save` `character/delete`
-`activate` `deactivate` `mode` `diary/save` `forget` `diary/edit`
-`session/reset` `relation` `opening/next` `opening/state` `session/commit`
+`overview` `characters` `character` `character/save` `character/import` `character/delete`
+`activate` `deactivate` `mode` `discipline` `relation` `relation/set`
+`opening/next` `opening/state` `diary/save` `diary/edit` `forget`
+`session/reset` `session/commit` `distill/flow` `distill/arm` `distill/disarm` `distill/state`
 
 > ⚠️ `session/reset` 的 `scope:'all'`（彻底重置）**必须同时传 `confirmAll:true`**。
 
@@ -493,20 +502,24 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 七套自检
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 八套自检（合计 641 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
-npm run verify         # 产物自检
-npm run verify:session # 会话/指令自检
-npm run verify:host    # 真实 cordis 宿主验证
+npm run verify         # 产物自检（15 项）
+npm run verify:wiring  # 接线体检（18 项）
+npm run verify:session # 会话/指令自检（184 项）
+npm run verify:host    # 真实 cordis 宿主验证（55 项）
 ```
 
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
 > **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
-> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(111 项) → `verify-host`(35 项)**，
+> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(184 项) → `verify-host`(55 项)**，
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
+
+> **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
+> 八套合计 **641 项**。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -540,10 +553,11 @@ pnpm install --lockfile-only --prefer-offline
 | 项 | 说明 |
 |---|---|
 | **改名功能** | 涉及目录重命名，需后端加 `POST /character/rename {from, to}` |
-| **蒸馏角色** | 从作品提取角色，原 skill 的六 Phase 流水线，工作量大 |
-| **PNG/CHARX 导入** | 酒馆卡的 `tEXt` chunk 解析 |
-| **一键导入原 skill 数据** | 格式已兼容，缺个导入按钮 |
+| ~~**蒸馏角色**~~ | ✅ 已做（`src/distill.ts` + `awu_card_save` + 面板 CTA，`verify-distill` 93 项） |
+| ~~**PNG/CHARX 导入**~~ | ✅ 已做（`src/import-card.ts` + 面板「导入角色卡」，`verify-import` 49 项） |
+| ~~**一键导入原 skill 数据**~~ | ✅ 已覆盖：`characters/` 下旧格式卡读时自动归一；外部卡走「导入角色卡」 |
 | **淡入淡出动画细化** | 目前动效已有，可继续打磨 |
+| **真机点击链路回归** | 导入 → 预览 → 覆盖 → 世界书编辑 → 保存回读，目前只有静态/单元级自检覆盖 |
 
 ---
 
@@ -606,7 +620,7 @@ pnpm install --lockfile-only --prefer-offline
 | **P0：损坏文件走 `.corrupt-*` 备份且不删索引** | `src/store.ts` | 原来 JSON 坏了当"不存在"，`ensureIndex` 会把卡从列表剔除 = 卡凭空消失（host.md P0-23） |
 | 忘却改成「全卡按句手术」：遍历 `aiwu` 整棵树 + 世界书 + 外部原文 + 开场白，返回 `scanned` 计数 | `src/store.ts` + `src/tavern.ts` | 旧实现只认 `memory_anchor`/`dynamic_state` 两个键，迁 CCv3 后会**提示成功、一个字没删** |
 | 顺手修：`commitTurn` 的 turnId 去重从**单字段**改成按角色 Map | `src/store.ts` | 多角色并发时共用一个字段会互相踩掉去重 |
-| **L0 底线改为「与角色同进同出」**：`aiwu:baseline` 的 text 改成函数，未启用返回空串；文案 684 → **367 字**（删掉「何时让位给任务模式」整节） | `src/prompt.ts` | 原来无条件下常驻且在没启用时也写着「当前对话启用了角色扮演」= 假话；还与「退出即零残留」自相矛盾 |
+| **L0 底线改为「与角色同进同出」**：`aiwu:baseline` 的 text 改成函数，未启用返回空串；文案 684 → **365 字**（删掉「何时让位给任务模式」整节） | `src/prompt.ts` | 原来无条件下常驻且在没启用时也写着「当前对话启用了角色扮演」= 假话；还与「退出即零残留」自相矛盾 |
 | 新增 `scripts/verify-tavern.mjs`（218 项）并串进 `npm run build` | `scripts/`、`package.json` | 格式 / 迁移幂等 / 34 字段零丢失 / 世界书 / 忘却 / 并发写盘 / 四段装配 |
 
 **实测（预置三张卡）**
@@ -625,3 +639,115 @@ pnpm install --lockfile-only --prefer-offline
 3. **`lore_lookup` 查询工具**：条目涨到几百条、预算装不下时再谈（需要挂常驻工具，主人已否）。
 4. **会话隔离**：仍是全局单角色（`_active.json` 一个 `character`）；两个会话同时启用**同一个角色**会写同一份
    `session.json`（写盘已串行，但语义上是同一份会话）。
+
+---
+
+## 十、2026-10-31 · 手感轮（纪律包 L0.5 / mode 权威 / 亲密度落盘）
+
+v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像人」还是原 skill 的那几个老毛病：会回「作为一个 AI 我无法…」、
+一段回复写得像文档、动作符号与台词糊在一起。这一轮只补手感，不动格式层。
+
+### 纪律包为什么独立成段（order 5050）
+
+| 问题 | 结论 |
+|---|---|
+| 现状是什么 | L0 只有 365 字「让位边界」；原 skill 的六块纪律（禁止词库 / 消息形态 / 动作 / 输入识别 / 内容边界 / 指令确认）一个字都没有 |
+| 为什么不并进 L0 | L0 是「让不让位」的元规则，尺寸固定；纪律包长度随档位变（off 0 / lite 555 / full 736）。并在 L0 里 = 选 lite 的人一直为 full 的 token 付费，且换角色时会连带重算这段预算 |
+| 为什么 order 5050 | DSH 第一方段落在 −1000..10200，外部段用 5000+。5050 夹在 `baseline`(5000) 与 `active-character`(5100) 之间：排在底线之后（先立让位边界）、角色卡之前（行为纪律先于具体人设），且早于每轮都变的日记 / 世界书(10300) / 时间差(10350)，缓存失效范围最小 |
+| 为什么三档 | `off` 给不想被管的人；`lite` 默认，纯负面约束只压 AI 腔；`full` 多两段（语态锚点 + 每 10 轮日记自检），适合长期养角色的人。三档共用同一份公共文本：`DISCIPLINE_FULL_TEXT = DISCIPLINE_TEXT + 新增两段`，以后改禁止词库不会「改了 lite 忘了 full」 |
+| 为什么不写正例台词 | `human_chat_guide` 的原话：正例会被模型当模板抄，角色的声线就死了。只给负面清单与短口径 |
+
+静态字数（按源码字面量数，不含运行时插值）：lite **555 字符**、full **736 字符**（full = lite + 181），都低于 900 / 1400 的上限，留了改文案的余量。
+未启用角色或 `level='off'` 时该段返回空串（和其余四段同一套「干净拔出」逻辑）。
+
+### mode 的权威位置从 `_active.json` 迁到 `session.json`
+
+- **旧实现的病**：`mode` 只在 `_active.json`，是全局的。`/mode` 一写，同一角色的所有会话一起被改——「这一次对话用纯文本」根本无法表达。
+- **新解析顺序**：`session.mode` > `_active.json.mode` > `'text+action'`。L1 渲染与 `/overview` 必须走**同一个函数**，
+  否则会出现「面板说纯文本、提示词按动作渲染」这种自相矛盾。
+- **为什么留 `_active.json.mode`**：它是「还没 commit 过任何一轮」时的兜底，也是老客户端的兼容面。**不删，降级为兜底**。
+- **为什么落 session**：模式属于「这一次对话怎么说话」，与 `recent` / `turn_count` 同级；跨会话共享一个开关是历史包袱。
+
+### 亲密度落盘与「查看不写回」口径
+
+- **旧状态**：面板显示 `relationBaseline`（卡里写的起点档），对话里模型按「累计轮次 + 日记条数」现算——两个数永远对不上，
+  用户看到一套、聊到的是另一套。
+- **新做法**：`SessionState.intimacy` 落五档（陌生 / 认识 / 熟悉 / 亲近 / 亲密），`relation_log` 记每次变化
+  （`{ at, from, to, why? }`，上限 50 条，超出丢最旧）。`relationState()` 同时返回 `baseline`（起点，由卡的「关系起点」推出）
+  与 `current`（落盘档位），面板与工具读同一个来源。
+- **「查看不写回」是口径，不是代码**：用户只是问「关系如何」→ 只读；只有里程碑事件（第一次约定 / 第一次争吵 / 称呼改变 / 表白）
+  才带 `set` 写回。理由：每轮都写会让档位随情绪抖动，`relation_log` 退化成流水账，真正的转折反而看不出来。这条写死在 `RELATION_HINT` 里。
+- **顺便修掉一对死字段**：`awu_diary_write` 现在可带 `topic` / `mood` 写进 session（同一事务），否则 L1 的
+  「未竟话题 / 此刻的情绪」两行永远是空的——旧代码只在 `/session/commit` 显式传时才写，而面板根本不调那条路由。
+
+### 这一轮的改动清单
+
+| 改动 | 文件 | 为什么 |
+|---|---|---|
+| 新增 `SECTION_DISCIPLINE='aiwu:discipline'`（order `ORDER_BASE + 50`）、`DISCIPLINE_TEXT` / `DISCIPLINE_FULL_TEXT` / `DISCIPLINE_LEVELS` | `src/prompt.ts` | L0.5 纪律包，三档可关 |
+| `ActiveState.discipline` + `POST /discipline` + `/overview` 返回 `discipline` | `src/prompt.ts`、`src/web.ts` | 档位落盘、面板可切 |
+| 新增工具 `awu_mode`；`/mode` 兼容 `name?` | `src/tools.ts`、`src/web.ts` | 用户说「切纯文本」时模型能自己切，不必回面板 |
+| `session.mode` 优先、`_active.json.mode` 兜底的统一解析 | `src/prompt.ts`、`src/store.ts` | 同上，「这一次」的语义落到会话 |
+| `SessionState.intimacy` / `relation_log`；`awu_relation` 加 `set` + `why`；`POST /relation/set` | `src/store.ts`、`src/tools.ts`、`src/web.ts` | 档位只有一个真相，变化可回溯 |
+| `awu_diary_write` 支持 `topic` / `mood`（同事务写 session） | `src/tools.ts`、`src/store.ts` | 盘活 L1 的两个死字段 |
+| 面板「导入角色卡」（PNG / CHARX / JSON，预览不落盘、同名二次确认）+ 编辑器第 11 分区「世界书」 | `client/index.tsx`、`client/card-editor.tsx`、`client/lorebook-editor.tsx`（新）、`client/text.ts` | 后端 `POST /character/import` 与世界书数据层都在，界面零入口 = 白做 |
+| 清死路由 `ROUTES.distillParse` / `parseDistillCard` | `client/api.ts` | 宿主从没注册这条路由，留着就是永远抛 `ApiUnavailableError` |
+| 新增 `scripts/verify-wiring.mjs`（接线体检，8 组断言，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
+
+### 为什么要一个「接线体检」脚本
+
+这一轮开工时仓库里有两种「后端做完、前端没接」的真实状态：
+
+1. `POST /character/import` 在 `src/web.ts` 完整实现（16 MB 上限、PNG/CHARX/JSON、解析后**不落盘**、返回 `conflict`），
+   而 `client/api.ts` 连路由常量都没有——面板上没有任何上传入口；
+2. `client/lorebook-schema.ts` 17 KB 数据层（`toLoreDraft` / `mergeLore` / `mergeLoreIntoCard` / `moveEntry` / `loreIssues`）
+   **全项目零引用**，世界书改不了。
+
+这两种状态下 `tsc`、esbuild、七套自检（当时还没有 `verify-wiring`）**全是绿的**——因为类型检查只问「类型对不对」，不问「有没有人调用」。
+`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 8 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
+纪律包名字 order 长度 / `awu_mode` 与 `awu_relation.set` / `SessionState` 新字段 / 世界书改动是否随 `ccv3` 发出去 /
+**产物里的纪律包文本与源码逐字一致**）。
+拿不准的用 `[skip]`，不误报——红点必须都是真问题，否则没人看。
+
+> 第 7 组有个刻度上的取舍：**「世界书保存不传 `card`」这一条最初按字面写成硬断言，跑起来是红的**，
+> 但查了 `store.saveCard`（`src/store.ts:571-581`）发现「都给」时以 `ccv3` 为底、`card` 只覆盖结构，
+> `character_book` 不会丢——照字面判红等于误报。所以改成「世界书改动必须随 `ccv3` 发出」（真会丢数据的那一项）
+> 判红，混发 `card` 只记提醒并 `[skip]`，把口径问题留给 Lead 定（Lead 已拍板：混发不算问题，只改 `card-editor.tsx`
+> 那段「两步发、不混」的注释）。这就是「宁可 skip 不误报」的具体一次。
+
+> 第 8 组（产物 vs 源码）是 Lead 让加的：纪律包每轮都进系统提示词，`tsc` 怎么 emit、以及「改了 src 没重编」，
+> 前七组只读源码，一律看不见。实现上两处保守：`lib/prompt.js` 不存在 → `[skip]`；产物比源码旧 → `[skip]`
+> （研发中途没 build 是正常态，不是失败）；只有「产物是新的、文本却和源码不一样」才判红。
+> 加它的当天就吃到一次真实价值：先是报了 `DISCIPLINE_FULL_TEXT` 750 vs 736，查下去是**脚本自己的边界写错了**
+> ——语句边界只认 `const`，把中间的 `export type DisciplineLevel = 'off' | 'lite' | 'full'` 那行的字面量
+> 当正文多算 14 字符。边界改成「下一条顶层声明（含 `type`/`interface`/`function`）或顶层注释」，两边都回到 736。
+> 顺手把文档里先前写错的 full 字数（750 / 多 195）改成 **736 / 多 181**——计量脚本自己写错时，
+> 它给出的数字一个都不能信。
+
+它**已经串进 `npm run build`**（Lead 决定，位置在 `verify-bundle` 之后），另有 `npm run verify:wiring` 独立入口。
+按当前实现，`[7]` 也随 B 改成「只发 ccv3」而转成了正经的 ✓，混发那条 `[skip]` 变成了历史口径。
+
+### 集成验收记录（2026-10-31，C2 全量回归）
+
+`npm run build` 一次过，八套自检合计 **641 项通过 / 0 失败**（日志里 ✓ 641、✗ 0）：
+
+| 自检 | 通过项 |
+|---|---|
+| `verify-bundle`（客户端产物可加载） | 9 |
+| `verify-wiring`（接线 + 产物漂移） | 18 |
+| `verify`（产物形状 / 新鲜度 / 孤儿产物） | 15 |
+| `verify-tavern`（卡格式 / 迁移 / 世界书 / 忘却） | 218 |
+| `verify-distill`（蒸馏武装 / TTL） | 93 |
+| `verify-import`（PNG / CHARX / JSON） | 49 |
+| `verify-session`（会话 / 指令 / 纪律包 / 关系） | 184 |
+| `verify-host`（真实 cordis 装配） | 55 |
+
+产物抽查（`npm run build` 之后）：
+
+- `lib/client.js` 257.2 KB：含 `character/import`、`character_book`、`lore.title`、`import.tooLarge`；中文按 esbuild 默认 `charset: ascii` 转成 `\uXXXX`（「导入角色卡」= `\u5BFC\u5165\u89D2\u8272\u5361`）——**按字面 grep 中文会误判缺内容**
+- `lib/prompt.js` 27.2 KB：`aiwu:discipline` / 禁止词库 / 语态锚点都在，且与源码逐字一致（第 8 组守着）
+- 宿主实测：启用态（丰川祥子 + lite）整段渲染 **3286 字符**；`off` 档纪律包消失但 L0 仍在
+- `package.json` 的 `files` 仍是 `lib / presets / distill / cordis.patch.yml / README.md`：新增的 `client/lorebook-editor.tsx` 是源码，打进 `lib/client.js`，不需要改 `files`
+
+这次没覆盖到的（留给下一轮或发版后观察）：真机重装后的面板点击链路（导入 → 预览 → 覆盖 → 世界书编辑 → 保存回读）、
+`awu_mode` / `awu_relation.set` 在真实模型对话里的调用时机、`relation_log` 长期增长到 50 条后的面板呈现。

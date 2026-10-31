@@ -13,7 +13,7 @@
  */
 import type { Store } from './store.js'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { localDiaryDate, RELATION_BANDS } from './store.js'
+import { localDiaryDate, RELATION_BANDS, resolveInteractionMode } from './store.js'
 import type { PromptController } from './prompt.js'
 import type { DistillArm } from './distill.js'
 import { saveCardFromModel } from './distill.js'
@@ -77,6 +77,14 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
           type: 'string',
           description: '可选的日期，格式 YYYY MM DD。省略则用今天。',
         },
+        topic: {
+          type: 'string',
+          description: '可选：此刻还没聊完的话题（一句话，如「下周三的考试」）。会写进会话状态，让你下一轮自然接上；没有未竟话题就省略。',
+        },
+        mood: {
+          type: 'string',
+          description: '可选：你此刻的情绪（一句话，如「有点担心又不想显得啰嗦」）。写进会话状态，供下一轮延续；不要写用户看不到的元信息。',
+        },
       },
       output: json,
       async execute(args) {
@@ -85,9 +93,19 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         const notes = Array.isArray(args['notes']) ? args['notes'].map(String) : []
         if (timeline.length === 0 && notes.length === 0) throw new Error('timeline 与 notes 至少填一项')
         const date = typeof args['date'] === 'string' && args['date'].trim() !== '' ? args['date'].trim() : localDiaryDate()
-        await store.appendDiary(name, date, timeline, notes)
+        const topic = typeof args['topic'] === 'string' ? args['topic'].trim() : ''
+        const mood = typeof args['mood'] === 'string' ? args['mood'].trim() : ''
+        // 日记与会话在同一次写盘事务里完成（见 Store.appendDiaryWithNote：避免两次加锁被 commitTurn 插队）
+        const session = await store.appendDiaryWithNote(name, date, timeline, notes, { topic, mood })
         await afterWrite()
-        return { ok: true, date, written: timeline.length + notes.length }
+        return {
+          ok: true,
+          date,
+          written: timeline.length + notes.length,
+          ...(topic === '' ? {} : { topic }),
+          ...(mood === '' ? {} : { mood }),
+          ...(session === undefined ? {} : { turnCount: Number(session.turn_count ?? 0) || 0 }),
+        }
       },
     },
     {
@@ -124,9 +142,41 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
           active: true,
           character: name,
           relationship: card?.['relationship'] ?? {},
-          mode: prompt.snapshot().mode,
+          // 与 L1 / overview 同一口径：session 里的模式优先
+          mode: resolveInteractionMode(session, prompt.snapshot()),
           turnCount: Number(session?.turn_count ?? 0) || 0,
+          discipline: prompt.disciplineLevel,
         }
+      },
+    },
+    // ------------------------------------------------------------ 切换交互模式
+    {
+      name: 'awu_mode',
+      description: [
+        '用户说「切换纯文本 / 只发文字 / 别写动作」或「切换动作 / 把动作写回来」时调用：',
+        '把当前角色的交互模式切成 text（纯文本，不输出动作符号）或 text+action（文本+动作，动作用（动作）包裹）。',
+        '执行后用**角色口吻**顺口确认一句（如「好，不写动作了」「行，那我连动作一起说」），',
+        '不要系统式确认——禁止「已切换 / 已更新设置」这类话。',
+      ].join(''),
+      parameters: {
+        mode: {
+          type: 'string',
+          required: true,
+          enum: ['text', 'text+action'],
+          description: 'text = 纯文本（不输出动作符号）；text+action = 文本+动作（动作神态用（动作）包裹）。',
+        },
+      },
+      output: json,
+      async execute(args) {
+        requireActive()
+        const mode = args['mode']
+        if (mode !== 'text' && mode !== 'text+action') {
+          throw new Error('mode 只能是 text 或 text+action')
+        }
+        // session.json 是权威、_active.json 是兜底：统一入口写两处并刷新 L1（见 PromptController.applyInteractionMode）。
+        // 这里不再调 afterWrite()：上面那次刷新已经重读过卡与日记，再刷一次是白读一遍盘。
+        const result = await prompt.applyInteractionMode(mode)
+        return { ok: true, mode, turnCount: Number(result.session?.turn_count ?? 0) || 0 }
       },
     },
     // ------------------------------------------------------------ 忘记
@@ -209,15 +259,36 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
     // ------------------------------------------------------------ 关系
     {
       name: 'awu_relation',
-      description: '用户说「关系」时调用：返回关系档位的客观依据（累计轮次、最近互动、日记条目数、起点锚定）。档位本身由你现算（五档：陌生/认识/熟悉/亲近/亲密），不落盘、不在对话里提数值。',
-      parameters: {},
+      description: [
+        '关系档位工具。参数都不填 = 只查询（用户问「我们是什么关系」时用，**只读不回写**）；',
+        '带 set = 把档位写回会话（**只在里程碑事件**：第一次约定、第一次争吵、称呼改变、表白或明确转折）。',
+        '档位由你判定（五档：陌生/认识/熟悉/亲近/亲密），日常闲聊不推档；',
+        '填了 set 就同时追加一条变更日志（why 写这次改变的原因，一句话）。',
+        '不要在对话里提「好感度 / 亲密度 +1 / 几级」这类数值；用户问起时只给状态条 + 一句角色口吻的话。',
+      ].join(''),
+      parameters: {
+        set: {
+          type: 'string',
+          enum: [...RELATION_BANDS],
+          description: '可选：要写回的档位（五档之一）。只在关系里程碑事件才传，其余情况省略。',
+        },
+        why: {
+          type: 'string',
+          description: '可选：这次档位变化的原因（一句话，如「第一次说好下次一起去」）。只在带 set 时有意义。',
+        },
+      },
       output: json,
-      async execute() {
+      async execute(args) {
         const name = requireActive()
-        const state = await store.relationState(name)
+        const raw = args['set']
+        const value = typeof raw === 'string' ? raw.trim() : ''
+        const state = value === ''
+          ? await store.relationState(name)
+          : await store.setIntimacy(name, value as (typeof RELATION_BANDS)[number], typeof args['why'] === 'string' ? args['why'] : undefined)
+        if (value !== '') await afterWrite()
         return {
           ...state,
-          tag: `${state.character}（${state.baseline}）`,
+          tag: `${state.character}（${state.current}）`,
           bands: [...RELATION_BANDS],
         }
       },

@@ -330,7 +330,10 @@ export function apply(context: Context): () => void {
         user: texts.user,
         assistant: texts.assistant,
         turnId,
-        mode: pc.snapshot().mode,
+        // 统一口径：session.mode 优先于 _active.mode（见 store.resolveInteractionMode）。
+        // 直接写 snapshot().mode 会用全局兜底值覆盖用户在会话里切过的模式。
+        mode: await pc.resolvedMode(),
+        // topic / mood 由 awu_diary_write 在同一次写盘事务里维护（不在这里编造）
       })
       if (result.written) {
         log.info(`会话已写盘：${character} 第 ${String(result.session?.turn_count ?? 0)} 轮`)

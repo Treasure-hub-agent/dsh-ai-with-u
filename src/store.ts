@@ -59,6 +59,61 @@ export const CORRUPT_PREFIX = 'card.json.corrupt-'
 export const RECENT_WINDOW = 5
 /** 单条 recent 摘要长度上限，防一条长消息吃掉整个窗口的 token 预算。 */
 export const RECENT_ITEM_MAX_CHARS = 120
+/** 关系档位变更日志上限：只留最近 50 条（超出丢最旧），防 session.json 无限膨胀。 */
+export const RELATION_LOG_LIMIT = 50
+
+/** 交互模式的真实取值（`session.json.mode` 与 `_active.json.mode` 共用）。 */
+export type InteractionMode = 'text' | 'text+action'
+export const INTERACTION_MODES: readonly InteractionMode[] = ['text', 'text+action']
+
+/** 关系档位变更日志的一条。`from` 是变更前的档位（首次为起点档）。 */
+export interface RelationLogItem {
+  at: string
+  from: string
+  to: string
+  why?: string
+}
+
+/**
+ * 交互模式的**统一解析顺序**：`session.json.mode` > `_active.json.mode` > `'text+action'`。
+ *
+ * 为什么 session 优先：会话文件是「这个角色在这个存档里怎么聊」的权威，
+ * `_active.json` 只是全局兜底（旧版本只写过它，升级后不能丢掉用户的 text 选择）。
+ * L1 渲染（prompt.ts）与 `/overview`（web.ts）都必须走这一个函数，否则两边会打架。
+ */
+export function resolveInteractionMode(
+  session: Pick<SessionState, 'mode'> | undefined,
+  active: Pick<ActiveState, 'mode'> | undefined,
+): InteractionMode {
+  const fromSession = session?.mode
+  if (fromSession === 'text' || fromSession === 'text+action') return fromSession
+  const fromActive = active?.mode
+  if (fromActive === 'text' || fromActive === 'text+action') return fromActive
+  return 'text+action'
+}
+
+/** 从 session.state 里读当前关系档位；脏值（手改/旧档）一律当作没写。 */
+export function intimacyOf(session: Pick<SessionState, 'intimacy'> | undefined): RelationBand | undefined {
+  const value = session?.intimacy
+  return typeof value === 'string' && (RELATION_BANDS as readonly string[]).includes(value)
+    ? value as RelationBand
+    : undefined
+}
+
+/** 关系档位日志（只取结构合法的条目，最多 RELATION_LOG_LIMIT 条）。 */
+export function relationLogOf(session: Pick<SessionState, 'relation_log'> | undefined): RelationLogItem[] {
+  const raw = session?.relation_log
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(item => isRecord(item) && typeof item['at'] === 'string')
+    .map(item => ({
+      at: String(item['at']),
+      from: String(item['from'] ?? ''),
+      to: String(item['to'] ?? ''),
+      ...(typeof item['why'] === 'string' && item['why'].trim() !== '' ? { why: item['why'].trim() } : {}),
+    }))
+    .slice(-RELATION_LOG_LIMIT)
+}
 
 /**
  * 跨进程锁参数。
@@ -95,7 +150,12 @@ export interface ActiveState {
   /** 启用时的 ISO 时间戳（含时区偏移），用于时间差感知。 */
   activatedAt?: string
   /** 会话交互模式：text | text+action */
-  mode?: 'text' | 'text+action'
+  mode?: InteractionMode
+  /**
+   * 纪律包档位：off（不注入）/ lite（默认）/ full（lite + 语态锚点 + 日记自检）。
+   * 和 mode 一样是「用户偏好」，`deactivate` 时保留，下次启用沿用。
+   */
+  discipline?: 'off' | 'lite' | 'full'
 }
 
 /** Windows 保留设备名（大小写不敏感，带扩展名同样保留）。 */
@@ -265,6 +325,10 @@ export interface SessionState {
   mode?: string
   last_ts?: string
   turn_count?: number
+  /** 当前关系档位（五档之一，由模型按里程碑写回；缺省时以卡内起点档为准）。 */
+  intimacy?: RelationBand
+  /** 档位变更日志（上限 {@link RELATION_LOG_LIMIT} 条，超出丢最旧）。 */
+  relation_log?: RelationLogItem[]
 }
 
 /** 一轮对话的写入素材，由宿主侧事件钩子采集后交给 {@link Store.commitTurn}。 */
@@ -274,7 +338,7 @@ export interface TurnInput {
   character?: string
   turnId?: string
   count?: boolean
-  mode?: 'text' | 'text+action'
+  mode?: InteractionMode
   summary?: string
   topic?: string
   mood?: string
@@ -715,16 +779,58 @@ export class Store {
     // 写入侧必须先规范化：否则 `2026-10-05` 会落成解析器永远匹配不到的块
     const canonical = normalizeDiaryDate(date)
     await this.locked(safe, async () => {
-      const entries = await this.readDiary(safe)
-      const existing = entries.find(e => e.date === canonical)
-      if (existing !== undefined) {
-        existing.timeline.push(...timeline)
-        existing.notes.push(...notes)
-      } else {
-        entries.push({ date: canonical, timeline: [...timeline], notes: [...notes] })
-      }
-      await this.writeDiaryUnlocked(safe, entries)
+      await this.appendDiaryUnlocked(safe, canonical, timeline, notes)
     })
+  }
+
+  /**
+   * 写日记 **并在同一个临界区里**更新会话的 topic / mood（`awu_diary_write` 用）。
+   *
+   * 为什么必须同一事务：日记与 session 是两个文件，分两次 `locked` 会与并发 `commitTurn`
+   * 交错，出现「日记写成功、topic 被后写的 commitTurn 覆盖」这类静默丢更新。
+   * 这里读改写全在一个锁里，等价于原有 `commitTurn` 的原子性。
+   *
+   * topic / mood 传空串等价于「不改」：模型没把握时不要清空已有话题。
+   */
+  async appendDiaryWithNote(
+    name: string,
+    date: string,
+    timeline: string[],
+    notes: string[],
+    note: { topic?: string; mood?: string } = {},
+  ): Promise<SessionState | undefined> {
+    const safe = normalizeName(name)
+    const canonical = normalizeDiaryDate(date)
+    const topic = typeof note.topic === 'string' ? note.topic.trim() : ''
+    const mood = typeof note.mood === 'string' ? note.mood.trim() : ''
+    return this.locked(safe, async () => {
+      await this.appendDiaryUnlocked(safe, canonical, timeline, notes)
+      if (topic === '' && mood === '') return this.readSession(safe)
+      const previous = (await this.readSession(safe)) ?? {}
+      const next: SessionState = { ...previous }
+      if (topic !== '') next.topic = topic
+      if (mood !== '') next.mood = mood
+      await this.writeSessionUnlocked(safe, next)
+      return next
+    })
+  }
+
+  /** 日记追加的实现（调用方必须已持该角色的锁）。 */
+  private async appendDiaryUnlocked(
+    name: string,
+    canonicalDate: string,
+    timeline: string[],
+    notes: string[],
+  ): Promise<void> {
+    const entries = await this.readDiary(name)
+    const existing = entries.find(e => e.date === canonicalDate)
+    if (existing !== undefined) {
+      existing.timeline.push(...timeline)
+      existing.notes.push(...notes)
+    } else {
+      entries.push({ date: canonicalDate, timeline: [...timeline], notes: [...notes] })
+    }
+    await this.writeDiaryUnlocked(name, entries)
   }
 
   async writeDiary(name: string, entries: DiaryEntry[]): Promise<void> {
@@ -770,12 +876,14 @@ export class Store {
    *
    * 旧实现是「读 → 锁外写」，与并发的 `commitTurn` 撞上会丢一轮 recent；
    * 统一收进 Store 后，读改写在同一个临界区里完成。
+   *
+   * v0.2.0 起：没有 session.json 时**建一个最小的**（只含 mode）——
+   * 「切换纯文本」是用户的明确动作，不能因为还没聊过就静默丢掉（awu_mode / POST /mode 都靠它）。
    */
-  async setMode(name: string, mode: SessionState['mode']): Promise<SessionState | undefined> {
+  async setMode(name: string, mode: InteractionMode): Promise<SessionState> {
     const safe = normalizeName(name)
     return this.locked(safe, async () => {
-      const session = await this.readSession(safe)
-      if (session === undefined) return undefined
+      const session = (await this.readSession(safe)) ?? {}
       const next: SessionState = { ...session, mode }
       await this.writeSessionUnlocked(safe, next)
       return next
@@ -991,7 +1099,12 @@ export class Store {
 
   // ---------------------------------------------------------------- 指令：重置
 
-  /** 「全新开始」：会话状态归零，日记保留。 */
+  /**
+   * 「全新开始」：会话状态归零，日记保留。
+   *
+   * 亲密度与变更日志**保留**：那是「角色记得用户这个人」的一部分（关系里程碑不是聊天记录），
+   * 和日记同一档语义。「彻底重置」才连它们一起清掉。
+   */
   async resetSession(name: string, now: Date = new Date()): Promise<ResetResult> {
     const safe = normalizeName(name)
     return this.locked(safe, async () => {
@@ -1001,6 +1114,8 @@ export class Store {
         turn_count: 0,
         last_ts: localIsoTimestamp(now),
         mode: previous.mode ?? await this.activeMode(),
+        ...(previous.intimacy === undefined ? {} : { intimacy: previous.intimacy }),
+        ...(previous.relation_log === undefined ? {} : { relation_log: previous.relation_log }),
       }
       await this.writeSessionUnlocked(safe, next)
       const diary = await this.readDiary(safe)
@@ -1013,7 +1128,7 @@ export class Store {
     })
   }
 
-  /** 「彻底重置」：会话状态 + diary.md 全部清空，角色卡不动。 */
+  /** 「彻底重置」：会话状态 + diary.md 全部清空（含亲密度与日志），角色卡不动。 */
   async resetStory(name: string, now: Date = new Date()): Promise<ResetResult> {
     const safe = normalizeName(name)
     return this.locked(safe, async () => {
@@ -1061,7 +1176,13 @@ export class Store {
 
   // ---------------------------------------------------------------- 指令：关系
 
-  /** 「关系」：非数值档位，现算不落盘；宿主只给客观依据与起点锚定。 */
+  /**
+   * 「关系」：当前档位 + 起点锚定 + 客观依据。
+   *
+   * v0.2.0 起档位**落盘**（`session.intimacy`）：面板显示起点档、对话里模型现算，两边会打架，
+   * 所以统一成「session 里的当前档位优先，没有才用卡内起点档」。`baseline` 仍保持原语义
+   * （关系定位文本推出的起点），`current` 是实际当前档位，`log` 是里程碑变更历史。
+   */
   async relationState(name: string): Promise<RelationState> {
     const safe = normalizeName(name)
     const card = await this.readCcV3(safe)
@@ -1072,16 +1193,76 @@ export class Store {
     const startText = isRecord(rel)
       ? Object.values(rel).map(v => (Array.isArray(v) ? v.join('；') : String(v ?? ''))).join('；')
       : ''
+    const baseline = relationBaseline(startText)
+    const turns = Number(session?.turn_count ?? 0) || 0
+    const diaryCount = diary.reduce((n, d) => n + d.timeline.length + d.notes.length, 0)
     return {
       character: safe,
+      baseline,
+      current: intimacyOf(session) ?? baseline,
+      turns,
+      diaryCount,
       bands: RELATION_BANDS,
-      baseline: relationBaseline(startText),
+      log: relationLogOf(session),
       startText,
-      turnCount: Number(session?.turn_count ?? 0) || 0,
+      // 兼容旧字段：client/api.ts 的 RelationState 仍在读这三个
+      turnCount: turns,
       lastActive: session?.last_ts ?? '',
-      diaryEntries: diary.reduce((n, d) => n + d.timeline.length + d.notes.length, 0),
-      note: '档位由模型现算、不落盘；此处只给客观依据与起点锚定',
+      diaryEntries: diaryCount,
+      note: '档位由模型判定、按里程碑写回 session.json；此处给当前档位、起点锚定与变更日志',
     }
+  }
+
+  /**
+   * 写回当前关系档位（`awu_relation set` / `POST /relation/set`）。
+   *
+   * 校验档位 → 在同一个临界区里读改写 session（`intimacy` + 追加 `relation_log`，超上限丢最旧）→
+   * 返回**写完之后**的 relationState。`from` 取变更前档位（没有就用起点档），
+   * 这样日志能自解释「从哪一档到哪一档」。
+   *
+   * 日志追加条件：**同档且没写 why = 纯噪音，不追加**；同档但 why 非空照记
+   * （表白这类「没进档的里程碑」值得留痕）。档位本身无论如何都写回。
+   */
+  async setIntimacy(name: string, value: RelationBand, why?: string): Promise<RelationState> {
+    const safe = normalizeName(name)
+    if (!(RELATION_BANDS as readonly string[]).includes(value)) {
+      throw new Error(`关系档位只能是 ${RELATION_BANDS.join(' / ')}：${String(value)}`)
+    }
+    const trimmedWhy = typeof why === 'string' ? why.trim() : ''
+    await this.locked(safe, async () => {
+      const previous = (await this.readSession(safe)) ?? {}
+      const baseline = await this.startBand(safe)
+      const from = intimacyOf(previous) ?? baseline
+      const log = [...relationLogOf(previous)]
+      // 同档且没写原因不追加（否则日志被「没变化」刷满）
+      if (!(from === value && trimmedWhy === '')) {
+        log.push({
+          at: localIsoTimestamp(),
+          from,
+          to: value,
+          ...(trimmedWhy === '' ? {} : { why: trimmedWhy }),
+        })
+      }
+      const next: SessionState = {
+        ...previous,
+        intimacy: value,
+        // 只留最近 RELATION_LOG_LIMIT 条：超出丢最旧（slice 保留尾部 = 最新）
+        relation_log: log.slice(-RELATION_LOG_LIMIT),
+      }
+      await this.writeSessionUnlocked(safe, next)
+    })
+    return this.relationState(safe)
+  }
+
+  /** 卡内「关系定位」推出的起点档（读不到卡时按「认识」）。 */
+  private async startBand(name: string): Promise<RelationBand> {
+    const card = await this.readCcV3(name)
+    if (card === undefined) return '认识'
+    const rel = toLegacyView(card)['relationship']
+    const text = isRecord(rel)
+      ? Object.values(rel).map(v => (Array.isArray(v) ? v.join('；') : String(v ?? ''))).join('；')
+      : ''
+    return relationBaseline(text)
   }
 
   // ---------------------------------------------------------------- 指令：换一句开场
@@ -1211,11 +1392,22 @@ async function hasCorruptBackup(dir: string): Promise<boolean> {
 
 export interface RelationState {
   character: string
-  bands: readonly string[]
+  /** 起点档（由卡内「关系定位」推出，语义未变）。 */
   baseline: RelationBand
+  /** 当前档位（session.intimacy，缺省退回 baseline）。 */
+  current: RelationBand
+  /** 累计对话轮数。 */
+  turns: number
+  /** 日记条目总数（时间线 + 札记）。 */
+  diaryCount: number
+  bands: readonly RelationBand[]
+  /** 里程碑变更日志（最多 {@link RELATION_LOG_LIMIT} 条）。 */
+  log: RelationLogItem[]
   startText: string
+  /** @deprecated 与 `turns` 同值，保留给既有面板（client/api.ts）。 */
   turnCount: number
   lastActive: string
+  /** @deprecated 与 `diaryCount` 同值，保留给既有面板。 */
   diaryEntries: number
   note: string
 }

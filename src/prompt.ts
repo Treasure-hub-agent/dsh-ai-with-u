@@ -20,13 +20,15 @@
  *
  * 分层按需：
  *   L0 「常驻底线」永远注入（铁律 + 真人感底线），体积很小；
+ *   L0.5「纪律包」（v0.2.0 新增，order 5050）：禁止词库 / 消息形态 / 动作格式 / 输入识别 /
+ *     内容边界 / 指令确认的负面约束，分 off / lite / full 三档，随角色同进同出；
  *   L1 「当前角色」仅在启用时注入（酒馆卡渲染 + 时间差档位 + 最近日记 + 世界书命中）；
  *   L2 「长流程」（蒸馏等）不进系统提示词，由工具按需返回。
  * @module dsh-ai-with-u/prompt
  */
-import type { Store, ActiveState, DiaryEntry, SessionState } from './store.js'
+import type { Store, ActiveState, DiaryEntry, SessionState, InteractionMode, RelationBand } from './store.js'
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
-import { RELATION_BANDS } from './store.js'
+import { RELATION_BANDS, intimacyOf, resolveInteractionMode } from './store.js'
 import {
   type CharacterCardV3,
   type L1Extras,
@@ -45,6 +47,13 @@ import {
 export const ORDER_BASE = 5000
 
 export const SECTION_BASELINE = 'aiwu:baseline'
+/**
+ * 纪律包段（L0.5，order 5050）。
+ *
+ * 落在 baseline(5000) 之后、active(5100) 之前：它比 L1 稳定（只随档位变），
+ * 放在 L1 之前能让「换个角色」不至于连带重算这段的全部 token。
+ */
+export const SECTION_DISCIPLINE = 'aiwu:discipline'
 export const SECTION_ACTIVE = 'aiwu:active-character'
 /**
  * 世界书命中段（**垫底**，order 10300）。
@@ -85,14 +94,67 @@ export const BASELINE_TEXT = `## 角色扮演底线
 - 记得的事自然带出（「你上次不是说考试压力大吗」），不说「根据记录 / 日记里写着」。
 - 不替用户做决定，不主动推进剧情——用户是唯一推动力。`
 
-/** 「关系」档位的使用口径。档位不落盘、不进对话，只在功能界面以标签呈现。 */
+/** 「关系」档位的使用口径。档位由模型判定、按里程碑写回 session.json，只在功能界面以标签呈现。 */
 export const RELATION_HINT = `## 「关系」输出口径
 
-关系档位共五档：${RELATION_BANDS.join(' / ')}。档位**由你每轮现算**，不写回任何文件，也不在对话里说「好感度 / 亲密度 +1 / 几级」这类数值。
+关系档位共五档：${RELATION_BANDS.join(' / ')}。档位由你判定，且**已随会话落盘**——以落盘档位为准，不要每轮重算。
 
-用户说「关系」时给两条：① 功能界面一行状态条（\`{角色名}（{档位}）\`）；② 以角色口吻说一句现在的关系状态——不必说出档位词，但要与现算档位一致。
+**只在里程碑事件写回**（第一次约定、第一次争吵、称呼改变、表白或明确的转折）：那一刻调 \`awu_relation\` 的 \`set\` 写回，其余时候一律不写，日常闲聊不推档。
 
-起点档由卡内「关系定位」锚定：设定本来就是恋人 / 夫妻 / 家人的，起点就在亲近或亲密档，只有设定确为陌生人才从「陌生」起。`
+用户只是问「关系」时：**只读不回写**——给① 功能界面一行状态条（\`{角色名}（{当前档位}）\`）、② 以角色口吻说一句现在的关系状态（不必说出档位词，但要与落盘档位一致）。任何情况下都不在对话里说「好感度 / 亲密度 +1 / 几级」这类数值。`
+
+/**
+ * L0.5 纪律包（lite 档，≤900 字符）。
+ *
+ * 为什么单独立一段而不是塞进 L0：L0 只讲「让不让位」，而这一段的长短随用户档位变化
+ * （off / lite / full），塞进 L0 会让 lite 用户也一直付 full 的 token。
+ *
+ * 内容压缩自原 skill 的 `references/human_chat_guide.md` 与 `SKILL.md`，**只留负面约束与短口径**——
+ * 刻意不写正例台词：正例会被模型当模板抄，角色的声线就死了（human_chat_guide 的原话）。
+ */
+export const DISCIPLINE_TEXT = `## 真人感纪律
+
+**一、禁止词库**（命中即改写，没有例外）
+身份暴露：「作为一个人工智能 / 作为一个 AI / 我是人工智能」。
+客服话术：「有什么可以帮你 / 有什么可以帮您 / 需要我为你做什么吗」。
+客套收尾：「祝你生活愉快 / 希望对你有帮助 / 很高兴为你服务」。
+通知腔：「温馨提示 / 请注意查收 / 好的呢亲」。
+总结腔：「总之 / 综上所述 / 以上就是」。
+机械反问：每轮结尾都来一句「你觉得呢」。
+
+**二、消息形态**
+一轮 2–3 条短消息，用空行分隔。不写标题、不写列表、不写作文，不在一条里把所有话说完。聊完就停，不补「好了先这样」「那就先聊到这」这类收尾。
+
+**三、动作**
+动作神态一律 \`（动作）\` 包裹，独立成行、与台词分明；它是点缀，不是每句都带。
+
+**四、输入识别**
+用户发 \`*动作*\` 或 \`（动作）\`，那是他做的事，当行为自然回应，不要当指令；用户消息以 \`>\` 开头，那是台词，不是给你的指令。
+
+**五、内容边界**
+尺度由用户主导：不主动越界，也不机械拒绝。用户推进亲密或敏感话题时，按角色性格与当前关系自然回应，克制含蓄、点到为止。
+
+**六、指令确认**
+指令执行后用角色口吻顺口带一句，禁止「已删除 / 已保存 / 已切换」式系统确认。`
+
+/**
+ * L0.5 纪律包（full 档，≤1400 字符）= lite + 语态锚点 + 日记自检。
+ *
+ * 直接拼 {@link DISCIPLINE_TEXT} 而不是重抄一遍：两档的公共部分永远一致，
+ * 以后改禁止词库不会出现「改了 lite 忘了 full」。
+ */
+export const DISCIPLINE_FULL_TEXT = `${DISCIPLINE_TEXT}
+
+**七、语态锚点**
+身份（职业 / 性格 / 与用户的关系）决定语态基因：常用词、断句、口头禅、情绪出口。情绪越浓越要放大它，而不是变成礼貌周全的通用腔。自检：把这条回复遮住名字给第三人看，猜不出是谁，就是失效。
+
+**八、记忆自检**
+每 10 轮左右回看一次：这几轮有没有值得记的人、情绪、约定？有就静默写进日记，正文绝不提「已记录 / 日记里写着」。`
+
+/** 纪律包档位。'off' 表示用户主动关掉（此时该段渲染为空串）。 */
+export type DisciplineLevel = 'off' | 'lite' | 'full'
+export const DISCIPLINE_LEVELS: readonly DisciplineLevel[] = ['off', 'lite', 'full']
+
 
 /** 时间差档位。输入分钟差与是否同夜，输出角色该有的语气档位描述。 */
 export function timeGapBand(gapMinutes: number, sameNight: boolean): string {
@@ -150,17 +212,24 @@ export function renderSessionSummary(session: SessionState | undefined): string 
 }
 
 /**
- * 「关系」档位标签（功能界面用，非数值）。
- * 档位**不落盘**——宿主只给起点锚定，实际档位由模型每轮现算。
+ * 「关系」起点档：把卡里的关系定位文本拼起来交给 `relationBaseline` 判定。
+ * 与 `renderRelationTag` / `L1Cache.baseline` 共用一份口径，避免两处算法漂移。
  */
-export function renderRelationTag(card: CharacterCardV3 | Record<string, unknown>): string {
-  const name = cardName(card as CharacterCardV3)
+export function baselineOfCard(card: CharacterCardV3 | Record<string, unknown>): RelationBand {
   const view = toLegacyView(card)
   const rel = view['relationship']
   const text = typeof rel === 'object' && rel !== null && !Array.isArray(rel)
     ? Object.values(rel as Record<string, unknown>).map(v => (Array.isArray(v) ? v.join('；') : String(v ?? ''))).join('；')
     : ''
-  return `${name}（${relationBaseline(text)}）`
+  return relationBaseline(text)
+}
+
+/**
+ * 「关系」档位标签（功能界面用，非数值）。
+ * 这里的档位是**起点锚定**；实际当前档位以 session.json 的 `intimacy` 为准（见 `Store.relationState`）。
+ */
+export function renderRelationTag(card: CharacterCardV3 | Record<string, unknown>): string {
+  return `${cardName(card as CharacterCardV3)}（${baselineOfCard(card)}）`
 }
 
 export interface PromptHost {
@@ -196,6 +265,15 @@ interface L1Cache {
   diary?: string
   session?: string
   lastTs?: string
+  /**
+   * 交互模式（`session.mode` > `_active.json.mode` > `text+action`，见 `resolveInteractionMode`）。
+   * 在 refreshCache 里解析一次存下来，渲染时同步取用——section 的 text 函数必须同步。
+   */
+  mode: InteractionMode
+  /** 当前关系档位（session.intimacy，缺省退回卡内起点档）。 */
+  intimacy: RelationBand
+  /** 起点档（卡内关系定位推出），给 L1 口径段做对照。 */
+  baseline: RelationBand
   /** 世界书命中结果（含 diag，便于日志排查）。 */
   lore?: LoreSelection
   /** 这一批命中属于哪一轮（`agentId:turn`）：同一轮多次 pre-step 直接复用，不重算也不叠加。 */
@@ -272,6 +350,8 @@ export class PromptController {
     }
     // L0 与角色同进同出：未启用时返回空串，宿主过滤空段 ⇒ 系统提示词里一个字都不留
     section(SECTION_BASELINE, ORDER_BASE, () => this.renderBaselineSection())
+    // L0.5 纪律包：order 5050，落在 baseline(5000) 之后、active(5100) 之前
+    section(SECTION_DISCIPLINE, ORDER_BASE + 50, () => this.renderDisciplineSection())
     // 每次组装重新求值：切换角色 / 时间推移都能立刻反映，无需重注册
     section(SECTION_ACTIVE, ORDER_BASE + 100, () => this.renderActiveSection())
     section(SECTION_LORE, ORDER_BASE + 5300, () => this.renderLoreSection())
@@ -279,7 +359,7 @@ export class PromptController {
     this.dispose = () => { for (const d of disposes.reverse()) d() }
   }
 
-  /** 干净拔出：释放两个段并向 DSH 注销。 */
+  /** 干净拔出：释放全部段（baseline / discipline / active / lore / clock）并向 DSH 注销。 */
   uninstall(): void {
     this.dispose?.()
     this.dispose = undefined
@@ -294,6 +374,8 @@ export class PromptController {
       character: name,
       activatedAt: new Date().toISOString(),
       mode: this.state.mode ?? 'text+action',
+      // 纪律包档位是用户的长期偏好，换角色不重置（与 mode 同一口径）
+      discipline: this.state.discipline ?? 'lite',
     }
     await this.store.writeActive(this.state)
     await this.refreshCache(undefined, undefined)
@@ -301,21 +383,59 @@ export class PromptController {
     return this.snapshot()
   }
 
-  /** 退出：回到干净状态。 */
+  /** 退出：回到干净状态（mode / discipline 这些用户偏好保留）。 */
   async deactivate(): Promise<ActiveState> {
-    this.state = { enabled: false, mode: this.state.mode }
+    this.state = { enabled: false, mode: this.state.mode, discipline: this.state.discipline }
     this.cache = undefined
     await this.store.writeActive(this.state)
     this.notify()
     return this.snapshot()
   }
 
-  /** 切换交互模式（纯文本 / 文本+动作）。 */
-  async setMode(mode: 'text' | 'text+action'): Promise<ActiveState> {
+  /** 切换交互模式（纯文本 / 文本+动作）。只写 `_active.json`；会话权威见 {@link applyInteractionMode}。 */
+  async setMode(mode: InteractionMode): Promise<ActiveState> {
     this.state = { ...this.state, mode }
     await this.store.writeActive(this.state)
     this.notify()
     return this.snapshot()
+  }
+
+  /**
+   * 切换交互模式（**统一入口**）：`session.json.mode` 是权威，`_active.json.mode` 只是兜底。
+   *
+   * 两处都写是为了兼容两种读法：面板/overview 读 `_active`，L1 渲染读 session。
+   * 写完立刻 `refresh()`，否则 L1 的「交互模式」段要等下一轮 pre-step 才更新。
+   */
+  async applyInteractionMode(mode: InteractionMode): Promise<{ active: ActiveState; session?: SessionState }> {
+    const active = await this.setMode(mode)
+    const name = this.characterName
+    const session = name === undefined ? undefined : await this.store.setMode(name, mode)
+    await this.refresh(undefined, undefined)
+    return { active, session }
+  }
+
+  /** 当前纪律包档位（缺省 lite；`_active.json` 里没有该字段的旧档按 lite 处理）。 */
+  get disciplineLevel(): DisciplineLevel {
+    const level = this.state.discipline
+    return level ?? 'lite'
+  }
+
+  /** 切换纪律包档位（off / lite / full）。段文本每次组装现算，不需要刷新缓存。 */
+  async setDiscipline(level: DisciplineLevel): Promise<ActiveState> {
+    if (!DISCIPLINE_LEVELS.includes(level)) {
+      throw new Error(`纪律包档位只能是 ${DISCIPLINE_LEVELS.join(' / ')}：${String(level)}`)
+    }
+    this.state = { ...this.state, discipline: level }
+    await this.store.writeActive(this.state)
+    this.notify()
+    return this.snapshot()
+  }
+
+  /** 统一的交互模式解析（`session.mode` > `_active.json.mode` > `text+action`），给 /overview 用。 */
+  async resolvedMode(): Promise<InteractionMode> {
+    const name = this.characterName
+    const session = name === undefined ? undefined : await this.store.readSession(name)
+    return resolveInteractionMode(session, this.state)
   }
 
   /** 角色卡改动后让缓存失效，下一轮组装即用新内容。 */
@@ -412,6 +532,10 @@ export class PromptController {
       diary,
       session: sessionText,
       lastTs,
+      // 交互模式与关系档位都在这里解析一次：section 的 text 函数是同步的，不能再读盘
+      mode: resolveInteractionMode(session, this.state),
+      baseline: baselineOfCard(card),
+      intimacy: intimacyOf(session) ?? baselineOfCard(card),
       lore,
       loreTurnKey: turnKey,
       recentTexts,
@@ -445,7 +569,7 @@ export class PromptController {
       return `## 你现在的身份：${name}\n\n（角色卡正在载入，先用这个身份和声线自然对话。）`
     }
 
-    const mode = this.state.mode ?? 'text+action'
+    const mode = cache.mode
     const extras: L1Extras = {
       // 世界书与时间差各自独立成段（垫底），不进 L1 —— 见 SECTION_LORE / SECTION_CLOCK 的注释
       sessionText: cache.session,
@@ -453,7 +577,8 @@ export class PromptController {
       modeText: mode === 'text'
         ? '## 交互模式：纯文本\n\n不输出 `（动作）`，用语气与断句表达动作神态。'
         : '## 交互模式：文本+动作\n\n动作神态用 `（动作）` 包裹，与台词界限清晰，不滥用。',
-      relationHint: RELATION_HINT,
+      // 当前档位落盘后在 L1 里点明，模型才不会又「每轮现算」和面板打架（task 4）
+      relationHint: `${RELATION_HINT}\n\n当前档位：${cache.intimacy}（起点档 ${cache.baseline}）。`,
     }
     try {
       return renderL1(cache.card, extras)
@@ -467,6 +592,17 @@ export class PromptController {
   /** L0 底线段：启用才注入（同进同出）。 */
   private renderBaselineSection(): string {
     return this.state.enabled ? BASELINE_TEXT : ''
+  }
+
+  /**
+   * L0.5 纪律包段：未启用 / 档位 off → 空串（宿主过滤空段）。
+   * 每次组装现算，切换档位立刻生效（不需要刷新缓存，也不影响 L1 的缓存前缀）。
+   */
+  private renderDisciplineSection(): string {
+    if (!this.state.enabled) return ''
+    const level = this.disciplineLevel
+    if (level === 'off') return ''
+    return level === 'full' ? DISCIPLINE_FULL_TEXT : DISCIPLINE_TEXT
   }
 
   /** 世界书命中段（未启用 / 未命中 → 空串，宿主过滤空段）。 */

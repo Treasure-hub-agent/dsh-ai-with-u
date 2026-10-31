@@ -14,8 +14,10 @@
  *  - `DockSink`   —— 挂在 `conversation.composer.dock` 的**无头**贡献：把 `inputActions` /
  *    `sessionId` / `useInput` 快照存进模块级 sink，供侧栏面板取用（`sidebar.footer.action`
  *    这个席位拿不到 `inputActions`，必须借会话作用域插槽转一手）。
- *  - `DockEntry`  —— 同一位置的可见小入口（**当前未注册，保留备用**）。
  *  - `DistillDialog` / `DistillButton` / `DistillEntry` —— 面板侧的两步入场。
+ *
+ * 历史：同一位置的可见小入口 `DockEntry` 从未注册过（主人明确要求底部托盘不留蒸馏按钮），
+ * 且要填的 `dock*` 文案一起成了死代码，已删除（2026-10-31，任务 3）。
  *
  * 发送契约（2026-10-14 / 10-17 对已安装 desktop 0.2.0-rc.2 实测，来源：本机 dsh-story 头部注释）：
  *  - `InputActions = { captureInsertion(), insertText(text, span) → boolean, setDraft(text), …, submit() }`；
@@ -171,18 +173,11 @@ export type SendResult =
     error?: string
   }
 
-/** 只在「输入框空着」或调用方明确允许时插入，避免把用户的草稿切碎。 */
-function draftIsEmpty(): boolean {
-  const draft = sinkInput?.draft
-  return draft === undefined || draft.trim() === ''
-}
-
 /**
  * 把蒸馏指令发进当前会话：`insertText` → （可用则）`submit`。
  *
  * v3 起指令由调用方传入（`POST /distill/arm` 的返回值）——**arm 必须先做**，因为 AI 的落盘工具
- * 只在那个窗口内可用。传空时退回 `GET /distill/flow`（老路径，只给 `DockEntry` 这种「只想填一条
- * 指令试试」的场景用，不参与正式流程）。
+ * 只在那个窗口内可用。传空时退回 `GET /distill/flow`（兜底：只把指令填进输入框，不参与正式流程）。
  *
  * 每一步都防御式：任何一步不成立都返回可操作的结果，绝不抛给面板、绝不假装发成功。
  */
@@ -261,70 +256,6 @@ async function copyText(text: string): Promise<boolean> {
     console.error('[ai-with-u] 写剪贴板失败', error)
   }
   return false
-}
-
-// ---------------------------------------------------------------- 可见的 dock 入口
-
-/**
- * 输入框上方的「蒸馏」小入口 —— **当前未注册，保留备用**。
- *
- * 2026-10-30 主人明确要求「dsh 底部托盘也不需要留这个单独的蒸馏按钮」，Lead 已把它的 dock 席位
- * 从 `entry.tsx` 删掉（只保留无渲染的 `DockSink`，那是拿 `inputActions` 的唯一通道）。
- * 组件本身留着（零成本）：将来若要做「输入框旁的快捷入口」直接捡回来，注册写法见
- * `docs/design/2026-10-30-distill-entry.md` §6.3a（第二个 dock 席位、不同 id）。
- *
- * 如果哪天它真的回到 UI，请保持现在的取舍：**只填入、不发送**（用户人就在输入框旁，
- * 自己按回车最安全；也避免把整个流程塞进一个正在生成的回合）。输入框已有文字时不动它。
- */
-export function DockEntry(props: { t: Translate }): JSX.Element {
-  const { t } = props
-  const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
-  const timer = useRef<number | undefined>(undefined)
-
-  useEffect(() => () => { if (timer.current !== undefined) window.clearTimeout(timer.current) }, [])
-
-  const flash = useCallback((text: string): void => {
-    setNote(text)
-    if (timer.current !== undefined) window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setNote(''), 6000)
-  }, [])
-
-  const onClick = (): void => {
-    if (busy) return
-    if (!draftIsEmpty()) { flash(t('distill.dockDraftNotEmpty')); return }
-    setBusy(true)
-    void fetchDistillFlow()
-      .then(info => {
-        const insertText = actionFn('insertText')
-        if (insertText === undefined) { flash(t('distill.dockUnavailable')); return }
-        let ok = false
-        try {
-          ok = insertText.call(sinkActions, info.instruction) === true
-        } catch (error) {
-          console.error('[ai-with-u] dock 入口插入失败', error)
-        }
-        flash(ok ? t('distill.dockFilled') : t('distill.dockUnavailable'))
-      })
-      .catch((error: unknown) => flash(errorText(error)))
-      .finally(() => setBusy(false))
-  }
-
-  return (
-    <div className="awu-distill-dock">
-      <button
-        type="button"
-        className="awu-distill-dockBtn"
-        title={t('distill.entryTitle')}
-        onClick={onClick}
-        disabled={busy}
-      >
-        <IconQuill size={11} />
-        {t('distill.entry')}
-      </button>
-      {note !== '' && <span className="awu-distill-dockNote">{note}</span>}
-    </div>
-  )
 }
 
 // ---------------------------------------------------------------- 弹层

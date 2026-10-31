@@ -26,13 +26,14 @@ export const ROUTES = {
   saveCharacter: '/character/save',
   deleteCharacter: '/character/delete',
   saveDiary: '/diary/save',
+  /** 导入酒馆卡（PNG tEXt/iTXt、CHARX zip、裸 JSON）：**解析后不写盘**，确认后走 saveCharacter。 */
+  importCharacter: '/character/import',
 
   // ---- 从作品蒸馏角色卡（v3：arm → 发指令 → AI 自己落盘）----
   distillFlow: '/distill/flow',
   distillState: '/distill/state',
   distillArm: '/distill/arm',
   distillDisarm: '/distill/disarm',
-  distillParse: '/distill/parse',
 
   // ---- 记忆与剧情维护（后端 task-1 新增）----
   forget: '/forget',
@@ -54,10 +55,13 @@ export class ApiUnavailableError extends Error {
 /** 单次请求超时：接口挂起时至少能让按钮从「忙」里恢复，而不是永远转圈。 */
 const REQUEST_TIMEOUT_MS = 20000
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/** 导入接口的超时：带立绘的 10 MB 卡要先把 base64 送进去再解 PNG，20 秒容易不够。 */
+const IMPORT_TIMEOUT_MS = 90000
+
+async function request<T>(path: string, init?: RequestInit, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<T> {
   let res: Response
   const timeout = new AbortController()
-  const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => timeout.abort(), timeoutMs)
   try {
     res = await fetch(`${API_PREFIX}${path}`, {
       credentials: 'same-origin',
@@ -67,7 +71,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     })
   } catch (error) {
     if (timeout.signal.aborted) {
-      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒）：${path}`)
+      throw new Error(`请求超时（${timeoutMs / 1000} 秒）：${path}`)
     }
     throw new Error(`连不上宿主接口（${path}）：${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -306,6 +310,76 @@ export function saveCharacter(name: string, card: Card, ccv3?: Card): Promise<{ 
   return post<{ name: string }>(ROUTES.saveCharacter, ccv3 === undefined ? { name, card } : { name, card, ccv3 })
 }
 
+/**
+ * **只发完整 CCv3** 的保存（世界书改动 / 导入落地专用）。
+ *
+ * 为什么要单独一个函数，而不是给 `saveCharacter` 少传一个参数就完事：
+ * C7 把 `character_book` 的权威通路交给 `ccv3`，而 `card` 那条分支是「结构重投影」。
+ * 两个键一起发时，`character_book` 到底取哪一份取决于 store 内部的底稿选择顺序 ——
+ * 那是别人代码里的实现细节，不该让「世界书有没有存进去」押在它上面。
+ * 只发 `ccv3` 就把歧义消掉了：整卡回传、只改 `data.character_book`，ccv3 是唯一权威。
+ *
+ * 结构字段的保存仍走 `saveCharacter(name, card)`（不带 ccv3），两条链路互不越界。
+ */
+export function saveCharacterCcv3(name: string, ccv3: Card): Promise<{ name: string }> {
+  return post<{ name: string }>(ROUTES.saveCharacter, { name, ccv3 })
+}
+
+// ---------------------------------------------------------------- 导入酒馆卡
+
+/** 后端认得的三种卡格式（`src/import-card.ts` 的 `CardFormat`）。 */
+export type ImportCardFormat = 'png' | 'charx' | 'json'
+
+/**
+ * 导入上限（与 `src/web.ts` 的 `IMPORT_BODY_LIMIT` 对齐）。
+ *
+ * 宿主只对 `/character/import` 放宽到 16 MB，而 base64 会膨胀 4/3 ——
+ * 直接把「16 MB 的文件」放过去，请求体就 21 MB 了，后端会先一步拒掉并回
+ * 「请求体过大（上限 16 MB）」。所以前端按换算后的**原始文件**上限先拦一道，
+ * 文案里也说清是 base64 换算后的结果（免得用户以为面板比后端更小气）。
+ */
+export const IMPORT_LIMITS = {
+  /** 宿主请求体上限（16 MB，仅此路由） */
+  bodyBytes: 16 * 1024 * 1024,
+  /** 前端允许的最大原始文件：16 MB × 3/4，再留一点 JSON 信封余量 */
+  fileBytes: 11 * 1024 * 1024,
+} as const
+
+export interface ImportCharacterInput {
+  /** 原始文件名（后端在卡内没名字时用它推 fallbackName，也用于报错文案） */
+  fileName: string
+  /** 文件内容的 base64（**不带** `data:...;base64,` 前缀） */
+  dataBase64: string
+}
+
+/** `POST /character/import` 的返回：解析结果 + 同名冲突提示，**不写盘**。 */
+export interface ImportCharacterResult {
+  ok: true
+  format: ImportCardFormat
+  /** 解析器的提示（V2 卡被包成 V3、忽略 assets、PNG 不完整…），逐条展示给用户 */
+  warnings: string[]
+  /** 规范化后的完整 CCv3，确认后原样回传给 `/character/save` */
+  ccv3: Card
+  /** 卡内 `data.name`，空时后端已用文件名推过 */
+  name: string
+  /** 磁盘上已有同名角色时出现；确认覆盖由用户二次确认 */
+  conflict?: { name: string }
+}
+
+/**
+ * 解析一张卡（**不写盘**）。
+ *
+ * 解析错误由后端原样给出（「PNG 里没有找到 chara 数据」「ZIP 包不是有效的 CHARX」这类），
+ * 这里不做任何归一化，UI 直接把 `error` 原文透出去 —— 压成「导入失败」等于把排查线索扔掉。
+ */
+export function importCharacter(input: ImportCharacterInput): Promise<ImportCharacterResult> {
+  return request<ImportCharacterResult>(
+    ROUTES.importCharacter,
+    { method: 'POST', body: JSON.stringify({ fileName: input.fileName, dataBase64: input.dataBase64 }) },
+    IMPORT_TIMEOUT_MS,
+  )
+}
+
 /** 删除角色。withMemory=true 时连同日记一并删除。 */
 export function deleteCharacter(name: string, withMemory = false): Promise<unknown> {
   return post(ROUTES.deleteCharacter, { name, withMemory })
@@ -383,34 +457,6 @@ export function armDistill(): Promise<DistillArmResult> {
 /** 收掉窗口（用户取消 / 关弹层但没发出去时调用）。幂等。 */
 export function disarmDistill(): Promise<unknown> {
   return post(ROUTES.distillDisarm)
-}
-
-/**
- * 蒸馏卡片的校验结果（**骨架，签名先定死**）。
- *
- * ⏸ 实现挂起：卡片格式要改成酒馆卡 CCv3（`spec: chara_card_v3` + `character_book`），
- * 宿主的 `POST /distill/parse` 与 34 字段校验等 tavern 格式定稿后重做
- * （存档：docs/design/2026-10-30-distill-entry.md §5.2b / §5.7）。
- * 在那之前调用会拿到「宿主侧尚未提供该能力」（路由未注册 → 404 无信封）。
- */
-export interface DistillParseResult {
-  ok: true
-  card: Record<string, unknown>
-  stats: { filled: number; total: number }
-  missingGroups: string[]
-  missingFields: string[]
-  warnings: string[]
-  conflict?: { name: string }
-}
-
-/**
- * 把模型输出的自由文本校验成一张可进编辑器的卡（**骨架**）。
- *
- * 路由尚未注册，调用会抛 `ApiUnavailableError`；`UI` 侧此刻不接这条路径，
- * 保留函数只为锁住前后端签名，等格式定稿后填实现。
- */
-export function parseDistillCard(raw: string): Promise<DistillParseResult> {
-  return post<DistillParseResult>(ROUTES.distillParse, { raw })
 }
 
 /** 覆写角色日记。 */
