@@ -45,6 +45,7 @@ const {
   renderL1, renderL1Static, selectLoreEntries, expandMacros, parseDecorators,
   forgetCardText, cardSource, cardName, awiuOf, lengthWarnings, cardLengthStats,
   assertCardLimits, collectCardWarnings, CARD_SOFT_LIMITS, CARD_HARD_LIMITS,
+  ST_SCRIPT_STANCE,
   LORE_DEFAULTS, MES_EXAMPLE_BUDGET,
 } = T
 
@@ -163,6 +164,33 @@ section('V4 · 未知键不丢（旧卡自定义键 / 外部 extension）')
 }
 
 // ================================================================ 世界书 V5–V9
+
+/**
+ * 完整 fake `PromptController`（web.ts 的路由现在会调 preview/binding/refreshCharacter 等一批方法）。
+ * 路由自检只关心「HTTP 层行为」，所以这里全部给最小实现；需要真渲染的用例用真 `PromptController`。
+ */
+const fakePromptController = (over = {}) => ({
+  characterName: undefined,
+  snapshot: () => ({ enabled: false }),
+  relationTag: () => '',
+  invalidate: () => {},
+  refresh: async () => {},
+  activate: async () => ({ enabled: false }),
+  deactivate: async () => ({ enabled: false }),
+  setMode: async (mode) => ({ enabled: false, mode }),
+  applyInteractionMode: async (mode) => ({ active: { enabled: false, mode }, session: undefined }),
+  resolvedMode: async () => 'text+action',
+  disciplineLevel: 'lite',
+  setDiscipline: async () => ({ enabled: false }),
+  preview: () => ({ active: { enabled: false }, sessionId: '', source: 'none', mode: 'text+action', discipline: 'lite', segments: [], total: 0, lore: {} }),
+  resolveTarget: () => ({ key: '', source: 'none' }),
+  characterForSession: () => undefined,
+  bindingSnapshot: () => ({}),
+  reloadBindings: async () => ({}),
+  refreshMount: () => {},
+  refreshCharacter: async () => {},
+  ...over,
+})
 
 const bookOf = (entries, extra = {}) => ({ name: '测试世界书', extensions: {}, entries, ...extra })
 const entry = (over) => ({
@@ -769,14 +797,7 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
       if (body !== undefined) yield Buffer.from(JSON.stringify(body))
     },
   })
-  const routes = buildRoutes(store, {
-    characterName: undefined,
-    snapshot: () => ({ enabled: false }),
-    relationTag: () => '',
-    invalidate: () => {},
-    refresh: async () => {},
-    activate: async () => ({ enabled: false }),
-  })
+  const routes = buildRoutes(store, fakePromptController())
   const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
   try {
     // 先落一张真实卡，再给它加世界书
@@ -1060,7 +1081,8 @@ section('V29 · 世界书超限改软警告（保存成功 + 提示，五个原�
     const store = new Store(sandbox)
     const NAME = '大世界书卡'
 
-    // 1) 单条 5000 字 + 全本 23000 字：**保存成功**，两条软警告，正文一个字都不截断
+    // 1) 单条 5000 字 + 全本 23000 字：**保存成功**，只报「单条偏长」一条，
+    //    **不再报「全本字数超限」**（2026-11-01 主人要求：按需注入，字数不是问题），正文一个字都不截断
     const entries = [
       entry({ id: 'huge', keys: ['核心设定'], content: '长'.repeat(5000) }),
       ...Array.from({ length: 4 }, (_, i) =>
@@ -1073,14 +1095,15 @@ section('V29 · 世界书超限改软警告（保存成功 + 提示，五个原�
     })
     const saved = await store.saveCard({ name: NAME, ccv3 })
 
-    check(Array.isArray(saved.warnings) && saved.warnings.length === 2,
-      `保存成功并返回 2 条软警告（实际 ${saved.warnings?.length}）`)
+    check(Array.isArray(saved.warnings) && saved.warnings.length === 1,
+      `保存成功且只有「单条偏长」1 条警告（实际 ${saved.warnings?.length}）`)
     check(saved.warnings.some(w => w.includes('5000') && w.includes(String(CARD_SOFT_LIMITS.bookEntry))),
       `条目警告带实际字数 5000 与上限 ${CARD_SOFT_LIMITS.bookEntry}`)
-    check(saved.warnings.some(w => w.includes('23000') && w.includes(String(CARD_SOFT_LIMITS.bookTotal))),
-      `总量警告带实际字数 23000 与上限 ${CARD_SOFT_LIMITS.bookTotal}`)
+    // 主人要求删掉的那条：**全本字数**不再有任何提醒
+    check(!saved.warnings.some(w => w.includes('23000') || w.includes('总字数')),
+      '不再提醒「世界书全本字数超限」（book-too-large 已删）')
     check(saved.warnings.every(w => w.includes('按需注入') && w.includes('不会进提示词')),
-      '两条警告都说明「按需注入、超出预算的部分不会进提示词」')
+      '警告说明「按需注入、超出预算的部分不会进提示词」')
 
     const onDisk = await store.readCcV3(NAME)
     check(onDisk?.data.character_book?.entries?.[0]?.content.length === 5000,
@@ -1138,14 +1161,7 @@ section('V30 · REST 透出软警告（/character/save 与导入预览都带 war
   process.env['AIWU_STORAGE_ROOT'] = sandbox
   try {
     const store = new Store(sandbox)
-    const routes = buildRoutes(store, {
-      characterName: undefined,
-      snapshot: () => ({ enabled: false }),
-      relationTag: () => '',
-      invalidate: () => {},
-      refresh: async () => {},
-      activate: async () => ({ enabled: false }),
-    })
+    const routes = buildRoutes(store, fakePromptController())
     const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
     const fakeRes = () => {
       const out = { status: 0, body: undefined }
@@ -1222,21 +1238,17 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
 
     const calls = []
     let activeName = NAME
-    const fakePrompt = {
-      get characterName() { return activeName },
-      snapshot: () => ({ enabled: activeName !== undefined, character: activeName }),
-      relationTag: () => '',
-      invalidate: () => {},
-      refresh: async () => {},
-      async setMode(mode) {
-        calls.push(['global', mode])
-        return { enabled: activeName !== undefined, character: activeName, mode }
-      },
-      async applyInteractionMode(mode) {
-        calls.push(['session', mode])
-        const session = activeName === undefined ? undefined : await store.setMode(activeName, mode)
-        return { active: { enabled: true, character: activeName, mode }, session }
-      },
+    const fakePrompt = fakePromptController()
+    Object.defineProperty(fakePrompt, 'characterName', { get: () => activeName, configurable: true })
+    fakePrompt.snapshot = () => ({ enabled: activeName !== undefined, character: activeName })
+    fakePrompt.setMode = async (mode) => {
+      calls.push(['global', mode])
+      return { enabled: activeName !== undefined, character: activeName, mode }
+    }
+    fakePrompt.applyInteractionMode = async (mode) => {
+      calls.push(['session', mode])
+      const session = activeName === undefined ? undefined : await store.setMode(activeName, mode)
+      return { active: { enabled: true, character: activeName, mode }, session }
     }
     const routes = buildRoutes(store, fakePrompt)
     const routeOf = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
@@ -1451,6 +1463,103 @@ section('V32 · 真酒馆卡：常驻独立预算 / key 展开宏 / position 归
     check(preview.lore.usedChars === 0 && preview.lore.keywordDropped.length === 0,
       '关键词侧没候选时不报假数据')
     pc.uninstall()
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
+  }
+}
+
+// ================================================================ 正则屏蔽 V33
+
+section('V33 · 正则屏蔽可证明：脚本正文进不了任何提示文本，且对注入零影响')
+{
+  const MARK = 'ZZ9Y8X7W-脚本特征串'
+  const baseData = {
+    name: '正则屏蔽卡',
+    description: '身份：正则屏蔽自检卡',
+    first_mes: '（她抬眼看了你一下）嗯。',
+    extensions: { aiwu: { schema: 1, basic: { identity: '正则屏蔽身份', background: '正则屏蔽背景' } } },
+  }
+  const withScripts = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+      ...baseData,
+      // ST 的两种落点都要覆盖：顶层 + extensions
+      regex_scripts: [{ scriptName: 'top', findRegex: `/${MARK}-find/`, replaceString: `${MARK}-replace` }],
+      extensions: {
+        ...baseData.extensions,
+        regex_scripts: [{ scriptName: 'ext', findRegex: `/${MARK}-find2/g`, replaceString: `${MARK}-replace2` }],
+      },
+    },
+  })
+  const withoutScripts = normalizeCard({ spec: 'chara_card_v3', spec_version: '3.0', data: baseData })
+
+  // 1) 字段保留（不删用户资产）
+  check(Array.isArray(withScripts.data.regex_scripts) && withScripts.data.regex_scripts.length === 1,
+    'data.regex_scripts 原样保留')
+  check(Array.isArray(withScripts.data.extensions?.regex_scripts)
+    && withScripts.data.extensions.regex_scripts.length === 1, 'data.extensions.regex_scripts 原样保留')
+
+  // 2) 提示词产物里不出现脚本正文（L1 静态块 / 完整 L1）
+  const staticWith = renderL1Static(withScripts)
+  const l1With = renderL1(withScripts)
+  check(!staticWith.includes(MARK) && !l1With.includes(MARK), 'L1 静态块与完整 L1 里都没有脚本正文')
+  check(!staticWith.includes('findRegex') && !l1With.includes('findRegex'), '连 findRegex 这个键名都不进提示词')
+
+  // 3) 去掉脚本后 L1 **逐字相同**（证明脚本对注入零影响）
+  check(renderL1Static(withScripts) === renderL1Static(withoutScripts), '有无脚本：L1 静态块逐字相同')
+  check(renderL1(withScripts) === renderL1(withoutScripts), '有无脚本：完整 L1 逐字相同')
+
+  // 4) 口径常量（日志/面板/导入警告都引用它，防文案漂移）
+  check(typeof ST_SCRIPT_STANCE === 'string' && ST_SCRIPT_STANCE.includes('不执行酒馆正则脚本'),
+    `ST_SCRIPT_STANCE 口径：${ST_SCRIPT_STANCE}`)
+  check(ST_SCRIPT_STANCE.includes('提示词侧') && ST_SCRIPT_STANCE.includes('显示侧'),
+    '口径同时写明提示词侧与显示侧都不执行')
+
+  // 5) 真实渲染路径（preview）里也没有；且与无脚本版本逐段相同
+  const { Store } = await import(lib('store.js'))
+  const { PromptController } = await import(lib('prompt.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v33-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const store = new Store(sandbox)
+    const makeHost = () => {
+      const sections = new Map()
+      return {
+        sections,
+        sys: { section: (input) => { sections.set(input.name, input); return () => sections.delete(input.name) } },
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+      }
+    }
+    const previewOf = async (name, card) => {
+      await store.saveCard({ name, ccv3: card })
+      const host = makeHost()
+      const pc = new PromptController(store, host)
+      await pc.activate(name)
+      pc.install()
+      await pc.refresh()
+      const snap = pc.preview()
+      pc.uninstall()
+      return snap
+    }
+    // 同一张卡名，先带脚本、再改成不带脚本：这样 L1 里的「身份」标题不会成为差异源
+    const pvWith = await previewOf('正则屏蔽卡', withScripts)
+    const allText = pvWith.segments.map(s => s.text).join('\n')
+    check(!allText.includes(MARK), 'preview 五段里都没有脚本正文')
+    check(!pvWith.segments[0].text.includes(MARK) && !pvWith.segments[1].text.includes(MARK),
+      'preview 的 L0 / 纪律包段也没有脚本正文（不可能被拼进去）')
+
+    // 导出/落盘路径：卡里的脚本字段原样在盘上，且不被拼进任何提示文本
+    const onDisk = JSON.parse(await readFile(join(sandbox, 'characters', '正则屏蔽卡', 'card.json'), 'utf8'))
+    check(Array.isArray(onDisk.data?.regex_scripts) && onDisk.data.regex_scripts.length === 1,
+      '落盘的 CCv3 里 regex_scripts 原样保留（导出到 ST 不会缺东西）')
+    check(JSON.stringify(onDisk.data.regex_scripts).includes(MARK), '盘上保留的是原始脚本正文（我们只是不渲染它）')
+    check(!allText.includes(onDisk.data.regex_scripts[0].replaceString), '预览文本里没有 replaceString')
+
+    const pvPlain = await previewOf('正则屏蔽卡', withoutScripts)
+    check(pvWith.segments[2].text === pvPlain.segments[2].text,
+      `preview L1 段：有无脚本逐字相同（${pvWith.segments[2].chars} / ${pvPlain.segments[2].chars} 字）`)
   } finally {
     await rm(sandbox, { recursive: true, force: true })
     process.env['AIWU_STORAGE_ROOT'] = ''

@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
+import { countRegexScripts } from './api'
 import type { Card } from './api'
 import { ccv3Data } from './card-source'
 import { GROUPS, filledCount, isEmptyValue, isDirty, mergeCard, toDraft } from './card-schema'
@@ -409,6 +410,7 @@ export function CardEditor(props: {
           dirty={loreDirty}
           supported={loreSupported}
           dropped={droppedLore}
+          regexScripts={countRegexScripts(ccv3)}
           onChangeBook={patch => setLore(current => ({ ...current, book: { ...current.book, ...patch } }))}
           onChangeEntries={next => setLore(current => ({ ...current, entries: next }))}
           onFocusLayerChange={setLoreFocus}

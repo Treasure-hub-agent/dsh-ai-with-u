@@ -365,6 +365,66 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
   check(beforeIo.activeBytes === afterIo.activeBytes, '_active.json 字节未变（只读）')
   check(beforeIo.sessionBytes === afterIo.sessionBytes, 'session.json 字节未变（只读）')
 
+  // ---------------------------------------------------------------- 会话绑定（A 方案：提示词级真隔离）
+  // 一个段全局注册一次，但每个 assembly 都带自己的 agent ⇒ 会话 B 拿 B 的人设、全局拿 A 的。
+  const presetNames = (await readdir(join(root, 'presets'), { withFileTypes: true }))
+    .filter(e => e.isDirectory()).map(e => e.name)
+  const boundName = presetNames.find(n => n !== ACTIVE_NAME)
+  if (boundName === undefined) {
+    fail('预置卡不足两张，无法验证会话隔离')
+  } else {
+    const SESSION_B = 'session-b'
+    const bindRes = fakeRes()
+    await routeOf('/bind').handler(fakeReq('POST', { name: boundName, sessionId: SESSION_B }), bindRes)
+    check(bindRes.out.status === 200 && bindRes.out.body?.bound === true && bindRes.out.body?.character === boundName,
+      `POST /bind ${boundName} → ${bindRes.out.status}`)
+
+    const layerText = (id, ctx) => {
+      const section = sp.layers.get(id)
+      if (section === undefined) return ''
+      return typeof section.text === 'function' ? section.text(ctx) : String(section.text)
+    }
+    const ctxB = { agent: { id: SESSION_B, session: { id: SESSION_B } }, scope: { id: SESSION_B } }
+    const ctxUnbound = { agent: { id: 'session-x', session: { id: 'session-x' } } }
+
+    // 第一次取段文本时该会话可能还没缓存 → 走占位（占位里也必须是**绑定角色**，不能是全局角色）
+    const firstB = layerText('aiwu:active-character', ctxB)
+    check(firstB.includes(boundName), '会话 B 的段标题是绑定角色（不是全局角色）')
+    check(!firstB.includes(ACTIVE_NAME), '会话 B 的段里没有全局角色名（未污染）')
+    check(layerText('aiwu:active-character', {}).includes(ACTIVE_NAME), '无 agent（diagnostics 场景）退回全局启用')
+    check(layerText('aiwu:active-character', ctxUnbound).includes(ACTIVE_NAME), '未绑定的会话跟全局走')
+
+    // 等这次 assembly 触发的按会话刷新落地，再确认渲染的是真实 L1（不是占位）
+    await new Promise(r => setTimeout(r, 500))
+    const realB = layerText('aiwu:active-character', ctxB)
+    check(realB.includes('你现在的身份') && realB.includes(boundName),
+      '刷新后会话 B 拿到真实的 L1（按会话缓存生效）')
+    check(realB !== layerText('aiwu:active-character', {}), '同一时刻两个会话的 L1 文本不同 = 提示词级隔离')
+
+    // preview 也能按会话看到「这个会话注入了什么」
+    const pvB = fakeRes()
+    await routeOf('/preview').handler({ ...fakeReq('GET'), url: `/?sessionId=${SESSION_B}` }, pvB)
+    check(pvB.out.body?.sessionId === SESSION_B && pvB.out.body?.source === 'session',
+      `GET /preview?sessionId= → ${String(pvB.out.body?.sessionId)} / ${String(pvB.out.body?.source)}`)
+    check(pvB.out.body?.active?.character === boundName,
+      `preview(sessionId) 报的角色是绑定角色（${String(pvB.out.body?.active?.character)}）`)
+
+    // 全局切换不影响已有绑定
+    const resSwitch = fakeRes()
+    await routeOf('/activate').handler(fakeReq('POST', { name: ACTIVE_NAME }), resSwitch)
+    const pvB2 = fakeRes()
+    await routeOf('/preview').handler({ ...fakeReq('GET'), url: `/?sessionId=${SESSION_B}` }, pvB2)
+    check(pvB2.out.body?.active?.character === boundName, '全局重新启用后，会话 B 的绑定不受影响')
+
+    // 解除绑定 → 回落到全局
+    const unbindRes = fakeRes()
+    await routeOf('/unbind').handler(fakeReq('POST', { sessionId: SESSION_B }), unbindRes)
+    check(unbindRes.out.status === 200 && unbindRes.out.body?.bound === false,
+      `POST /unbind → ${unbindRes.out.status}`)
+    await new Promise(r => setTimeout(r, 200))
+    check(layerText('aiwu:active-character', ctxB).includes(ACTIVE_NAME), '解除绑定后该会话回落到全局角色')
+  }
+
   const resOff = fakeRes()
   await routeOf('/deactivate').handler(fakeReq('POST'), resOff)
   check(resOff.out.status === 200, `POST /deactivate → ${resOff.out.status}`)

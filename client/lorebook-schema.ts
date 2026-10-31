@@ -81,7 +81,6 @@ export type LoreIssueCode =
   | 'no-keys'            // error：非常驻且没关键词，永远命不中
   | 'empty-content'      // error：内容为空，注入了也白搭
   | 'too-many-entries'   // warn：条数超建议线（不报错，指去被裁清单）
-  | 'book-too-large'     // warn：总字数超建议线（不报错，按需注入）
   | 'long-entries'       // info：偏长条目**聚合**一条（默认不逐条）
   | 'shared-keys'        // info：共享关键词**聚合**一条
   | 'content-too-long'   // info：单条 >3000 字的**逐条例外**（命中即挤掉别人）
@@ -115,11 +114,14 @@ export const LORE_BUDGET = {
  * - `hardContentChars`：**逐条报**的例外线 = 关键词预算的一半。超过它的条目命中一次
  *   就会挤掉别人的额度，这是真需要动作的（拆条），所以单独列出来。
  *   注意：这两个数字各有分工，别把例外线调回 800。
+ * - `entries`：条数参考线（`too-many-entries` 用）。
+ *
+ * ⚠️ 原 `totalChars`（全书字数上限）已删除：主人 2026-11-01 明确要求去掉「字数超出」提醒，
+ * 世界书按需注入，只有命中的条目才占本轮预算，总字数本身不是问题。
  */
 export const LORE_LIMITS = {
   contentChars: 800,
   hardContentChars: Math.round(LORE_BUDGET.chars / 2),
-  totalChars: 20_000,
   entries: 30,
 } as const
 
@@ -492,14 +494,11 @@ export function loreIssues(entries: LoreEntryDraft[]): LoreIssue[] {
     issues.push({ entryId: '', code: 'shared-keys', level: 'info', count: sharedCount, detail: String(sharedMax) })
   }
 
-  const totalChars = entries.reduce((sum, entry) => sum + countChars(entry.content), 0)
-  // warn：这两条不是"知道就好"，而是**内容真的会进不去提示词**（超条数/超总量会被预算裁掉）。
-  // 判据与「任何因预算而消失的内容都必须能被看见」一致：会丢内容的给 warn，只是体量偏大的给 info。
+  // warn：**条数**超建议线 —— 真的会让内容进不去提示词（超条数会被预算裁掉）。
+  // ⚠️ 2026-11-01 主人明确要求：**字数**超限这条提醒不要了（按需注入，字数本身不是问题）。
+  // 所以这里只留条数，`book-too-large` 整个删掉（含 code / 文案）。
   if (entries.length > LORE_LIMITS.entries) {
     issues.push({ entryId: '', code: 'too-many-entries', level: 'warn', detail: String(entries.length) })
-  }
-  if (totalChars > LORE_LIMITS.totalChars) {
-    issues.push({ entryId: '', code: 'book-too-large', level: 'warn', detail: String(totalChars) })
   }
 
   return issues

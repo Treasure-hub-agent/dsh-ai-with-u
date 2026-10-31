@@ -16,7 +16,7 @@
  * @module dsh-ai-with-u/import-card
  */
 import { inflateRawSync, inflateSync } from 'node:zlib'
-import { type CharacterBook, countDepthEntries } from './tavern.js'
+import { type CharacterBook, ST_SCRIPT_STANCE, countDepthEntries } from './tavern.js'
 
 // ---------------------------------------------------------------- 类型
 
@@ -464,9 +464,9 @@ function toCardV3(value: unknown, format: CardFormat, warnings: string[]): Chara
   }
   const scriptCount = scriptCountOf(topLevelScripts) + scriptCountOf(extensionScripts)
   if (scriptCount > 0) {
+    // 口径是 `tavern.ST_SCRIPT_STANCE`（单一真源），这里只补「几条 + 显示层为什么不行」
     warnings.push(
-      `本插件不执行酒馆正则脚本（${scriptCount} 条）：提示词侧与显示侧都不执行；`
-      + '显示层 DSH 没有扩展点，详见 README 兼容矩阵',
+      `${ST_SCRIPT_STANCE}（${scriptCount} 条）：显示层 DSH 没有扩展点，字段已原样保留，详见 README 兼容矩阵`,
     )
   }
 

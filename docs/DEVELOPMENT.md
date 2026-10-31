@@ -370,7 +370,7 @@ dsh-ai-with-u/
 │   ├── prompt.ts         # L0/L1 分层注入、时间差档位
 │   ├── store.ts          # 存储层（卡/日记/会话/索引）
 │   ├── tools.ts          # 8 个 awu_* 工具
-│   └── web.ts            # 24 条 REST 路由
+│   └── web.ts            # 26 条 REST 路由
 ├── client/               # 浏览器侧（React）
 │   ├── entry.tsx         # 插件入口（inject/apply/slot 注册）
 │   ├── index.tsx         # 面板主体
@@ -480,10 +480,10 @@ dsh-ai-with-u/
 | `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（24 条，`/_dsh/ai-with-u/`）
+### REST 接口（26 条，`/_dsh/ai-with-u/`）
 
 `overview` `preview` `characters` `character` `character/save` `character/import` `character/delete`
-`activate` `deactivate` `mode` `discipline` `relation` `relation/set`
+`activate` `deactivate` `bind` `unbind` `mode` `discipline` `relation` `relation/set`
 `opening/next` `opening/state` `diary/save` `diary/edit` `forget`
 `session/reset` `session/commit` `distill/flow` `distill/arm` `distill/disarm` `distill/state`
 
@@ -502,7 +502,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 840 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 914 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -519,7 +519,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **840 项**（截至真酒馆卡适配轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **914 项**（截至绑定轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -692,7 +692,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
 | `awu_diary_write` 支持 `topic` / `mood`（同事务写 session） | `src/tools.ts`、`src/store.ts` | 盘活 L1 的两个死字段 |
 | 面板「导入角色卡」（PNG / CHARX / JSON，预览不落盘、同名二次确认）+ 编辑器第 11 分区「世界书」 | `client/index.tsx`、`client/card-editor.tsx`、`client/lorebook-editor.tsx`（新）、`client/text.ts` | 后端 `POST /character/import` 与世界书数据层都在，界面零入口 = 白做 |
 | 清死路由 `ROUTES.distillParse` / `parseDistillCard` | `client/api.ts` | 宿主从没注册这条路由，留着就是永远抛 `ApiUnavailableError` |
-| 新增 `scripts/verify-wiring.mjs`（接线体检，17 组断言：8 组接线 + 6 组验收回归 + 3 组预览轮，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
+| 新增 `scripts/verify-wiring.mjs`（接线体检，23 组断言：8 组接线 + 6 组验收回归 + 3 组预览轮 + 3 组酒馆卡适配 + 2 组绑定轮，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
 
 ### 为什么要一个「接线体检」脚本
 
@@ -704,7 +704,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
    **全项目零引用**，世界书改不了。
 
 这两种状态下 `tsc`、esbuild、七套自检（当时还没有 `verify-wiring`）**全是绿的**——因为类型检查只问「类型对不对」，不问「有没有人调用」。
-`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 17 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
+`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 23 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
 纪律包名字 order 长度 / `awu_mode` 与 `awu_relation.set` / `SessionState` 新字段 / 世界书改动是否随 `ccv3` 发出去 /
 **产物里的纪律包文本与源码逐字一致**）。
 拿不准的用 `[skip]`，不误报——红点必须都是真问题，否则没人看。
@@ -1231,4 +1231,87 @@ README 的矩阵里，「支持」全部对应**代码里真的生效**；下面
 
 1. 用这张真卡做一次真实对话：面板体检显示「提醒 2 · 提示 2」是否符合预期（提示默认折叠，不该再刷屏）。
 2. 世界书诊断区显示「本轮注入 N 条 / 常驻 6 条 9577 字」是否与对话实际一致。
-3. **三档的定级判据（Lead 已定，别再摇摆）**：`error` = 这条设定**永远不会生效**（非常驻且无关键词、内容为空）；`warn` = 这条设定**会因为预算/条数而进不去**（`too-many-entries`、`book-too-large`）；`info` = 会影响手感但不会失效（`content-too-long`、`duplicate-keys`）。判据一句话：**会不会真的丢内容**——会丢的给 warn，不会丢的给 info。
+3. **三档的定级判据（Lead 已定，别再摇摆）**：`error` = 这条设定**永远不会生效**（非常驻且无关键词、内容为空）；`warn` = 这条设定**会因为预算/条数而进不去**（`too-many-entries`）；`info` = 会影响手感但不会失效（`long-entries` / `shared-keys` / 单条超 3000 字的例外）。判据一句话：**会不会真的丢内容**——会丢的给 warn，不会丢的给 info。**字数本身不是问题**（按需注入），所以 `book-too-large` 已整条删除，不要在别的档里复活它。
+
+---
+
+## 十四、2026-11-01 · 绑定轮（会话作用域 / 正则屏蔽可证明 / 字数提醒删除）
+
+本轮三件事：① 删掉世界书「字数超出」提醒（主人明确要求）② 正则屏蔽做到**可证明** ③ 角色绑定——「当前会话启用」与「全局启用」两种作用域并存。最值钱的是第三件里查到的技术事实。
+
+### 核心事实：`PromptSection` 没有 `scope`，但 `text(context)` 有 `agent`
+
+查证 `@deepseek-ai/dsh-system-prompt` 的真实签名后确认：
+
+1. `PromptSection` 的字段只有 **`name` / `order` / `text` / `interpolate` / `complete`**——**没有 `scope`**。
+2. `scope` 是**注册处上下文的属性**（`ctx.systemPrompt.section()` 挂在哪个 scope 下），同名 scoped 段会 shadow 全局段。
+3. 但每段的 `text` 是**函数**，签名拿到 `AssembleContext`，其中 `agent?: Agent`（diagnostics 场景没有 agent）。
+   运行时 `assembleContextFor(agent) = { agent, scope: agent, signal }`——**`scope` 就是 Agent 本体**。
+
+⟹ **结论：一个全局注册的段就能按会话渲染不同角色，不必自建 scope 域。**
+自建 scope 的代价是生命周期：agent 重建时要跟着建/删，很容易泄漏或拿到过期引用；而「全局注册 + 从 context 取 agent」没有任何生命周期负担——段永远是那五个，只是每次组装时读到的 agent 不同。
+
+这也是为什么缓存必须跟着会话走：`Map<sessionId | ''>`，容量上限 `SESSION_CACHE_LIMIT = 32`，**LRU 淘汰**。一次组装里 `text()` 会被调五次，所以渲染路径**零读盘**——绑定表用内存镜像（`_sessions.json` 只在 `restore` / `reloadBindings` 时灌进来）。
+
+### 决议优先级与「出错方向必须安全」
+
+```
+会话绑定 > 全局启用 > 未启用
+```
+
+`resolveTarget(sessionId)` 是唯一决议口（纯内存），返回 `{ character?, source: 'session' | 'global' | 'none', dead? }`。
+
+**关键的失败方向**：绑定的卡被删掉时，`refreshCache` 会清掉绑定、把该会话记进 `deadSlots`，`resolveTarget` 直接返回 `source: 'none'`——**不回落全局**。
+理由：回落到全局意味着用户以为在跟 A 聊、实际是 B 在回话。**这种静默串台比「报错/未启用」难查一个数量级**，所以宁可让用户明确看到「本会话没有启用角色」，也不要替他猜。
+
+**工具层同样按会话决议**：9 个 `awu_*` 全部走 `characterForSession(sessionIdOf(exec))`，`requireActive` 不再读 `prompt.characterName`（那是全局值）。
+漏改任何一个，就会出现「提示词是 A、日记写进 B」——**一半隔离比完全不隔离更危险**，因为它看起来像偶发的记忆错乱。
+
+**子代理固定用全局角色**：子代理有自己的 agent/sessionId，查不到绑定，自然退回全局。这是**设计选择**而不是隔离漏洞——继承父绑定会让人设意外漏进工具链深处。
+
+### 正则屏蔽：从「口头上没执行」到「可证明」
+
+口径写进代码常量，避免日志/面板/导入警告三处文案各说一套：
+
+```ts
+export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示词侧与显示侧都不执行'
+```
+
+`verify-tavern.mjs` 的 V33 用**特征串**证明屏蔽（不是靠人读代码）：
+
+1. 造一张带 `regex_scripts` 的卡，`findRegex` / `replaceString` 里塞一个独特标记串（顶层与 `extensions` 两个位置都放）；
+2. 跑 `renderL1Static` / `renderL1` / `preview()`，产物里**搜不到该标记**，连 `findRegex` 这个键名都不出现；
+3. 同一张卡**去掉脚本**后，L1 与 preview 的文本**逐字相同**（证明零影响）；
+4. 字段**原样保留**（不删用户资产）；
+5. `ST_SCRIPT_STANCE` 本身被断言含「不执行 + 提示词侧 + 显示侧」。
+
+这就是「屏蔽」的定义：**进不了提示词 + 对注入零影响 + 数据还在**。三条缺一条都不算证明。
+
+### 删掉「字数超出」提醒
+
+`book-too-large` 从 code / 文案 / 体检规则里整条删除（`too-many-entries` 保留且只看**条数**）。
+判据还是那条：**世界书按需注入，总量大只是命中变少，不是错误**。一条只会让人去删内容的提醒，删掉比留着诚实。
+
+### 本轮的三条可复用判据
+
+1. **决议优先级要能被断言，且「出错方向必须安全」**：优先级写在一处、被断言覆盖；失效路径（绑卡被删）必须指向**更保守**的状态（未启用），而不是更方便的状态（回落全局）。
+2. **任何「按会话」的状态都要有上限与失效策略**：`Map` + LRU（32）+ 明确淘汰；绑定表用内存镜像，渲染路径零读盘（否则每次组装读五次盘）。
+3. **本地隔离的不变量要同时覆盖三层**：提示词（段渲染）、工具（写日记/查关系）、存储（`session.json`/日记按决议角色落盘）。只改一层的「隔离」是假隔离，而且比不隔离更难排查。
+
+### 集成验收记录（L1，九套全量）
+
+`npm run build` 一次过，**914 项通过 / 0 失败**：`bundle 9 + wiring 63 + verify 15 + tavern 303 + distill 121 + import 58 + session 251 + host 94`。
+`verify-wiring` 23 组 / 63 项全绿；新增两组：
+
+- `[22]` 角色绑定：`/bind` + `/unbind` 路由 → `resolveTarget` 同时含 session/global 来源 → **绑卡被删返回 `source:'none'`（不回落）** → 按会话缓存有上限（实测 32）→ 工具层用 `characterForSession` 且代码里不再出现 `prompt.characterName`
+- `[23]` 正则屏蔽与去字数提醒：`ST_SCRIPT_STANCE` 文案含「不执行 + 显示侧」→ 自检里三条证明齐（口径常量 / 逐字相同 / 字段保留）→ `'book-too-large'` 字面量已消失 → 面板有「已屏蔽」中性文案（`regex.blocked`）
+
+> 我又被「更好的实现」判红一次：`[21]` 要求导入警告里**字面写**「不执行 + 正则 + 显示侧」，而实现改成了插值 `${ST_SCRIPT_STANCE}`（单一真源，更好）。判据已放宽为「直接写 或 引用常量且常量本身达标」。
+> 这已经是第三次同类教训（`[19]` key 展开、`[20]` order-collision 注释、`[21]` 常量插值）：**断言要跟着「行为」判，不能跟着「我预期的那行代码」判**。每次上游换了更干净的写法，我的判据就先红一遍——这提醒我：断言写得太具体，本质上是在给实现定形状，而形状不该由测试来定。
+
+### 仍需真机复看
+
+1. 两个会话同时开、各绑不同角色：提示词/工具/日记是否都按各自会话走（这是 A 方案的唯一终检，静态断言只能证明接线）。
+2. 删掉被绑定的卡：该会话应显示「未启用」而**不是**自动变成全局角色。
+3. 全局启用切到另一张卡：已绑定会话不受影响。
+4. 面板在拿不到 `sessionId` 时「当前会话启用」置灰且给说明（不该能点、也不该写进一个假 id）。

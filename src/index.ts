@@ -260,7 +260,8 @@ export function apply(context: Context): () => void {
     }
     let toolDisposers: Array<() => void> = []
     const sync = (): void => {
-      const should = pc.characterName !== undefined
+      // 工具该不该挂：**全局启用** 或 **至少有一个会话绑定**（会话绑定下也要能记日记/查关系）
+      const should = pc.characterName !== undefined || Object.keys(pc.bindingSnapshot()).length > 0
       if (should && toolDisposers.length === 0) {
         toolDisposers = createTools(store, pc).map(t => tools.register(t))
         log.info(`已挂载 ${toolDisposers.length} 个 awu_* 工具`)
@@ -309,17 +310,26 @@ export function apply(context: Context): () => void {
   }
 
   // ---------------------------------------------------------------- 5. 会话写入钩子
+  /** 从 agent 上取会话 id（`agent.session.id` 优先，退 `agent.id`）——会话绑定的唯一键。 */
+  const sessionIdOfAgent = (agent: AgentLike | undefined): string | undefined => {
+    const fromSession = agent?.session?.id
+    if (typeof fromSession === 'string' && fromSession.trim() !== '') return fromSession.trim()
+    const fromAgent = agent?.id
+    return typeof fromAgent === 'string' && fromAgent.trim() !== '' ? fromAgent.trim() : undefined
+  }
+
   /**
    * 一轮对话结束 → 写 session.json。
    *
-   * 只在启用角色时写；写失败**只记日志不抛**（原 skill run_config §三：文件不可写
-   * 时降级为纯上下文，对话不中断，下轮重试）。turnId 用 `agentId:turn` 去重，
-   * 同一轮重复触发只写一次。
+   * 按**该会话的决议角色**写（会话绑定 > 全局启用 > 未启用）：会话绑了 A、全局启用 B 时，
+   * 这个会话的轮次必须落在 A 的 session.json 上，否则两个角色的记忆会互相串。
+   * 写失败**只记日志不抛**（原 skill run_config §三），turnId 用 `agentId:turn` 去重。
    */
   const commitTurnFromAgent = async (agent: AgentLike | undefined, turn: number | undefined): Promise<void> => {
     const pc = prompt
     if (pc === undefined) return
-    const character = pc.characterName
+    const sessionId = sessionIdOfAgent(agent)
+    const character = pc.characterForSession(sessionId)
     if (character === undefined) return
     const session = agent?.session
     const texts = extractTurnTexts(session)
@@ -332,12 +342,12 @@ export function apply(context: Context): () => void {
         turnId,
         // 统一口径：session.mode 优先于 _active.mode（见 store.resolveInteractionMode）。
         // 直接写 snapshot().mode 会用全局兜底值覆盖用户在会话里切过的模式。
-        mode: await pc.resolvedMode(),
+        mode: await pc.resolvedMode(sessionId),
         // topic / mood 由 awu_diary_write 在同一次写盘事务里维护（不在这里编造）
       })
       if (result.written) {
-        log.info(`会话已写盘：${character} 第 ${String(result.session?.turn_count ?? 0)} 轮`)
-        await pc.refresh(log)
+        log.info(`会话已写盘：${character}（会话 ${sessionId ?? '全局'}）第 ${String(result.session?.turn_count ?? 0)} 轮`)
+        await pc.refresh(log, sessionId === undefined ? undefined : { sessionId })
       }
     } catch (error) {
       log.error('写 session.json 失败（本轮降级为纯上下文，下轮重试）：%s',
@@ -346,17 +356,19 @@ export function apply(context: Context): () => void {
   }
 
   /**
-   * 每轮开始时刷新缓存：既保证时间差读到磁盘上最新的 last_ts，
+   * 每轮开始时刷新缓存（**只刷这个会话的槽位**）：既保证时间差读到磁盘上最新的 last_ts，
    * 也把「最近几条对话原文」交给世界书做关键词匹配（`session.recent` 摘要会被截断，原文更准）。
    */
   const refreshBeforeStep = async (agent: AgentLike | undefined, turn: number | undefined): Promise<void> => {
     const pc = prompt
-    if (pc === undefined || pc.characterName === undefined) return
+    if (pc === undefined) return
     try {
+      const sessionId = sessionIdOfAgent(agent)
+      if (pc.characterForSession(sessionId) === undefined) return
       const session = agent?.session
       const recentTexts = extractRecentTexts(session)
       const turnKey = `${String(agent?.id ?? session?.id ?? 'agent')}:${String(turn ?? '?')}`
-      await pc.refresh(log, { recentTexts, turnKey })
+      await pc.refresh(log, { recentTexts, turnKey, ...(sessionId === undefined ? {} : { sessionId }) })
     } catch (error) {
       log.error('轮前刷新提示词缓存失败：%s', error instanceof Error ? error.message : String(error))
     }

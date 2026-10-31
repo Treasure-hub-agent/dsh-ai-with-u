@@ -2,12 +2,12 @@
 
 **给 DeepSeek Harness 的角色扮演插件。** 蒸馏任意ip角色卡并让你的大肥鱼成为TA，选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
 
-![version](https://img.shields.io/badge/version-0.3.0-d97706)
+![version](https://img.shields.io/badge/version-0.4.0-d97706)
 ![npm](https://img.shields.io/npm/v/dsh-ai-with-u?color=cb3837&logo=npm)
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-840%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-914%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -123,7 +123,17 @@ flowchart LR
 
 「世界书太大」不再拦导入，只给警告：世界书是**按需注入**的（12 条 / 6000 字预算），超大书不会把提示词撑爆，只是超出预算的条目进不去当轮上下文。真正没有预算、直进提示词的那五个原生字段（描述 / 性格 / 场景 / 系统提示 / 历史后指令）仍然有硬上限。
 
-角色卡编辑器是 10 组 34 字段，第 11 个分区是**世界书**：条目名、关键词 / 副关键词（逗号分隔）、内容长文本（可全屏写）、常驻、优先级、插入顺序、逐条启用与上移下移。高级项里有位置（角色设定前 / 后）、大小写敏感、`selective`、正则。顶部体检标红五种情况：没有关键词、`selective` 缺副关键词、内容为空或超长（单条 800 字）、关键词重复、插入顺序撞车；整本还有条数 30 / 总字数 20000 的预算提醒。体检只提示，不拦保存。
+角色卡编辑器是 10 组 34 字段，第 11 个分区是**世界书**：条目名、关键词 / 副关键词（逗号分隔）、内容长文本（可全屏写）、常驻、优先级、插入顺序、逐条启用与上移下移。高级项里有位置（角色设定前 / 后）、大小写敏感、`selective`、正则。
+
+顶部体检按**三档**给结论，「必须处理」的只有两种真正会失效的情况：
+
+| 档 | 报什么 |
+|---|---|
+| **必须处理（error）** | 非常驻且没有关键词（永远命不中）、内容为空（注入了等于没注入） |
+| **建议看（warn）** | 条数超过建议线（30 条）——不会报错，超出预算的条目这一轮不进提示词，去「被裁条目」看清单 |
+| **知道就好（info）** | 偏长条目**聚合一条**（默认不逐条；单条超 3000 字才会单独点名，因为命中一次就挤掉别人）、共享关键词**聚合一条** |
+
+**字数不是问题**：世界书按需注入，总量再大也只是命中变少，所以「总字数超出」这条提醒已整条删掉（v0.3 之前会报，纯噪音）。体检只提示，不拦保存。
 
 编辑器里「声线基因」是灵魂字段：说话节奏、自称、口头禅、禁忌词、小动作。这些决定「听起来像不像他」，所以给了金色描边和独立徽记。
 
@@ -201,6 +211,38 @@ New-Item -ItemType Junction `
 
 开箱自带三张范例卡（丰川祥子 / 阿米娅 / 昔涟，都由插件自己的蒸馏流程产出）。首次启用时幂等种入：`characters/` 已存在就跳过，不会复活你删掉的卡。
 
+### 角色启用：两种作用域
+
+「启用」有两种，互不覆盖：
+
+| 作用域 | 管谁 | 动作 |
+|---|---|---|
+| **全局启用** | 所有**没绑定**的会话（以及子代理） | `POST /activate` |
+| **当前会话启用** | 只绑这一个会话 | `POST /bind {name, sessionId}` |
+
+**决议优先级（写死、可被断言）**：
+
+```
+会话绑定 > 全局启用 > 未启用
+```
+
+举例：全局启用阿米娅、当前会话绑定丰川祥子 → 这个会话是祥子，其它会话是阿米娅。
+全局切换不会动任何已有绑定；取消绑定后该会话自动回落到全局。
+
+**两条硬边界**（不是限制，是防串台）：
+
+1. **绑定的卡被删掉 → 该会话视为「未启用」，绝不回落到全局**。
+   否则你会以为在跟祥子聊、其实在跟阿米娅聊——这种「静默串台」比报错难查得多。重新绑定会自动解除这个状态。
+2. **子代理固定用全局角色，不继承父会话的绑定**。
+   子代理有自己的 agent/session 查不到绑定，于是自然走全局。这是设计选择：让子代理继承会让人设意外泄漏到工具链深处。
+
+**面板怎么显示两态**：详情页把「启用」拆成两枚动作——「当前会话启用」和「全局启用」，状态条分行显示
+「当前会话：X（已绑定）」与「全局：Y」。点两者都会就地提示影响范围（「只影响当前会话」/「所有未绑定会话」）。
+拿不到会话标识时（面板不知道自己在哪个会话）「当前会话启用」会置灰并说明原因，**不会瞎猜一个 id 写进去**。
+
+> 提示词级的隔离是真的：宿主每段提示词都能拿到当前 Agent，所以同一个插件可以按会话渲染不同角色。
+> 技术细节（`PromptSection` 没有 `scope`、但 `text(context)` 里有 `agent`）写在 `docs/DEVELOPMENT.md` §十四。
+
 ### 兼容旧卡与酒馆卡
 
 - **旧 34 字段卡**：直接放进 `characters/<名>/card.json`，读时自动归一成 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`
@@ -227,15 +269,16 @@ New-Item -ItemType Junction `
 | `probability` | ✅ 支持 | **顶层 `probability` 优先**，没有再读 `extensions.probability`（两种写法都有卡在用）；稳定哈希，同一轮结果固定，不会每轮抖动 |
 | `scan_depth` / `token_budget` | ✅ 支持 | 前者默认扫最近 4 条（近似 D0..Dn 槽），后者按 1 token ≈ 1.5 字换算成字符预算 |
 | `recursive_scanning` | ❌ 不支持 | 字段认了但不执行：递归激活会放大预算与耗时，第一版明确不做 |
-| `regex_scripts`（正则脚本） | ❌ **不执行**（字段 **保留**） | 提示词侧与显示侧都不做，`data.regex_scripts` 与 `data.extensions.regex_scripts` **两个位置都保留、不删**：ST 卡是用户资产，删了将来导出/回灌酒馆会缺东西。导入预览会出一条告警：「本插件不执行酒馆正则脚本（N 条）：提示词侧与显示侧都不执行」。原因见 `docs/DEVELOPMENT.md` §十三 |
+| `regex_scripts`（正则脚本） | 🛡 **屏蔽**（不执行 · 不注入 · 不影响对话，字段保留） | `data.regex_scripts` 与 `data.extensions.regex_scripts` 两个位置**都保留不删**（ST 卡是用户资产，删了将来导出/回灌会缺）；同时**可证明屏蔽**：脚本正文不会出现在 L1 或注入预览里，去掉脚本后提示词逐字相同。导入预览给中性提示「本卡含 N 条酒馆正则脚本，已屏蔽」。口径常量 `ST_SCRIPT_STANCE`，详见 `docs/DEVELOPMENT.md` §十三 / §十四 |
 | `depth_prompt` | ❌ 不支持（**字段保留**） | `extensions.depth_prompt` 随卡保留、写入不丢，但不读、不注入；非空时导入会明确告警「深度提示暂不支持，字段已保留」。需要的话把内容放进世界书常驻条目 |
 | `assets`（立绘） | ❌ 不支持 | 导入时剥离并告警：本轮不做立绘落地，卡片其余内容不受影响 |
 | `@@activate` / `@@dont_activate` 装饰器 | ✅ 支持 | 影响该条目是否参与激活 |
 | `@@depth` / `@@position` / `@@role` / `@@probability` / `@@cooldown` 装饰器 | ⚠️ 认识但不生效 | 已知装饰器会从正文剥掉（绝不注入正文），但不改变注入行为；未知 `@@xxx` 整行丢弃 |
 | `extensions.match_whole_words` | ✅ 支持 | 打开后按整词匹配（汉字里不误命中子串） |
 
-> 三条最容易踩的：**① `regex_scripts` 不是「支持但没用到」，是不执行**（DSH 侧没有可插入的渲染点）；
-> **② `position` 数字值会退化**成 `after_char`；**③ 世界书再大也不会整本注入**，这是设计而非缺陷。
+> 三条最容易踩的：**① `regex_scripts` 不是「支持但没用到」，是屏蔽**（DSH 侧没有可插入的渲染点，所以不执行、不注入，但字段保留）；
+> **② 深度注入（`@D` / `position: 4`）不支持，但内容不丢**——按普通设定注入，只在位置上让步；
+> **③ 世界书再大也不会整本注入**，这是设计而非缺陷。
 
 ### 文件拖放归谁管
 
@@ -314,14 +357,18 @@ AIWU_TRUSTED_HOSTS=my.tunnel.example
 
 另有一个**条件挂载**的 `awu_card_save`：只在点「蒸馏角色卡」后的两小时内、且保存一次后自动失效。平时模型拿不到写卡能力。
 
-### REST 接口（24 条，`/_dsh/ai-with-u/`）
+### REST 接口（26 条，`/_dsh/ai-with-u/`）
 
 ```
 overview  preview  characters  character  character/save  character/import  character/delete
-activate  deactivate  mode  discipline  relation  relation/set  opening/next  opening/state
-diary/save  diary/edit  forget  session/reset  session/commit
+activate  deactivate  bind  unbind  mode  discipline  relation  relation/set
+opening/next  opening/state  diary/save  diary/edit  forget  session/reset  session/commit
 distill/flow  distill/arm  distill/disarm  distill/state
 ```
+
+`/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
+
+`/bind` 与 `/unbind` 就是「当前会话启用」：`POST /bind {name, sessionId}` / `POST /unbind {sessionId}`，返回 `{ ok, bound, character }`。`POST /activate` 仍然是**全局启用**语义（向后兼容）。`GET /overview?sessionId=…` 会带上 `sessionId`、`binding`（本会话绑了谁）与 `bindings` 摘要，面板据此判断「当前会话启用」能不能点。
 
 `/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
@@ -347,21 +394,21 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 840 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 914 项）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：21 组契约（54 项；后端做了前端没接 / 验收项回归）
-npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容（289 项）
+npm run verify:wiring    # 接线体检：23 组契约（63 项；后端做了前端没接 / 验收项回归）
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容（303 项）
 npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
 npm run verify:import    # PNG / CHARX / JSON 导入解析 / 字段保真（58 项）
-npm run verify:session   # 会话、指令、纪律包、关系与预览只读（212 项）
-npm run verify:host      # 真实 cordis 宿主装配（82 项）
+npm run verify:session   # 会话、指令、纪律包、关系、绑定与预览只读（251 项）
+npm run verify:host      # 真实 cordis 宿主装配（94 项）
 npm run typecheck:client # 只查浏览器侧类型
 ```
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 840 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 54 + verify 15 + tavern 289 + distill 121 + import 58 + session 212 + host 82`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的 914 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 63 + verify 15 + tavern 303 + distill 121 + import 58 + session 251 + host 94`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 
@@ -449,6 +496,39 @@ desktop profile 由 Electron 独占管理，CLI 会直接报 `managed exclusivel
 **你的卡不会因此丢东西**：`regex_scripts` **原样保留**在卡里（`data.regex_scripts` 与 `data.extensions.regex_scripts` 两个位置都不动），只是不被执行。导入预览会给一条告警说清这一条——留着字段是为了你将来导出/回灌酒馆时不缺东西，「以为它在工作」则用告警解决，而不是删数据。
 
 如果你依赖的是提示词侧的正则效果，请把规则改写进角色卡的 `system_prompt` 或世界书条目——那是我们能保证生效的地方。详见 `docs/DEVELOPMENT.md` §十三。
+
+</details>
+
+<details>
+<summary>「当前会话启用」和「全局启用」有什么区别？</summary>
+
+两个作用域，互不覆盖：
+
+- **全局启用**：所有**没绑定**的会话都用它（还有子代理）。切换全局不影响任何已绑定会话。
+- **当前会话启用**：只绑你点的这一个会话，别处照旧。
+
+决议顺序写死：**会话绑定 > 全局启用 > 未启用**。所以「全局阿米娅 + 本会话祥子」= 这个会话是祥子、其余是阿米娅。
+
+两条边界值得记住：
+
+1. **绑的卡被删掉，那个会话就当作未启用，不会偷偷回落到全局**——否则你会以为在跟祥子聊、其实对面是阿米娅。重新绑定即可恢复。
+2. **子代理固定用全局角色，不继承父会话绑定**：子代理有自己的身份查不到绑定，于是走全局。这是有意为之，防止人设意外漏进工具链。
+
+面板上两态分行显示（「当前会话：X（已绑定）」/「全局：Y」），点哪个都会就地提示影响范围。如果面板拿不到会话标识，「当前会话启用」会置灰——它不会瞎猜一个 id 写进去。
+
+</details>
+
+<details>
+<summary>面板说卡里有 N 条正则脚本、已屏蔽，会有什么影响？</summary>
+
+**没有任何影响，而且这是可以验证的**：
+
+- 脚本**不会被执行**（提示词侧与显示侧都不做）；
+- 脚本正文**进不了提示词**：自检里拿一个特征串做标记，跑完整 L1 与「注入预览」，产物里搜不到它；
+- 对注入**零影响**：同一张卡去掉 `regex_scripts` 后，L1 与预览的文本**逐字相同**；
+- 字段**原样保留**：你将来把卡导出回酒馆，脚本还在。
+
+换句话说，看到的角色表现与「这张卡本来就没有正则脚本」完全一致。如果卡的表现依赖这些脚本（比如靠正则把某些词换成斜体、或替换成别的台词），那部分效果不会出现——想保留效果就把它改写成角色卡的人设描述，显示层的正则美化需要装 muv 系引擎（本插件不做第二套渲染器，原因见 `docs/DEVELOPMENT.md` §十三）。
 
 </details>
 

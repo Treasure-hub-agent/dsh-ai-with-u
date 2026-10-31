@@ -50,6 +50,15 @@ export type { RelationBand }
 
 export const INDEX_FILE = '_index.json'
 export const ACTIVE_FILE = '_active.json'
+/**
+ * 会话绑定表（`{ [sessionId]: { character, boundAt } }`）。
+ *
+ * 「当前会话启用」写在这里，与全局启用（`_active.json`）互不影响；
+ * 决议优先级：**会话绑定 > 全局启用 > 未启用**（见 `prompt.PromptController` 的解析方法）。
+ */
+export const SESSIONS_FILE = '_sessions.json'
+/** 单个会话 id 的长度上限（它只是 JSON 的键，但要挡住异常长的垃圾输入）。 */
+export const SESSION_ID_MAX_CHARS = 200
 export const CHARACTERS_DIR = 'characters'
 /** 旧格式卡的原件备份（首次迁移写一次，回滚用）。 */
 export const BACKUP_FILE = 'card.v1.bak.json'
@@ -73,6 +82,25 @@ export interface RelationLogItem {
   from: string
   to: string
   why?: string
+}
+
+/** 一条会话绑定：这个会话用哪张卡（与全局启用无关）。 */
+export interface SessionBinding {
+  character: string
+  /** 绑定时刻（本地时区 ISO，带偏移）。 */
+  boundAt: string
+}
+
+export type SessionBindings = Record<string, SessionBinding>
+
+/** 会话 id 规范化：只做「非空 + 长度」校验（它是 JSON 键，不落文件系统路径）。 */
+export function normalizeSessionId(sessionId: string): string {
+  const trimmed = String(sessionId ?? '').trim()
+  if (trimmed === '') throw new Error('缺少 sessionId（会话绑定必须指名是哪个会话）')
+  if ([...trimmed].length > SESSION_ID_MAX_CHARS) {
+    throw new Error(`sessionId 太长（上限 ${SESSION_ID_MAX_CHARS} 字符）`)
+  }
+  return trimmed
 }
 
 /**
@@ -1345,6 +1373,101 @@ export class Store {
     if (hasSession) return { state: 'history', opening, openings }
     if (hasDiary) return { state: 'fresh-reset', opening, openings }
     return { state: 'none', opening, openings }
+  }
+
+  // ---------------------------------------------------------------- 会话绑定
+
+  /** 读绑定表；文件不存在 / 损坏都当空表（损坏会被 `readJson` 改名留痕，不会静默吞掉卡）。 */
+  async readBindings(): Promise<SessionBindings> {
+    const raw = await readJson<SessionBindings>(join(this.root, SESSIONS_FILE))
+    if (!isRecord(raw)) return {}
+    const out: SessionBindings = {}
+    for (const [sessionId, value] of Object.entries(raw)) {
+      if (!isRecord(value)) continue
+      const character = typeof value['character'] === 'string' ? value['character'].trim() : ''
+      if (character === '') continue
+      const boundAt = typeof value['boundAt'] === 'string' ? value['boundAt'].trim() : ''
+      out[sessionId] = { character, boundAt: boundAt === '' ? localIsoTimestamp() : boundAt }
+    }
+    return out
+  }
+
+  /** 写绑定表（**调用方必须已持 `#sessions` 锁**）。 */
+  private async writeBindingsUnlocked(bindings: SessionBindings): Promise<void> {
+    await atomicWrite(join(this.root, SESSIONS_FILE), `${JSON.stringify(bindings, null, 2)}\n`)
+  }
+
+  /**
+   * 绑定一个会话到某张卡（「当前会话启用」）。
+   *
+   * 卡不存在直接拒（绑到不存在的卡 = 那个会话之后会静默未启用，用户看不懂）；
+   * 写盘走 `#sessions` 键的跨进程锁——桌面 + web profile 共用数据根时，
+   * 绑定表与 `_index.json` 同级对待，不共用锁就会互相丢更新。
+   */
+  async bindSession(sessionId: string, character: string): Promise<SessionBinding> {
+    const sid = normalizeSessionId(sessionId)
+    const name = normalizeName(character)
+    if ((await this.readCcV3(name)) === undefined) throw new Error(`找不到角色卡：${name}`)
+    return this.locked('#sessions', async () => {
+      const bindings = await this.readBindings()
+      const binding: SessionBinding = { character: name, boundAt: localIsoTimestamp() }
+      bindings[sid] = binding
+      await this.writeBindingsUnlocked(bindings)
+      return binding
+    })
+  }
+
+  /** 解除一个会话的绑定；返回该会话原先绑的是谁（没绑过返回 undefined）。 */
+  async unbindSession(sessionId: string): Promise<SessionBinding | undefined> {
+    const sid = normalizeSessionId(sessionId)
+    return this.locked('#sessions', async () => {
+      const bindings = await this.readBindings()
+      const previous = bindings[sid]
+      if (previous === undefined) return undefined
+      delete bindings[sid]
+      await this.writeBindingsUnlocked(bindings)
+      return previous
+    })
+  }
+
+  /**
+   * 清理指向「已删除角色卡」的绑定，返回被清掉的 sessionId。
+   *
+   * 为什么必须清：绑定指向不存在的卡时，那个会话应当**明确未启用**（并且我们连同绑定一起清掉），
+   * 而不是静默回落到全局角色——否则用户以为在跟 A 聊，其实在跟 B 聊。
+   */
+  async pruneBindings(): Promise<string[]> {
+    return this.locked('#sessions', async () => {
+      const bindings = await this.readBindings()
+      const pruned: string[] = []
+      for (const [sessionId, binding] of Object.entries(bindings)) {
+        let alive = false
+        try {
+          alive = (await this.readCcV3(binding.character)) !== undefined
+        } catch {
+          // 卡名本身就是脏的（手改过 `_sessions.json`）：按"卡不在"处理
+          alive = false
+        }
+        if (!alive) { pruned.push(sessionId); delete bindings[sessionId] }
+      }
+      if (pruned.length > 0) await this.writeBindingsUnlocked(bindings)
+      return pruned
+    })
+  }
+
+  /** 删卡时连带清掉指向它的绑定（返回被清掉的 sessionId 列表）。 */
+  async pruneBindingsOf(character: string): Promise<string[]> {
+    const name = normalizeName(character)
+    return this.locked('#sessions', async () => {
+      const bindings = await this.readBindings()
+      const pruned = Object.entries(bindings)
+        .filter(([, binding]) => binding.character === name)
+        .map(([sessionId]) => sessionId)
+      if (pruned.length === 0) return pruned
+      for (const sessionId of pruned) delete bindings[sessionId]
+      await this.writeBindingsUnlocked(bindings)
+      return pruned
+    })
   }
 
   // ---------------------------------------------------------------- 插拔状态

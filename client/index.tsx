@@ -22,6 +22,8 @@ import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 
 import {
   activateCharacter,
+  bindCharacter,
+  countRegexScripts,
   deactivateCharacter,
   deleteCharacter,
   errorText,
@@ -39,6 +41,7 @@ import {
   resetSession,
   fetchRelation,
   nextOpening,
+  unbindCharacter,
   IMPORT_LIMITS,
 } from './api'
 import { CardEditor } from './card-editor'
@@ -141,6 +144,31 @@ const MODE_OPTIONS: Array<{ value: InteractionMode; labelKey: string; hintKey: s
  * 判据是 `structureChanged` / `loreChanged` 两个布尔——它们是编辑器算出来的**链路指示**，
  * 面板据此知道该发 `card`、发 `ccv3`，还是两步都发（见 `onSaveCard`）。
  */
+/**
+ * 读 `/overview.bindings`（`sessionId → 角色名`）。
+ *
+ * 容错到底：宿主可能给 `Record<string,string>`、也可能给 `{sessionId,name}[]`；
+ * 认不出来就返回空表 —— 空表等于「不知道」，界面据此只显示全局，绝不瞎猜。
+ */
+function readBindings(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item !== 'object' || item === null) continue
+      const row = item as { sessionId?: unknown; name?: unknown; character?: unknown }
+      const key = typeof row.sessionId === 'string' ? row.sessionId : ''
+      const name = typeof row.name === 'string' ? row.name : typeof row.character === 'string' ? row.character : ''
+      if (key !== '' && name !== '') out[key] = name
+    }
+    return out
+  }
+  if (typeof value !== 'object' || value === null) return out
+  for (const [key, name] of Object.entries(value as Record<string, unknown>)) {
+    if (key !== '' && typeof name === 'string' && name !== '') out[key] = name
+  }
+  return out
+}
+
 function isSavePayload(value: unknown): value is CardSavePayload {
   if (typeof value !== 'object' || value === null) return false
   const payload = value as { view?: unknown; structureChanged?: unknown; loreChanged?: unknown }
@@ -994,6 +1022,14 @@ function ImportDialog(props: {
                   </div>
                 )}
 
+                {/* 正则脚本：中性信息（不是警告）——卡里带了 N 条，已屏蔽，不执行也不进提示词 */}
+                {countRegexScripts(parsed.ccv3) > 0 && (
+                  <div className="awu-noteRow" role="status">
+                    <span className="awu-noteDot" aria-hidden="true" />
+                    <span>{t('regex.blocked', { n: countRegexScripts(parsed.ccv3) })}</span>
+                  </div>
+                )}
+
                 <div className="awu-importWarnHead">
                   {parsed.warnings.length === 0
                     ? t('import.noWarnings')
@@ -1309,17 +1345,30 @@ function CharacterDetailView(props: {
   loading: boolean
   error: string
   relation: RelationState | undefined
+  /** 全局启用的就是这张卡 */
   live: boolean
+  /** 这张卡已绑定到**当前会话** */
+  boundHere: boolean
+  /** 当前会话 id；空串 = 宿主没给，无法绑定 */
+  sessionId: string
   busy: boolean
   t: Translate
   onBack: () => void
   onRetry: () => void
+  /** 把这张卡绑定到当前会话 */
+  onBindSession: () => void
+  /** 解除本会话绑定 */
+  onUnbindSession: () => void
+  /** 全局启用 / 退出全局（同一个按钮的两态） */
   onActivate: () => void
   onDeactivate: () => void
   onDelete: () => void
   onEdit: () => void
 }): JSX.Element {
-  const { detail, loading, error, relation, live, busy, t, onBack, onRetry, onActivate, onDeactivate, onDelete, onEdit } = props
+  const {
+    detail, loading, error, relation, live, boundHere, sessionId, busy, t,
+    onBack, onRetry, onBindSession, onUnbindSession, onActivate, onDeactivate, onDelete, onEdit,
+  } = props
 
   if (loading) return <Skeleton label={t('common.loading')} />
 
@@ -1421,15 +1470,37 @@ function CharacterDetailView(props: {
             <IconQuill size={12} />
             {t('detail.edit')}
           </button>
+          {/*
+            双态动作组：本会话绑定 / 全局启用，**互不覆盖**两条通道。
+            - 当前会话启用：只影响这个会话（拿不到 sessionId 时禁用，不瞎编 id）
+            - 全局启用：所有未绑定会话都用它；已绑定会话不变
+          */}
+          <button
+            type="button"
+            className="awu-btn"
+            data-size="md"
+            data-kind={boundHere ? undefined : 'primary'}
+            onClick={onBindSession}
+            disabled={busy || sessionId === '' || boundHere}
+          >
+            <IconPower size={12} />
+            {t('detail.bindSession')}
+          </button>
+          {boundHere && (
+            <button type="button" className="awu-btn" data-size="md" onClick={onUnbindSession} disabled={busy}>
+              <IconEject size={12} />
+              {t('detail.bindSessionOff')}
+            </button>
+          )}
           {live ? (
             <button type="button" className="awu-btn" data-size="md" onClick={onDeactivate} disabled={busy}>
               <IconEject size={12} />
-              {t('detail.deactivate')}
+              {t('detail.globalOff')}
             </button>
           ) : (
-            <button type="button" className="awu-btn" data-size="md" data-kind="primary" onClick={onActivate} disabled={busy}>
+            <button type="button" className="awu-btn" data-size="md" onClick={onActivate} disabled={busy}>
               <IconPower size={12} />
-              {t('detail.activate')}
+              {t('detail.globalOn')}
             </button>
           )}
           <button type="button" className="awu-btn" data-size="md" data-kind="danger" onClick={onDelete} disabled={busy}>
@@ -1438,6 +1509,32 @@ function CharacterDetailView(props: {
           </button>
         </div>
       </div>
+
+      {/*
+        边界说明**可见**（不塞 tooltip）：两种启用各自影响谁、以及子代理不吃会话绑定。
+        这是主人明确要求的「边界清晰」，也是以后不被当成 bug 报上来的依据。
+      */}
+      <div className="awu-bindHints">
+        <div className="awu-bindHint">
+          <b>{t('detail.bindSession')}</b>
+          <span>{sessionId === '' ? t('bind.noSession') : t('bind.hint.session')}</span>
+        </div>
+        <div className="awu-bindHint">
+          <b>{t('detail.globalOn')}</b>
+          <span>{t('bind.hint.global')}</span>
+        </div>
+        <div className="awu-bindHint" data-muted="true">
+          <span>{t('bind.hint.subagent')}</span>
+        </div>
+      </div>
+
+      {/* 正则脚本：中性信息（不是警告）——本卡带了 N 条，已屏蔽 */}
+      {countRegexScripts(detail.ccv3) > 0 && (
+        <div className="awu-noteRow" role="status">
+          <span className="awu-noteDot" aria-hidden="true" />
+          <span>{t('regex.blocked', { n: countRegexScripts(detail.ccv3) })}</span>
+        </div>
+      )}
 
       {basic.length > 0 && (
         <Section title={t('detail.card')}>
@@ -1678,6 +1775,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const [modePref, setModePref] = useState<InteractionMode | undefined>(undefined)
 
+  /**
+   * 会话级绑定。
+   *
+   * - `sessionId`：宿主 `/overview.sessionId`（当前这个会话的 id）。**拿不到就是空串**，
+   *   面板据此禁用「当前会话启用」——绝不在客户端编一个 id 写进绑定表。
+   * - `bindings`：`sessionId → 角色名`，只影响列出的会话；没列出的继续用全局。
+   */
+  const [sessionId, setSessionId] = useState('')
+  const [bindings, setBindings] = useState<Record<string, string>>({})
+
   const [detailName, setDetailName] = useState('')
   const [detail, setDetail] = useState<CharacterDetail | undefined>(undefined)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -1785,6 +1892,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       if (ov !== undefined) {
         setOverview(ov)
         setActive(ov.active ?? { enabled: false })
+        // 会话绑定：老宿主没有这两个字段 → 空串 / 空表（界面自动退化成只用全局）
+        setSessionId(typeof ov.sessionId === 'string' ? ov.sessionId : '')
+        setBindings(readBindings(ov.bindings))
       }
       setError('')
     } catch (e) {
@@ -1868,6 +1978,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       if (ov !== undefined) {
         setOverview(ov)
         setActive(ov.active ?? { enabled: false })
+        setSessionId(typeof ov.sessionId === 'string' ? ov.sessionId : '')
+        setBindings(readBindings(ov.bindings))
       }
     } catch (error) {
       console.warn('[ai-with-u] 面板静默刷新失败（下轮重试）：', error)
@@ -1986,15 +2098,41 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [open, dialog, editing, editorDirty])
 
   // -------------------------------------------------------- 动作
+  //
+  // 启用有两条互不覆盖的通道：
+  //  - **本会话绑定**（`/bind`）：只影响当前 sessionId 这个会话，其它会话照旧用全局；
+  //  - **全局启用**（`/activate`）：所有**未绑定**会话都用它，已绑定的会话不受影响。
+  // 两条都可以同时存在（同一张卡也可以同时是两者），所以界面上是两个独立入口。
+
+  /** 绑定到当前会话。拿不到 sessionId 时只给一句提示，绝不编一个 id 写进去。 */
+  const onBindSession = (name: string): void => {
+    if (sessionId === '') { showNotice(t('bind.noSession'), 'warn'); return }
+    void run(() => bindCharacter(name, sessionId))
+      .then(ok => { if (ok) showNotice(t('bind.done.session', { name }), 'ok') })
+  }
+  /** 解除本会话绑定（这个会话回到全局角色）。 */
+  const onUnbindSession = (): void => {
+    if (sessionId === '') return
+    void run(() => unbindCharacter(sessionId))
+      .then(ok => { if (ok) showNotice(t('bind.done.unbind'), 'ok') })
+  }
+  /** 全局启用：所有未绑定会话都会切到它。 */
   const onActivate = (name: string): void => {
     // 没有启用角色时点过模式胶囊 → 这次启用后立刻把偏好补写到该角色的会话上
     const pref = modePref
     void run(async () => {
       await activateCharacter(name)
       if (pref !== undefined) await setInteractionMode(pref, name)
-    }).then(ok => { if (ok && pref !== undefined) setModePref(undefined) })
+    }).then(ok => {
+      if (!ok) return
+      if (pref !== undefined) setModePref(undefined)
+      showNotice(t('bind.done.global', { name }), 'ok')
+    })
   }
-  const onDeactivate = (): void => { void run(() => deactivateCharacter()) }
+  /** 退出全局（本会话若已绑定，仍继续用绑定的角色）。 */
+  const onDeactivate = (): void => {
+    void run(() => deactivateCharacter()).then(ok => { if (ok) showNotice(t('bind.done.exitGlobal'), 'ok') })
+  }
   const onDeleteConfirmed = (withMemory: boolean): void => {
     const target = deleteTarget
     setDialog('')
@@ -2200,8 +2338,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     [list, active],
   )
   const stats = useMemo(() => statTriple(overview, list), [overview, list])
+  /** 全局启用（`_active`）的角色：所有**未绑定**会话都用它 */
   const live = active.enabled && active.character !== undefined
   const liveName = active.character ?? ''
+  const globalName = live ? liveName : ''
+
 
   // 启用中的角色变了就重拉一次关系档案（放在 liveName 之后，避免 TDZ）
   useEffect(() => {
@@ -2217,6 +2358,28 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const currentDetail = detailName !== '' && detailName === detail?.name ? detail : undefined
   // 日记页用的是 viewName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
   const diaryDetail = diaryTarget !== '' && detail !== undefined && detail.name === diaryTarget ? detail : undefined
+  /**
+   * 本会话绑定的角色（`bindings[sessionId]`）。
+   *
+   * 宿主没给 bindings 时退一步读 `GET /character` 的容错字段（只对「当前打开的那张卡」有效）：
+   * 这样做的好处是「绑定刚被别处改过、overview 还没刷新」时详情页也不会闪成未绑定。
+   */
+  const boundName = sessionId !== ''
+    ? (bindings[sessionId] ?? (currentDetail?.boundHere === true && currentDetail.name !== '' ? currentDetail.name : ''))
+    : ''
+  /** 本会话实际生效的角色：绑定优先，其次全局 */
+  const sessionName = boundName !== '' ? boundName : globalName
+  const sessionBound = boundName !== ''
+  /** 同一张卡既绑了本会话又是全局角色：只显示一次，标「本会话 / 全局」 */
+  const bothSame = boundName !== '' && boundName === globalName
+
+  /** 详情页这张卡是否已绑定在本会话（优先 bindings，其次 GET /character 的容错字段） */
+  const isBoundHere = (name: string): boolean => {
+    if (name === '' || sessionId === '') return false
+    if (bindings[sessionId] !== undefined) return bindings[sessionId] === name
+    return currentDetail?.name === name
+      && (currentDetail?.boundHere === true || currentDetail?.boundSessionId === sessionId)
+  }
 
   /**
    * 日记页的关系条：**看谁的日记就显示谁的关系**。
@@ -2281,9 +2444,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     ? (active.mode ?? 'text+action')
     : (modePref ?? 'text+action')
 
+  // 侧栏徽记显示**本会话**实际生效的角色（绑定优先，其次全局）
   const badgeName = (() => {
     if (busy) return t('badge.busy')
-    if (live) return liveName
+    if (sessionName !== '') return sessionName
     return t('badge.none')
   })()
 
@@ -2342,7 +2506,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         ref={buttonRef}
         type="button"
         className="awu-trigger"
-        data-live={live ? 'true' : 'false'}
+        data-live={sessionName !== '' ? 'true' : 'false'}
         data-open={open ? 'true' : 'false'}
         title={wide ? t('badge.title') : `${t('badge.title')} · ${badgeName}`}
         aria-label={wide ? t('badge.open') : `${t('badge.open')} · ${badgeName}`}
@@ -2355,7 +2519,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         }}
       >
         <span className="awu-mark" aria-hidden="true">
-          {live ? initialOf(liveName) : <IconMask size={14} />}
+          {sessionName !== '' ? initialOf(sessionName) : <IconMask size={14} />}
         </span>
         {/*
           窄轨态只渲染圆徽：文字节点**根本不进 DOM**。
@@ -2368,7 +2532,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             <span className="awu-triggerName" title={badgeName}>{badgeName}</span>
           </span>
         )}
-        {wide && <Dot on={live} />}
+        {wide && <Dot on={sessionName !== ''} />}
       </button>
 
       {open && typeof document !== 'undefined' && createPortal(
@@ -2460,18 +2624,32 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             </div>
           </div>
 
-          {/* 启用中的角色 */}
-          {live ? (
+          {/*
+            本会话正在用谁。
+            **两种状态同时表达**：本会话（绑定 / 沿用全局）+ 全局（谁 / 未启用）。
+            同一张卡两者都命中时只显示一次角色名，并标「本会话 / 全局」（bothSame）。
+          */}
+          {sessionName !== '' ? (
             <div className="awu-status awu-sigil" data-status="live">
-              <Avatar name={liveName} live />
+              <Avatar name={sessionName} live />
               <div className="awu-sigilBody">
-                <div className="awu-sigilName">{liveName}</div>
+                <div className="awu-sigilName">
+                  {sessionName}
+                  {bothSame && (
+                    <span className="awu-pill" data-tone="live" style={{ marginLeft: 6 }}>{t('active.both')}</span>
+                  )}
+                </div>
                 <div className="awu-sigilMeta">
-                  {t('active.since')}
-                  {active.activatedAt !== undefined ? ` ${relativeDay(String(active.activatedAt), t)}` : ''}
+                  {t('active.session')}
+                  {sessionBound ? `（${t('active.sessionBound')}）` : `（${t('active.sessionInherit')}）`}
                   {' · '}
                   {active.mode === 'text' ? t('active.mode.text') : t('active.mode.action')}
                 </div>
+                {!bothSame && (
+                  <div className="awu-sigilMeta">
+                    {t('active.global')}：{globalName !== '' ? globalName : t('active.globalNone')}
+                  </div>
+                )}
                 {openingNote !== '' && (
                   <div
                     role="status"
@@ -2503,9 +2681,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 >
                   <IconRefresh size={12} />
                 </button>
-                <button type="button" className="awu-btn" data-size="sm" onClick={onDeactivate} disabled={busy}>
-                  {t('active.exit')}
-                </button>
+                {/* 取消入口按状态给：会话绑定 → 解除本会话绑定；全局 → 退出全局 */}
+                {sessionBound && (
+                  <button type="button" className="awu-btn" data-size="sm" onClick={onUnbindSession} disabled={busy}>
+                    {t('detail.bindSessionOff')}
+                  </button>
+                )}
+                {globalName !== '' && (
+                  <button type="button" className="awu-btn" data-size="sm" onClick={onDeactivate} disabled={busy}>
+                    {t('active.gExit')}
+                  </button>
+                )}
               </div>
             </div>
           ) : (
@@ -2711,10 +2897,14 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     error={detailError}
                     relation={relation}
                     live={live && liveName === detailName}
+                    boundHere={isBoundHere(detailName)}
+                    sessionId={sessionId}
                     busy={busy}
                     t={t}
                     onBack={() => { setDetailName(''); setDetail(undefined); setDetailError('') }}
                     onRetry={() => { void loadDetail(detailName) }}
+                    onBindSession={() => onBindSession(detailName)}
+                    onUnbindSession={onUnbindSession}
                     onActivate={() => onActivate(detailName)}
                     onDeactivate={onDeactivate}
                     onDelete={() => openDelete(detailName)}

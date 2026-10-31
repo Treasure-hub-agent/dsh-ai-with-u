@@ -26,7 +26,7 @@
  *   L2 「长流程」（蒸馏等）不进系统提示词，由工具按需返回。
  * @module dsh-ai-with-u/prompt
  */
-import type { Store, ActiveState, DiaryEntry, SessionState, InteractionMode, RelationBand } from './store.js'
+import type { Store, ActiveState, DiaryEntry, SessionState, InteractionMode, RelationBand, SessionBindings } from './store.js'
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { RELATION_BANDS, intimacyOf, resolveInteractionMode } from './store.js'
 import {
@@ -47,6 +47,14 @@ import {
 
 /** 段落顺序。DSH 的第一方段落在 −1000..10200 之间，外部段落用 5000+ 落在指令区之后。 */
 export const ORDER_BASE = 5000
+
+/**
+ * 每会话 L1 缓存的**上限**（LRU）。
+ *
+ * 会话结束没有可靠事件可依赖，所以不做主动回收，只做「有上限的淘汰 + 访问时按需重建」：
+ * 32 个会话足够覆盖正常使用，再多就是开一百个窗口的极端情况，此时每轮多读一次卡也有代价上限。
+ */
+export const SESSION_CACHE_LIMIT = 32
 
 export const SECTION_BASELINE = 'aiwu:baseline'
 /**
@@ -176,6 +184,10 @@ export interface PreviewSegment {
  */
 export interface PreviewSnapshot {
   active: { enabled: boolean; character?: string }
+  /** 这次预览对应的会话 id（空串 = 全局视角）。 */
+  sessionId: string
+  /** 决议来源：会话绑定 / 全局启用 / 未启用。 */
+  source: 'session' | 'global' | 'none'
   /**
    * 交互模式。取的是 L1 段**实际渲染时用的那个值**（即最近一次 refresh 解析出来的
    * `session.mode` > `_active.mode` > `text+action`），所以预览里的模式段与这个字段永远自洽。
@@ -321,7 +333,52 @@ export interface RefreshContext {
   recentTexts?: string[]
   /** 本轮标识（`agentId:turn`）；用于把缓存和某一轮绑定，防跨轮串味。 */
   turnKey?: string
+  /**
+   * 这次刷新是给哪个会话刷的（`agent.session.id`，退 `agent.id`）。
+   * 不给 = 全局（面板 / 无会话组装）；给了但该会话没绑定 → 仍按全局角色刷（决议优先级）。
+   */
+  sessionId?: string
 }
+
+/**
+ * 一个会话/全局槽位的决议结果。
+ *
+ * 决议优先级（**写死**，改动要同步改自检）：**会话绑定 > 全局启用 > 未启用**。
+ */
+export interface SessionTarget {
+  /** 决议出来的角色；`undefined` = 未启用。 */
+  character?: string
+  /** 缓存槽位的键：绑定会话用自己的 sessionId，全局 / 无会话用 `''`。 */
+  key: string
+  source: 'session' | 'global' | 'none'
+  /** 会话绑了卡但卡已被删：该会话**视为未启用**（绝不回落到全局）。 */
+  dead?: boolean
+}
+
+/**
+ * 从 DSH 的 assembly 上下文里读会话 id（纯防御式，拿不到就返回 undefined）。
+ *
+ * `AssembleContext` 里 `agent`（以及同体的 `scope`）就是 Agent 对象；diagnostics 场景没有 agent，
+ * 这时必须**退回全局**而不是抛错（类型注释原话：「absent on diagnostics」）。
+ */
+export function readSessionId(source: unknown): string | undefined {
+  if (typeof source !== 'object' || source === null) return undefined
+  const record = source as Record<string, unknown>
+  const candidates: unknown[] = [record['agent'], record['scope'], record]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'object' || candidate === null) continue
+    const item = candidate as Record<string, unknown>
+    const session = item['session']
+    if (typeof session === 'object' && session !== null) {
+      const id = (session as Record<string, unknown>)['id']
+      if (typeof id === 'string' && id.trim() !== '') return id.trim()
+    }
+    const id = item['id']
+    if (typeof id === 'string' && id.trim() !== '') return id.trim()
+  }
+  return undefined
+}
+
 
 interface L1Cache {
   character: string
@@ -362,10 +419,20 @@ export class PromptController {
   private state: ActiveState = { enabled: false }
   private dispose?: () => void
   /**
-   * L1 缓存。**永远整体替换、绝不先清空**——
-   * 先清空会让正在进行的组装读到空缓存、整轮丢掉人设（host.md P0-7）。
+   * L1 缓存（**按会话分槽**）。
+   *
+   * 键：绑定会话用自己的 `sessionId`，全局 / 无会话用 `''`。
+   * 每个槽位都是**整体替换、绝不先清空**——先清空会让正在进行的组装读到空缓存、
+   * 整轮丢掉人设（host.md P0-7）。容量上限见 {@link SESSION_CACHE_LIMIT}（LRU 淘汰，
+   * 淘汰后下一次组装按需重建，不影响正确性）。
    */
-  private cache: L1Cache | undefined
+  private readonly caches = new Map<string, L1Cache>()
+  /** 会话绑定表（**内存镜像**：渲染路径只读它，绝不读盘）。 */
+  private bindings: SessionBindings = {}
+  /** 正在排刷新的槽位：同一次组装里五段各调一次，不能排五次 refresh。 */
+  private readonly refreshing = new Set<string>()
+  /** 绑定指向的卡已被删的槽位：渲染直接空串，且**不再刷新**（避免每轮空转）。 */
+  private readonly deadSlots = new Set<string>()
   /** 刷新串行链：每次 refresh 排在上一次后面（host.md P0-6 的修法）。 */
   private chain: Promise<void> = Promise.resolve()
   /** 缓存代际：只有最新一代的刷新结果才允许提交。 */
@@ -383,8 +450,72 @@ export class PromptController {
     return this.state.enabled ? this.state.character : undefined
   }
 
+  // ---------------------------------------------------------------- 会话决议（纯内存）
+
+  /**
+   * 决议一个会话用哪张卡：**会话绑定 > 全局启用 > 未启用**。
+   *
+   * 纯内存（渲染路径会在一次组装里被调五次，绝不能每个段都读一次盘）；
+   * 绑定表由 {@link restore} / {@link reloadBindings} 从 `_sessions.json` 灌进来，
+   * 绑定的卡被删时由 `refreshCache` 把该会话标成 `deadSlots` 并清掉绑定。
+   */
+  resolveTarget(sessionId?: string): SessionTarget {
+    if (sessionId !== undefined) {
+      // 绑定的卡被删过：这个会话**明确未启用**，连全局都不回退
+      // （回退的话用户以为在跟 A 聊、其实在跟 B 聊；重新绑定会自动解除这个状态）
+      if (this.deadSlots.has(sessionId)) return { key: sessionId, source: 'none', dead: true }
+      const bound = this.bindings[sessionId]
+      if (bound !== undefined) {
+        return { character: bound.character, key: sessionId, source: 'session' }
+      }
+    }
+    const globalName = this.characterName
+    if (globalName === undefined) return { key: '', source: 'none' }
+    return { character: globalName, key: '', source: 'global' }
+  }
+
+  /**
+   * 会话决议出的角色（给工具层用）。
+   *
+   * 子代理有自己的 agent/sessionId，查不到绑定 → 这里自然退回全局角色：
+   * **子代理不继承父会话绑定**（已写进文档，不是隔离漏了）。
+   */
+  characterForSession(sessionId?: string): string | undefined {
+    return this.resolveTarget(sessionId).character
+  }
+
+  /** 当前绑定表快照（面板/自检用；不含正文），按 sessionId 排序稳定输出。 */
+  bindingSnapshot(): SessionBindings {
+    const out: SessionBindings = {}
+    for (const sessionId of Object.keys(this.bindings).sort()) {
+      const binding = this.bindings[sessionId]
+      if (binding !== undefined) out[sessionId] = { ...binding }
+    }
+    return out
+  }
+
+  /** 重新从磁盘读绑定表（REST `/bind` `/unbind` 写完后调用）。 */
+  async reloadBindings(): Promise<SessionBindings> {
+    this.bindings = await this.store.readBindings()
+    // 绑定的卡可能刚被删：硬件位标记清掉，交给下一次 refresh 复检
+    for (const sessionId of [...this.deadSlots]) {
+      if (this.bindings[sessionId] !== undefined) this.deadSlots.delete(sessionId)
+    }
+    return this.bindingSnapshot()
+  }
+
   /** 从磁盘恢复上次的启用状态（宿主启动时调用）。 */
   async restore(): Promise<ActiveState> {
+    // 启动先清掉「指向已删卡」的绑定：用户删卡重启后不该留悬空绑定
+    try {
+      const pruned = await this.store.pruneBindings()
+      if (pruned.length > 0) {
+        this.host.logger.warn('启动时清理了 %d 条指向已删卡的会话绑定：%s', pruned.length, pruned.join('、'))
+      }
+    } catch (error) {
+      this.host.logger.warn('清理会话绑定失败（继续启动）：%s', error instanceof Error ? error.message : String(error))
+    }
+    this.bindings = await this.store.readBindings()
     const saved = await this.store.readActive()
     if (saved.enabled && saved.character !== undefined) {
       const card = await this.store.readCcV3(saved.character)
@@ -409,6 +540,11 @@ export class PromptController {
    * `{{var}}` 插值，遇到未知变量直接 `throw new Error('unknown prompt variable ...')`，
    * 而 CCv3 卡里 `{{char}}` / `{{user}}` 是通用写法 —— 不关插值就是「导入即崩」（整轮对话进不去）。
    * 关掉之后由 `tavern.expandMacros` 负责：认识的展开、不认识的**原样保留**、绝不抛错。
+   *
+   * 🔵 **按会话隔离（A 方案）**：段是**全局注册一次**的，但每次都宿主都会把本次 assembly 的
+   * `AssembleContext`（`{ agent, scope: agent, signal? }`）传给 `text(context)`，
+   * 所以我们在这里读 `context.agent` 的 sessionId，按「会话绑定 > 全局启用」渲染对应角色。
+   * 两个会话各自组装各自拿到不同文本 —— 这是提示词级真隔离，不是障眼法。
    */
   install(): void {
     this.dispose?.()
@@ -417,13 +553,13 @@ export class PromptController {
       disposes.push(this.host.sys.section({ name, order, text, interpolate: false }))
     }
     // L0 与角色同进同出：未启用时返回空串，宿主过滤空段 ⇒ 系统提示词里一个字都不留
-    section(SECTION_BASELINE, ORDER_BASE, () => this.renderBaselineSection())
+    section(SECTION_BASELINE, ORDER_BASE, (ctx: unknown) => this.renderBaselineSection(ctx))
     // L0.5 纪律包：order 5050，落在 baseline(5000) 之后、active(5100) 之前
-    section(SECTION_DISCIPLINE, ORDER_BASE + 50, () => this.renderDisciplineSection())
+    section(SECTION_DISCIPLINE, ORDER_BASE + 50, (ctx: unknown) => this.renderDisciplineSection(ctx))
     // 每次组装重新求值：切换角色 / 时间推移都能立刻反映，无需重注册
-    section(SECTION_ACTIVE, ORDER_BASE + 100, () => this.renderActiveSection())
-    section(SECTION_LORE, ORDER_BASE + 5300, () => this.renderLoreSection())
-    section(SECTION_CLOCK, ORDER_BASE + 5350, () => this.renderClockSection())
+    section(SECTION_ACTIVE, ORDER_BASE + 100, (ctx: unknown) => this.renderActiveSection(ctx))
+    section(SECTION_LORE, ORDER_BASE + 5300, (ctx: unknown) => this.renderLoreSection(ctx))
+    section(SECTION_CLOCK, ORDER_BASE + 5350, (ctx: unknown) => this.renderClockSection(ctx))
     this.dispose = () => { for (const d of disposes.reverse()) d() }
   }
 
@@ -433,7 +569,7 @@ export class PromptController {
     this.dispose = undefined
   }
 
-  /** 启用一个角色（全局生效，跨会话保持）。 */
+  /** 启用一个角色（**全局**生效，跨会话保持；会话绑定优先于它）。 */
   async activate(name: string): Promise<ActiveState> {
     const card = await this.store.readCcV3(name)
     if (card === undefined) throw new Error(`找不到角色卡：${name}`)
@@ -451,10 +587,10 @@ export class PromptController {
     return this.snapshot()
   }
 
-  /** 退出：回到干净状态（mode / discipline 这些用户偏好保留）。 */
+  /** 退出：回到干净状态（mode / discipline 这些用户偏好保留；**会话绑定一条都不动**）。 */
   async deactivate(): Promise<ActiveState> {
     this.state = { enabled: false, mode: this.state.mode, discipline: this.state.discipline }
-    this.cache = undefined
+    this.caches.delete('')
     await this.store.writeActive(this.state)
     this.notify()
     return this.snapshot()
@@ -472,11 +608,15 @@ export class PromptController {
    * 切换交互模式（**统一入口**）：`session.json.mode` 是权威，`_active.json.mode` 只是兜底。
    *
    * 两处都写是为了兼容两种读法：面板/overview 读 `_active`，L1 渲染读 session。
+   * `character` 给了就写那张卡的 session（会话绑定的角色），否则写全局启用角色的。
    * 写完立刻 `refresh()`，否则 L1 的「交互模式」段要等下一轮 pre-step 才更新。
    */
-  async applyInteractionMode(mode: InteractionMode): Promise<{ active: ActiveState; session?: SessionState }> {
+  async applyInteractionMode(
+    mode: InteractionMode,
+    character?: string,
+  ): Promise<{ active: ActiveState; session?: SessionState }> {
     const active = await this.setMode(mode)
-    const name = this.characterName
+    const name = character ?? this.characterName
     const session = name === undefined ? undefined : await this.store.setMode(name, mode)
     await this.refresh(undefined, undefined)
     return { active, session }
@@ -499,11 +639,20 @@ export class PromptController {
     return this.snapshot()
   }
 
-  /** 统一的交互模式解析（`session.mode` > `_active.json.mode` > `text+action`），给 /overview 用。 */
-  async resolvedMode(): Promise<InteractionMode> {
-    const name = this.characterName
+  /**
+   * 统一的交互模式解析（`session.mode` > `_active.json.mode` > `text+action`），给 /overview 用。
+   * `sessionId` 给了就按该会话的决议角色读它的 session.json。
+   */
+  async resolvedMode(sessionId?: string): Promise<InteractionMode> {
+    const name = this.characterForSession(sessionId)
     const session = name === undefined ? undefined : await this.store.readSession(name)
     return resolveInteractionMode(session, this.state)
+  }
+
+  /** 某个会话决议角色的 session 快照（工具层/自检用；没有角色时 undefined）。 */
+  async sessionStateFor(sessionId?: string): Promise<SessionState | undefined> {
+    const name = this.characterForSession(sessionId)
+    return name === undefined ? undefined : this.store.readSession(name)
   }
 
   /** 角色卡改动后让缓存失效，下一轮组装即用新内容。 */
@@ -531,6 +680,23 @@ export class PromptController {
     await next
   }
 
+  /** 绑定表变化后让宿主同步一次「工具该不该挂着」（与启停同一套回调）。 */
+  refreshMount(): void { this.notify() }
+
+  /**
+   * 某张卡改动后，刷新所有「正在用它的会话槽位」（含全局槽位）。
+   *
+   * 拆开刷是为了不污染别人：会话 X 绑着 A、会话 Y 绑着 B 时，改 A 不该让 Y 的缓存白读一遍卡。
+   */
+  async refreshCharacter(character: string): Promise<void> {
+    const globalName = this.characterName
+    if (globalName === character) await this.refresh(undefined, undefined)
+    for (const [sessionId, binding] of Object.entries(this.bindings)) {
+      if (binding.character !== character) continue
+      await this.refresh(undefined, { sessionId })
+    }
+  }
+
   /** 启用状态变化监听：index.ts 用它在启用/退出时同步挂载或卸下工具。 */
   onStateChange(listener: (state: ActiveState) => void): void {
     this.listeners.add(listener)
@@ -550,17 +716,40 @@ export class PromptController {
   }
 
   /**
-   * 重新读盘并**整体替换**缓存。
+   * 重新读盘并**整体替换某个槽位的缓存**（槽位 = 某个会话，或全局 `''`）。
    *
-   * 读盘期间旧的 cache 仍然可用（只在末尾一次性赋值），所以不会出现
-   * 「人设段落短暂变空/变成占位文本」的那一轮（host.md P0-7）。
+   * 读盘期间旧缓存仍然可用（末尾一次性替换），所以不会出现「人设段落短暂变空」的那一轮（host.md P0-7）。
+   *
+   * 决议与失效：
+   *   - 会话绑定的卡被删 → **清绑定 + 标记 deadSlots + 日志**，该会话按未启用处理，**不回落到全局**；
+   *   - 没有绑定 / 无会话 → 用全局启用角色；
+   *   - 两处都没有 → 清掉该槽位缓存。
    */
   private async refreshCache(host: RefreshHost | undefined, context: RefreshContext | undefined): Promise<void> {
-    const name = this.characterName
-    if (name === undefined) { this.cache = undefined; return }
+    const sessionId = context?.sessionId
+    const target = this.resolveTarget(sessionId)
+    if (target.character === undefined) {
+      this.caches.delete(target.key)
+      return
+    }
+    const name = target.character
+    const cacheKey = target.key
     const generation = this.generation
     const card = await this.store.readCcV3(name)
-    if (card === undefined) return
+    if (card === undefined) {
+      if (target.source === 'session' && sessionId !== undefined) {
+        // 绑定的卡被删：该会话视为未启用，绝不静默回落到全局（否则用户以为在跟 A 聊，其实在跟 B 聊）
+        this.deadSlots.add(cacheKey)
+        this.caches.delete(cacheKey)
+        delete this.bindings[sessionId]
+        const line = `会话 ${sessionId} 绑定的角色「${name}」已不存在：该会话按未启用处理，并已清理这条绑定`
+        ;(host?.warn ?? host?.info ?? host?.error)?.call(host, line)
+        this.host.logger.warn(line)
+        try { await this.store.unbindSession(sessionId) } catch { /* 清绑定失败不阻断渲染路径 */ }
+      }
+      return
+    }
+    this.deadSlots.delete(cacheKey)
 
     const diary = renderRecentDiary(await this.store.readDiary(name))
     // 时间差以 session.json 的 last_ts 为唯一权威（对齐原项目 session_continuity §三），
@@ -577,9 +766,10 @@ export class PromptController {
     const turnKey = context?.turnKey
     // 防粘 / 防抖：同一轮内多次 pre-step（工具循环）直接复用上一次的命中集合，不重算、不叠加。
     // 跨轮则整批重算——命中集合永远是"本轮最近几条消息"的函数，不会跨轮累积。
-    const reuse = turnKey !== undefined && this.cache?.character === name && this.cache.loreTurnKey === turnKey
-    const lore = reuse && this.cache?.lore !== undefined
-      ? this.cache.lore
+    const previous = this.caches.get(cacheKey)
+    const reuse = turnKey !== undefined && previous?.character === name && previous.loreTurnKey === turnKey
+    const lore = reuse && previous?.lore !== undefined
+      ? previous.lore
       : selectLoreEntries(card.data.character_book, recentTexts, {
         enabled: loreConfig?.enabled !== false,
         scanDepth: typeof loreConfig?.scanDepth === 'number' ? loreConfig.scanDepth : undefined,
@@ -612,7 +802,7 @@ export class PromptController {
       loadedAt: Date.now(),
     }
     // 只有最新一代的刷新才提交（invalidate 之后开工的旧任务直接丢弃）
-    if (generation === this.generation) this.cache = next
+    if (generation === this.generation) this.putCache(cacheKey, next)
     if (!reuse && lore.entries.length > 0) {
       // 只记条数与**条目名**，绝不记正文（正文进日志 = 把卡的内容泄露到可分享的地方）。
       // 被预算裁掉的条目也要点名：真卡里「7 条常驻被裁 2 条」静默发生过，日志是唯一排查线索。
@@ -631,23 +821,61 @@ export class PromptController {
     }
   }
 
-  /** 供宿主侧（web / tools）取当前关系标签，给功能界面用。 */
-  relationTag(): string | undefined { return this.cache?.relationTag }
+  /** 缓存槽位数（自检 / 面板诊断用；正常情况下 ≤ {@link SESSION_CACHE_LIMIT}）。 */
+  get cacheCount(): number { return this.caches.size }
+
+  /** 缓存槽位的键（自检用：看清哪些会话在缓存里）。 */
+  cacheKeys(): string[] { return [...this.caches.keys()] }
+
+  /** 供宿主侧（web / tools）取当前关系标签，给功能界面用（全局槽位）。 */
+  relationTag(): string | undefined { return this.cacheOf('')?.relationTag }
+
+  // ---------------------------------------------------------------- 缓存槽位
+
+  /** 取槽位缓存（LRU：命中后移到队尾，最旧的在头部）。 */
+  private cacheOf(key: string): L1Cache | undefined {
+    const cache = this.caches.get(key)
+    if (cache === undefined) return undefined
+    this.caches.delete(key)
+    this.caches.set(key, cache)
+    return cache
+  }
+
+  /** 写入槽位缓存（LRU 上限 {@link SESSION_CACHE_LIMIT}，超了淘汰最旧的）。 */
+  private putCache(key: string, cache: L1Cache): void {
+    this.caches.delete(key)
+    this.caches.set(key, cache)
+    while (this.caches.size > SESSION_CACHE_LIMIT) {
+      const oldest = this.caches.keys().next().value
+      if (oldest === undefined) break
+      this.caches.delete(oldest)
+    }
+  }
 
   /**
-   * 渲染 L1 段。未启用 → 空串（段消失）；启用 → 酒馆卡 + 世界书 + 时间差 + 会话 + 日记 + 口径。
+   * 排一次该槽位的刷新（**同一次组装里五段都会走到这里，去重**）。
+   *
+   * 只读预览不会走这条路径：`preview()` 绝不因为看一眼就触发 refresh。
+   */
+  private scheduleRefresh(key: string, sessionId: string | undefined): void {
+    if (this.refreshing.has(key)) return
+    this.refreshing.add(key)
+    void this.refresh(undefined, sessionId === undefined ? undefined : { sessionId })
+      .finally(() => { this.refreshing.delete(key) })
+  }
+
+  /**
+   * 渲染 L1 段（按会话决议）。未启用 → 空串；有角色但缓存还没好 → 占位 + 排一次刷新。
    * 异步数据在 refreshCache 里预取，这里保持同步（section text 函数是同步的）。
    */
-  private renderActiveSection(): string {
-    if (!this.state.enabled) return ''
-    const name = this.state.character
-    if (name === undefined) return ''
-    const cache = this.cache
-    // 缓存缺失（启动瞬间 / 刚启用）：给出最小可用内容，避免整段空掉。
-    // 「自愈」只发生在真实组装这条路上——`preview()` 是纯只读，绝不因为看一眼就触发 refresh。
-    if (cache === undefined || cache.character !== name) {
-      void this.refresh(undefined, undefined)
-      return activePlaceholderText(name)
+  private renderActiveSection(ctx?: unknown): string {
+    const sessionId = readSessionId(ctx)
+    const target = this.resolveTarget(sessionId)
+    if (target.character === undefined) return ''
+    const cache = this.cacheOf(target.key)
+    if (cache === undefined || cache.character !== target.character) {
+      this.scheduleRefresh(target.key, sessionId)
+      return activePlaceholderText(target.character)
     }
     return this.renderActiveText(cache)
   }
@@ -687,37 +915,37 @@ export class PromptController {
    *
    * 数据来源与新鲜度：
    *   - L0 / L0.5：现算（纯常量 + 当前档位）；
-   *   - L1：`this.cache`（**最近一次 refresh 的快照**，不是实时重读卡与日记）；
+   *   - L1：对应槽位的缓存（**最近一次 refresh 的快照**，不是实时重读卡与日记）；
    *   - 世界书：`cache.lore.diag`（同样是快照）；
    *   - 时间差：现算（它本来每轮都在变）。
    *
-   * 缓存是**整体替换**的（`refreshCache` 末尾一次性赋值），所以这里读到的要么是上一代、
-   * 要么是新一代，不会读到半截。
+   * `sessionId` 给了就看「那个会话实际会注入什么」（按 会话绑定 > 全局启用 决议）；
+   * 不给 = 全局视角（面板默认）。
    */
-  preview(): PreviewSnapshot {
-    const enabled = this.state.enabled
-    const character = enabled ? this.state.character : undefined
-    const cache = enabled && character !== undefined && this.cache?.character === character
-      ? this.cache
-      : undefined
+  preview(sessionId?: string): PreviewSnapshot {
+    const target = this.resolveTarget(sessionId)
+    const character = target.character
+    const cache = character === undefined ? undefined : this.cacheOf(target.key)
     const segment = (id: string, order: number, label: string, text: string): PreviewSegment =>
       ({ id, order, label, chars: text.length, text })
     const discipline = this.disciplineLevel
 
     const segments: PreviewSegment[] = [
-      segment(SECTION_BASELINE, ORDER_BASE, '角色扮演底线', this.renderBaselineSection()),
-      segment(SECTION_DISCIPLINE, ORDER_BASE + 50, `纪律包（${discipline}）`, this.renderDisciplineSection()),
+      segment(SECTION_BASELINE, ORDER_BASE, '角色扮演底线', this.renderBaselineText(character !== undefined)),
+      segment(SECTION_DISCIPLINE, ORDER_BASE + 50, `纪律包（${discipline}）`, this.renderDisciplineText(character !== undefined)),
       segment(SECTION_ACTIVE, ORDER_BASE + 100, '角色卡 L1',
         character === undefined
           ? ''
           : cache === undefined ? activePlaceholderText(character) : this.renderActiveText(cache)),
-      segment(SECTION_LORE, ORDER_BASE + 5300, '世界书命中', this.renderLoreSection()),
-      segment(SECTION_CLOCK, ORDER_BASE + 5350, '时间差 / 当前时间', this.renderClockSection()),
+      segment(SECTION_LORE, ORDER_BASE + 5300, '世界书命中', this.renderLoreText(cache)),
+      segment(SECTION_CLOCK, ORDER_BASE + 5350, '时间差 / 当前时间', this.renderClockText(cache)),
     ]
 
     const diag = cache?.lore?.diag
     return {
-      active: { enabled, ...(character === undefined ? {} : { character }) },
+      active: { enabled: character !== undefined, ...(character === undefined ? {} : { character }) },
+      sessionId: sessionId ?? '',
+      source: target.source,
       // 与 L1 段实际渲染用的是同一个值：cache.mode 就是 refresh 时 resolveInteractionMode 的结果
       mode: cache?.mode ?? resolveInteractionMode(undefined, this.state),
       discipline,
@@ -748,36 +976,67 @@ export class PromptController {
     }
   }
 
-  /** L0 底线段：启用才注入（同进同出）。 */
-  private renderBaselineSection(): string {
-    return this.state.enabled ? BASELINE_TEXT : ''
+  /**
+   * L0 底线段：该会话/全局有角色才注入（同进同出）。
+   * 段渲染收 assembly 上下文；`preview()` 直接传已决议的「有没有角色」。
+   */
+  private renderBaselineSection(ctx?: unknown): string {
+    return this.renderBaselineText(this.hasCharacter(ctx))
+  }
+
+  private renderBaselineText(hasCharacter: boolean): string {
+    return hasCharacter ? BASELINE_TEXT : ''
   }
 
   /**
-   * L0.5 纪律包段：未启用 / 档位 off → 空串（宿主过滤空段）。
+   * L0.5 纪律包段：没角色 / 档位 off → 空串（宿主过滤空段）。
    * 每次组装现算，切换档位立刻生效（不需要刷新缓存，也不影响 L1 的缓存前缀）。
    */
-  private renderDisciplineSection(): string {
-    if (!this.state.enabled) return ''
+  private renderDisciplineSection(ctx?: unknown): string {
+    return this.renderDisciplineText(this.hasCharacter(ctx))
+  }
+
+  private renderDisciplineText(hasCharacter: boolean): string {
+    if (!hasCharacter) return ''
     const level = this.disciplineLevel
     if (level === 'off') return ''
     return level === 'full' ? DISCIPLINE_FULL_TEXT : DISCIPLINE_TEXT
   }
 
-  /** 世界书命中段（未启用 / 未命中 → 空串，宿主过滤空段）。 */
-  private renderLoreSection(): string {
-    if (!this.state.enabled) return ''
-    const text = this.cache?.lore?.text
-    return text === undefined ? '' : text
+  /** 世界书命中段（没角色 / 未命中 → 空串，宿主过滤空段）。 */
+  private renderLoreSection(ctx?: unknown): string {
+    return this.renderLoreText(this.cacheFrom(ctx))
+  }
+
+  private renderLoreText(cache: L1Cache | undefined): string {
+    return cache?.lore?.text ?? ''
   }
 
   /**
    * 时间差 / 当前时间段（**垫底**）。
    * 每次组装现算（距上次互动随时间推移变化，不能进缓存），放在最后让缓存失效范围最小。
    */
-  private renderClockSection(): string {
-    if (!this.state.enabled) return ''
-    return this.renderTimeSection(this.cache?.lastTs)
+  private renderClockSection(ctx?: unknown): string {
+    return this.renderClockText(this.cacheFrom(ctx))
+  }
+
+  private renderClockText(cache: L1Cache | undefined): string {
+    if (cache === undefined) return ''
+    return this.renderTimeSection(cache.lastTs)
+  }
+
+  /**
+   * 段渲染的解析辅助：真实组装收到 assembly 上下文（按会话决议），
+   * `preview()` 直接传已决议的缓存 / 布尔（预览不触发刷新，也不重读盘）。
+   */
+  private hasCharacter(ctx?: unknown): boolean {
+    return this.resolveTarget(readSessionId(ctx)).character !== undefined
+  }
+
+  private cacheFrom(ctx?: unknown): L1Cache | undefined {
+    const target = this.resolveTarget(readSessionId(ctx))
+    if (target.character === undefined) return undefined
+    return this.cacheOf(target.key)
   }
 
   /** 时间差段（每次组装现算：距上次互动会随时间推移变化，不能进缓存）。 */

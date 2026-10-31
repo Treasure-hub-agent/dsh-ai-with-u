@@ -381,11 +381,28 @@ section('7. 「换一句开场」：openings 轮换')
 
 section('8. 工具与 REST 接口一致暴露')
 {
+  /** 最小 fake：只实现 createTools / buildRoutes 真正会用到的成员（会话决议走全局兜底）。 */
   const fakePrompt = {
     characterName: NAME,
     snapshot: () => ({ enabled: true, character: NAME, mode: 'text+action' }),
     invalidate: () => {},
     refresh: async () => {},
+    // 会话决议（2026-11-01 起工具层一律走它，不再用 characterName）
+    resolveTarget: () => ({ character: NAME, key: '', source: 'global' }),
+    characterForSession: () => NAME,
+    bindingSnapshot: () => ({}),
+    reloadBindings: async () => ({}),
+    refreshMount: () => {},
+    refreshCharacter: async () => {},
+    setMode: async (mode) => ({ enabled: true, character: NAME, mode }),
+    applyInteractionMode: async (mode) => ({ active: { enabled: true, character: NAME, mode }, session: undefined }),
+    resolvedMode: async () => 'text+action',
+    disciplineLevel: 'lite',
+    setDiscipline: async () => ({ enabled: true }),
+    preview: () => ({ active: { enabled: true }, sessionId: '', source: 'global', mode: 'text+action', discipline: 'lite', segments: [], total: 0, lore: {} }),
+    relationTag: () => '',
+    activate: async () => ({ enabled: true, character: NAME }),
+    deactivate: async () => ({ enabled: false }),
   }
   const tools = createTools(store, fakePrompt)
   const names = tools.map(t => t.name)
@@ -904,6 +921,121 @@ section('17. 提示词预览：五段真实文本、只读、与 L1 段自洽')
   check(idle.total === 0, `未启用：total=0（实际 ${idle.total}）`)
   check(idle.lore.count === 0 && idle.lore.usedChars === 0, '未启用：lore 统计归零')
   check(idle.mode === 'text+action' || idle.mode === 'text', `未启用：mode 仍可读（${idle.mode}）`)
+}
+
+// ---------------------------------------------------------------- 18. 会话绑定（A 方案）
+
+section('18. 会话绑定：决议优先级 / 删卡回落 / 全局切换 / LRU / 工具按会话 / REST')
+{
+  const { pc } = await makePromptHost()   // 全局启用 NAME
+  const OTHER = `${NAME}-另一个`
+  await store.writeCard(OTHER, { ...CARD, name: OTHER })
+  const createdAt = '2026-11-01T01:00:00+08:00'
+
+  // ---- 存储层：绑定 / 解除 / 清理
+  const first = await store.bindSession('sess-a', OTHER)
+  check(first.character === OTHER && /[+-]\d{2}:\d{2}$/u.test(first.boundAt),
+    `bindSession 落盘 {character,boundAt}：${JSON.stringify(first)}`)
+  await store.bindSession('sess-b', NAME)
+  const bindingsOnDisk = JSON.parse(await readFile(join(sandbox, '_sessions.json'), 'utf8'))
+  check(bindingsOnDisk['sess-a']?.character === OTHER && bindingsOnDisk['sess-b']?.character === NAME,
+    `_sessions.json 形状 { [sessionId]: { character, boundAt } }：${Object.keys(bindingsOnDisk).join(',')}`)
+  let bindErr = ''
+  try { await store.bindSession('sess-x', '根本不存在的卡') } catch (e) { bindErr = e.message }
+  check(bindErr.includes('找不到角色卡'), `绑不存在的卡被拒：${bindErr}`)
+  let sidErr = ''
+  try { await store.bindSession('   ', NAME) } catch (e) { sidErr = e.message }
+  check(sidErr.includes('sessionId'), `空 sessionId 被拒：${sidErr}`)
+
+  await pc.reloadBindings()
+  check(Object.keys(pc.bindingSnapshot()).length >= 2, `PromptController 载入绑定（${Object.keys(pc.bindingSnapshot()).length} 条）`)
+
+  // ---- 决议优先级：会话绑定 > 全局启用 > 未启用
+  check(pc.characterForSession('sess-a') === OTHER, '会话绑定优先于全局启用（sess-a → 另一张卡）')
+  check(pc.characterForSession('sess-b') === NAME, '另一个会话各用各的（sess-b → 全局那张）')
+  check(pc.characterForSession('sess-unknown') === NAME, '没绑定的会话跟全局走')
+  check(pc.characterForSession(undefined) === NAME, '无会话（面板/诊断）就是全局')
+  check(pc.resolveTarget('sess-a').source === 'session' && pc.resolveTarget(undefined).source === 'global',
+    '决议来源标注正确（session / global）')
+
+  // ---- preview 按会话：面板要能看到「这个会话注入了什么」
+  await pc.refresh(undefined, { sessionId: 'sess-a' })
+  const pvA = pc.preview('sess-a')
+  check(pvA.active.character === OTHER && pvA.sessionId === 'sess-a' && pvA.source === 'session',
+    `preview('sess-a') → ${JSON.stringify(pvA.active)} / ${pvA.source}`)
+  check(pvA.segments[2].text.includes(OTHER), 'preview(sessionId) 的 L1 段渲染的是该会话绑定的角色')
+  const pvGlobal = pc.preview()
+  check(pvGlobal.active.character === NAME && pvGlobal.source === 'global', 'preview() 不给 sessionId 仍是全局视角')
+
+  // ---- 全局切换不影响任何已有会话绑定
+  const before = JSON.stringify(pc.bindingSnapshot())
+  await pc.activate(OTHER)   // 全局换成另一张
+  check(JSON.stringify(pc.bindingSnapshot()) === before, '全局切换不改绑定表（一条都没动）')
+  check(pc.characterForSession('sess-b') === NAME, '全局切换后会话绑定仍然优先（sess-b 还是原卡）')
+  check(pc.characterForSession('sess-unknown') === OTHER, '没绑定的会话跟着全局变')
+  await pc.activate(NAME)    // 换回
+
+  // ---- 绑定的卡被删：该会话未启用 + 清绑定 + **绝不回落到全局**
+  await store.deleteCharacter(NAME, true)
+  await pc.refresh(undefined, { sessionId: 'sess-b' })
+  check(pc.characterForSession('sess-b') === undefined, '绑定的卡被删：该会话视为未启用（不回落全局）')
+  check(pc.resolveTarget('sess-b').dead === true, '并标成 dead（面板可提示"绑定的角色卡已被删除"）')
+  check((await store.readBindings())['sess-b'] === undefined, '悬空绑定已被清掉（磁盘同步）')
+  const pvDead = pc.preview('sess-b')
+  check(pvDead.active.enabled === false && pvDead.total === 0, '该会话的 preview 全空（未启用）')
+
+  // ---- LRU：缓存槽位有上限（会话结束没有事件，靠淘汰 + 按需重建）
+  await store.writeCard(NAME, { ...CARD, name: NAME })
+  for (let i = 0; i < 40; i += 1) await store.bindSession(`lru-${i}`, OTHER)
+  await pc.reloadBindings()
+  for (let i = 0; i < 40; i += 1) await pc.refresh(undefined, { sessionId: `lru-${i}` })
+  check(pc.cacheCount <= 32 && pc.cacheCount > 0,
+    `缓存槽位受 LRU 上限约束（${pc.cacheCount} ≤ ${32}，共读过 40 个会话）`)
+
+  // ---- 工具按会话决议：日记写到该会话的角色身上，不串到全局
+  await store.bindSession('tool-sess', OTHER)
+  await pc.reloadBindings()
+  const tools = createTools(store, pc)
+  const diaryTool = tools.find(t => t.name === 'awu_diary_write')
+  const beforeName = (await store.readDiary(NAME)).flatMap(d => d.timeline)
+  const beforeOther = (await store.readDiary(OTHER)).flatMap(d => d.timeline)
+  await diaryTool.execute({ timeline: ['[事实] 会话工具写入'] }, { sessionId: 'tool-sess' })
+  const afterName = (await store.readDiary(NAME)).flatMap(d => d.timeline)
+  const afterOther = (await store.readDiary(OTHER)).flatMap(d => d.timeline)
+  check(afterOther.length === beforeOther.length + 1 && afterOther.includes('[事实] 会话工具写入'),
+    '工具的日记落在**该会话绑定的角色**上')
+  check(afterName.length === beforeName.length, '没有串到全局角色的日记里')
+  const whoami = await tools.find(t => t.name === 'awu_whoami').execute({}, { sessionId: 'tool-sess' })
+  check(whoami.character === OTHER && whoami.source === 'session', 'awu_whoami 按会话报身份')
+
+  // ---- REST：/bind /unbind / overview / character / preview
+  const routes = buildRoutes(store, pc)
+  const bindRes = await restCall(routes, 'POST', '/bind', { body: { name: OTHER, sessionId: 'rest-sess' } })
+  check(bindRes.status === 200 && bindRes.body?.bound === true && bindRes.body?.character === OTHER,
+    `POST /bind → ${bindRes.status} ${String(bindRes.body?.character)}`)
+  const overview = await restCall(routes, 'GET', '/overview', { url: '/?sessionId=rest-sess' })
+  check(overview.body?.sessionId === 'rest-sess', 'overview 回显 sessionId')
+  check(overview.body?.bindings?.current?.character === OTHER, 'overview.bindings.current 指出本会话绑了谁')
+  check(overview.body?.bindings?.effective?.character === OTHER, 'overview.bindings.effective 给出最终角色')
+  check(typeof overview.body?.bindings?.count === 'number' && Array.isArray(overview.body?.bindings?.items),
+    'overview.bindings 是摘要（count + items）')
+  const pvRes = await restCall(routes, 'GET', '/preview', { url: '/?sessionId=rest-sess' })
+  check(pvRes.body?.sessionId === 'rest-sess' && pvRes.body?.active?.character === OTHER,
+    'GET /preview?sessionId= 按会话预览')
+  const detail = await restCall(routes, 'GET', '/character',
+    { url: `/?name=${encodeURIComponent(OTHER)}&sessionId=rest-sess` })
+  check(detail.body?.binding?.boundHere === true, 'GET /character 的 binding.boundHere 为 true')
+  check(Array.isArray(detail.body?.binding?.sessions) && detail.body.binding.sessions.includes('rest-sess'),
+    'GET /character 列出绑定了这张卡的会话')
+  check(detail.body?.binding?.global === false || detail.body?.binding?.global === true, 'global 标记存在')
+  const unbindRes = await restCall(routes, 'POST', '/unbind', { body: { sessionId: 'rest-sess' } })
+  check(unbindRes.status === 200 && unbindRes.body?.bound === false && unbindRes.body?.character === OTHER,
+    `POST /unbind 返回原绑定：${JSON.stringify(unbindRes.body?.character)}`)
+  check((await store.readBindings())['rest-sess'] === undefined, '解除后磁盘上也没了')
+  check((await restCall(routes, 'POST', '/bind', { body: { name: OTHER } })).status === 400, '缺 sessionId → 400')
+  check((await restCall(routes, 'POST', '/bind', { body: { sessionId: 'x' } })).status === 400, '缺 name → 400')
+  check((await restCall(routes, 'POST', '/unbind', { body: {} })).status === 400, 'unbind 缺 sessionId → 400')
+  check(createdAt !== '', '夹具常量占位（时间戳格式已在校验里断言）')
 }
 
 // ---------------------------------------------------------------- 清理

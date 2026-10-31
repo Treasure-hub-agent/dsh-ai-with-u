@@ -52,6 +52,8 @@ export interface LorebookSectionProps {
    * `GET /preview` 的 `lore`；两路都没有就是 `undefined` → 整块不渲染，不报错。
    */
   dropped?: LoreDroppedInfo
+  /** 本卡里的酒馆正则脚本条数（>0 时顶部给一条中性说明：已屏蔽，不执行不注入） */
+  regexScripts?: number
   onChangeBook: (patch: Partial<LoreBookDraft>) => void
   onChangeEntries: (next: LoreEntryDraft[]) => void
   t: Translate
@@ -67,7 +69,6 @@ export interface LorebookSectionProps {
 function limitOf(code: LoreIssue['code']): number {
   if (code === 'content-too-long') return LORE_LIMITS.hardContentChars
   if (code === 'too-many-entries') return LORE_LIMITS.entries
-  if (code === 'book-too-large') return LORE_LIMITS.totalChars
   return 0
 }
 
@@ -331,7 +332,7 @@ function LoreEntryCard(props: {
 
 /** 世界书分区本体。 */
 export function LorebookSection(props: LorebookSectionProps): JSX.Element {
-  const { book, entries, issues, dirty, supported, dropped, onChangeBook, onChangeEntries, t, onFocusLayerChange } = props
+  const { book, entries, issues, dirty, supported, dropped, regexScripts, onChangeBook, onChangeEntries, t, onFocusLayerChange } = props
 
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState('')
@@ -433,6 +434,14 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
           ) : (
             <>
               <div className="awu-editGroupHint">{t('lore.hint')}</div>
+
+              {/* 正则脚本：中性信息（不是警告）——本卡带了 N 条，已屏蔽，不会执行也不会进提示词 */}
+              {regexScripts !== undefined && regexScripts > 0 && (
+                <div className="awu-noteRow" role="status">
+                  <span className="awu-noteDot" aria-hidden="true" />
+                  <span>{t('regex.blocked', { n: regexScripts })}</span>
+                </div>
+              )}
 
               {/*
                 本轮被预算裁掉的条目（宿主提供才显示）。数据来自 lore-diag.ts：

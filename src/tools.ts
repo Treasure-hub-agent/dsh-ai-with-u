@@ -15,11 +15,22 @@ import type { Store } from './store.js'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { localDiaryDate, RELATION_BANDS, resolveInteractionMode } from './store.js'
 import type { PromptController } from './prompt.js'
+import { readSessionId } from './prompt.js'
 import type { DistillArm } from './distill.js'
 import { saveCardFromModel } from './distill.js'
 
-/** 工具需要的最小执行上下文。 */
-export interface ToolExec { signal?: AbortSignal }
+/**
+ * 工具需要的最小执行上下文。
+ *
+ * `agent` 由宿主 agent 循环注入（`ToolExecutionInput.agent`）——**这是会话决议的入口**：
+ * 同一次工具调用属于哪个会话，就按哪个会话的绑定走（会话绑定 > 全局启用 > 未启用）。
+ * 手写自检可以只传 `sessionId`。
+ */
+export interface ToolExec {
+  signal?: AbortSignal
+  agent?: unknown
+  sessionId?: string
+}
 
 export interface ToolDef {
   name: string
@@ -46,16 +57,29 @@ const json = {
 
 /** 组装 awu_* 工具集。仅在启用状态下才会被注册（拔出即全部消失）。 */
 export function createTools(store: Store, prompt: PromptController): ToolDef[] {
-  const requireActive = (): string => {
-    const name = prompt.characterName
-    if (name === undefined) throw new Error('当前没有启用任何角色')
+  /** 这次工具调用属于哪个会话（宿主注入的 agent；自检可直接给 sessionId）。 */
+  const sessionIdOf = (exec: ToolExec): string | undefined =>
+    exec.sessionId !== undefined && exec.sessionId.trim() !== ''
+      ? exec.sessionId.trim()
+      : readSessionId(exec.agent)
+
+  /**
+   * 取**本次调用所在会话**的决议角色（会话绑定 > 全局启用 > 未启用）。
+   *
+   * 绝不能再用 `prompt.characterName`（那是全局值）：会话绑定了 A、全局启用 B 时，
+   * 那个会话的日记/关系/重置都必须落在 A 身上，否则就是串台。
+   */
+  const requireActive = (exec: ToolExec): string => {
+    const name = prompt.characterForSession(sessionIdOf(exec))
+    if (name === undefined) throw new Error('当前会话没有启用任何角色')
     return name
   }
 
-  /** 写完后刷新提示词缓存，下一轮组装立刻用新内容。 */
-  const afterWrite = async (): Promise<void> => {
+  /** 写完后刷新提示词缓存，下一轮组装立刻用新内容（按会话刷，不污染别人的槽位）。 */
+  const afterWrite = async (exec: ToolExec): Promise<void> => {
     prompt.invalidate()
-    await prompt.refresh()
+    const sessionId = sessionIdOf(exec)
+    await prompt.refresh(undefined, sessionId === undefined ? undefined : { sessionId })
   }
 
   return [
@@ -87,8 +111,8 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const timeline = Array.isArray(args['timeline']) ? args['timeline'].map(String) : []
         const notes = Array.isArray(args['notes']) ? args['notes'].map(String) : []
         if (timeline.length === 0 && notes.length === 0) throw new Error('timeline 与 notes 至少填一项')
@@ -97,7 +121,7 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         const mood = typeof args['mood'] === 'string' ? args['mood'].trim() : ''
         // 日记与会话在同一次写盘事务里完成（见 Store.appendDiaryWithNote：避免两次加锁被 commitTurn 插队）
         const session = await store.appendDiaryWithNote(name, date, timeline, notes, { topic, mood })
-        await afterWrite()
+        await afterWrite(exec)
         return {
           ok: true,
           date,
@@ -116,8 +140,8 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         keyword: { type: 'string', description: '可选关键词，只返回包含它的条目。' },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const days = typeof args['days'] === 'number' && args['days'] > 0 ? Math.floor(args['days']) : 7
         let entries = await store.readDiary(name)
         const keyword = typeof args['keyword'] === 'string' ? args['keyword'].trim() : ''
@@ -130,17 +154,24 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
     },
     {
       name: 'awu_whoami',
-      description: '查询当前启用了哪位角色及其关系设定。仅在不确定「我现在是谁」时调用。',
+      description: '查询这个会话里启用了哪位角色及其关系设定。仅在不确定「我现在是谁」时调用。',
       parameters: {},
       output: json,
-      async execute() {
-        const name = prompt.characterName
-        if (name === undefined) return { active: false }
+      async execute(_args, exec) {
+        const sessionId = sessionIdOf(exec)
+        const target = prompt.resolveTarget(sessionId)
+        const name = target.character
+        if (name === undefined) {
+          return { active: false, sessionId: sessionId ?? '', source: target.source, dead: target.dead === true }
+        }
         const card = await store.readCard(name)
         const session = await store.readSession(name)
         return {
           active: true,
           character: name,
+          // 会话绑定（本会话启用）还是全局启用：模型偶尔需要知道自己在哪个会话里
+          source: target.source,
+          sessionId: sessionId ?? '',
           relationship: card?.['relationship'] ?? {},
           // 与 L1 / overview 同一口径：session 里的模式优先
           mode: resolveInteractionMode(session, prompt.snapshot()),
@@ -167,16 +198,16 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        requireActive()
+      async execute(args, exec) {
+        const character = requireActive(exec)
         const mode = args['mode']
         if (mode !== 'text' && mode !== 'text+action') {
           throw new Error('mode 只能是 text 或 text+action')
         }
         // session.json 是权威、_active.json 是兜底：统一入口写两处并刷新 L1（见 PromptController.applyInteractionMode）。
         // 这里不再调 afterWrite()：上面那次刷新已经重读过卡与日记，再刷一次是白读一遍盘。
-        const result = await prompt.applyInteractionMode(mode)
-        return { ok: true, mode, turnCount: Number(result.session?.turn_count ?? 0) || 0 }
+        const result = await prompt.applyInteractionMode(mode, character)
+        return { ok: true, mode, character, turnCount: Number(result.session?.turn_count ?? 0) || 0 }
       },
     },
     // ------------------------------------------------------------ 忘记
@@ -191,12 +222,12 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const keyword = typeof args['keyword'] === 'string' ? args['keyword'].trim() : ''
         if (keyword === '') throw new Error('把要忘记的事说清楚一点（keyword）')
         const result = await store.forget(name, keyword)
-        await afterWrite()
+        await afterWrite(exec)
         return result
       },
     },
@@ -212,8 +243,8 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         index: { type: 'number', description: '可选：命中多条时的第几条（从 0 起）。' },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const text = typeof args['text'] === 'string' ? args['text'] : ''
         const result = await store.editDiary(name, {
           text,
@@ -222,7 +253,7 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
           section: args['section'] === 'notes' ? 'notes' : args['section'] === 'timeline' ? 'timeline' : undefined,
           index: typeof args['index'] === 'number' ? args['index'] : undefined,
         })
-        await afterWrite()
+        await afterWrite(exec)
         return result
       },
     },
@@ -243,8 +274,8 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const scope = args['scope'] === 'all' ? 'all' : 'session'
         if (scope === 'all' && args['confirmAll'] !== true) {
           throw new Error('彻底重置要用户明确确认（confirmAll=true）后才能执行')
@@ -252,7 +283,7 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         const result = scope === 'all'
           ? await store.resetStory(name)
           : await store.resetSession(name)
-        await afterWrite()
+        await afterWrite(exec)
         return { ok: true, ...result }
       },
     },
@@ -278,14 +309,14 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const raw = args['set']
         const value = typeof raw === 'string' ? raw.trim() : ''
         const state = value === ''
           ? await store.relationState(name)
           : await store.setIntimacy(name, value as (typeof RELATION_BANDS)[number], typeof args['why'] === 'string' ? args['why'] : undefined)
-        if (value !== '') await afterWrite()
+        if (value !== '') await afterWrite(exec)
         return {
           ...state,
           tag: `${state.character}（${state.current}）`,
@@ -305,12 +336,12 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
         },
       },
       output: json,
-      async execute(args) {
-        const name = requireActive()
+      async execute(args, exec) {
+        const name = requireActive(exec)
         const raw = args['candidates']
         const candidates = Array.isArray(raw) ? raw.map(String) : []
         const result = await store.rotateOpening(name, { candidates })
-        await afterWrite()
+        await afterWrite(exec)
         return result
       },
     },

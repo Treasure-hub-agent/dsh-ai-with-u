@@ -25,6 +25,10 @@ export const ROUTES = {
   deactivate: '/deactivate',
   setMode: '/mode',
 
+  // ---- 会话级绑定（只影响某一个会话；与「全局启用」互不覆盖）----
+  bind: '/bind',
+  unbind: '/unbind',
+
   saveCharacter: '/character/save',
   deleteCharacter: '/character/delete',
   saveDiary: '/diary/save',
@@ -162,6 +166,17 @@ export interface Overview {
   ok: true
   root: string
   active: ActiveState
+  /**
+   * 面板所在的**当前会话 id**（宿主 K1 提供；老宿主没有这个字段）。
+   *
+   * 拿不到就只能做「全局启用」——绝不在客户端拼一个假 id 写进绑定表。
+   */
+  sessionId?: string
+  /**
+   * 会话绑定表：`sessionId → 角色名`。只影响列出的那些会话，
+   * 没列出的会话继续用 `active`（全局）。
+   */
+  bindings?: Record<string, string>
   stats: {
     characters: number
     memoryEntries: number
@@ -169,6 +184,23 @@ export interface Overview {
     bySource: Record<string, number>
   }
   recent: Array<{ name: string; lastActive: string; memoryCount: number }>
+}
+
+// ---------------------------------------------------------------- 会话级绑定
+
+/**
+ * 把角色绑定到指定会话（只影响这一个会话）。
+ *
+ * 与全局启用的分工：绑定优先于全局，其它会话不受影响；取消绑定后该会话回到全局。
+ * 这里**必须**带宿主给的真实 `sessionId` —— 拿不到时上层会禁用按钮，不下发请求。
+ */
+export function bindCharacter(name: string, sessionId: string): Promise<{ name: string }> {
+  return post<{ name: string }>(ROUTES.bind, { name, sessionId })
+}
+
+/** 解除某个会话的绑定（该会话回到全局角色）。 */
+export function unbindCharacter(sessionId: string): Promise<unknown> {
+  return post(ROUTES.unbind, { sessionId })
 }
 
 export interface DiaryEntry {
@@ -199,6 +231,15 @@ export interface CharacterDetail {
   relation?: DetailRelation
   /** 世界书预算诊断（宿主新加；老宿主没有 → 面板整块不显示） */
   diag?: LoreDiagPayload
+  /**
+   * 这张卡**是否绑定在当前会话**上（宿主新字段，形状尚未定稿）。
+   *
+   * 面板优先用 `/overview.bindings` 自己判断；只有宿主没给 bindings 时才读这几个容错字段。
+   * 一律可选，缺失就当「不知道」，不要据此禁用/启用任何按钮。
+   */
+  boundHere?: boolean
+  boundSessionId?: string
+  sessionBinding?: { sessionId?: string; name?: string } | boolean
   openingState?: OpeningState
 }
 
@@ -669,6 +710,41 @@ export function draftCard(name: string, role: string, blurb: string): Card {
     voice: {},
     source: 'custom',
   }
+}
+
+/**
+ * 这张卡里带了几条**酒馆正则脚本**（`regex_scripts`）。
+ *
+ * 本插件不执行正则脚本（DSH 没有对应的显示/提示词扩展点），但**字段一律保留**（卡是用户资产，
+ * 删了不可逆）。所以面板要做的是「让用户看见它被屏蔽了」，而不是偷偷抹掉数据：
+ *  - `data.regex_scripts`（ST 规范位置）
+ *  - `data.extensions.regex_scripts` / 顶层 `extensions.regex_scripts`（野生卡常见）
+ *  - `data.extensions.aiwu.imported.raw.regex_scripts`（导入时原样收进来的副本）
+ *
+ * 容错：数组按长度算，单值按 1 条算，取不到就是 0（面板据此**整条不显示**，不报错）。
+ */
+export function countRegexScripts(ccv3: Card | undefined): number {
+  if (typeof ccv3 !== 'object' || ccv3 === null) return 0
+  const asObject = (value: unknown): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined
+  const count = (value: unknown): number => {
+    if (value === undefined || value === null) return 0
+    return Array.isArray(value) ? value.length : 1
+  }
+
+  const data = asObject(ccv3['data']) ?? {}
+  const dataExtensions = asObject(data['extensions']) ?? {}
+  const ccv3Extensions = asObject(ccv3['extensions']) ?? {}
+  const aiwu = asObject(dataExtensions['aiwu']) ?? {}
+  const imported = asObject(aiwu['imported']) ?? {}
+  const raw = asObject(imported['raw']) ?? {}
+
+  return count(data['regex_scripts'])
+    + count(dataExtensions['regex_scripts'])
+    + count(ccv3Extensions['regex_scripts'])
+    + count(raw['regex_scripts'])
 }
 
 /** 判断一个错误是不是「宿主还没提供这个接口」。 */

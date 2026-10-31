@@ -153,6 +153,17 @@ async function afterWrite(prompt: PromptController): Promise<void> {
 }
 
 /**
+ * 写操作之后刷新**所有正在用这张卡的槽位**（全局 + 每个绑了它的会话）。
+ *
+ * 会话绑定存在之后，「改日记/忘记/重置/换开场」不能再只刷全局槽位：
+ * 否则绑了这张卡的会话下一轮还是旧人设（用户视角就是"面板改了但角色没变"）。
+ */
+async function afterWriteFor(prompt: PromptController, character: string): Promise<void> {
+  prompt.invalidate()
+  await prompt.refreshCharacter(character)
+}
+
+/**
  * 解析「时间窗通道」：`distill`（从作品蒸馏，缺省）| `create`（骨架卡 AI 补全）。
  *
  * 缺省 distill 是**向后兼容**（旧面板的 arm 请求不带 kind）；非法值直接 400，
@@ -204,7 +215,10 @@ export function buildRoutes(
     {
       method: 'GET',
       path: `${ROUTE_PREFIX}/overview`,
-      handler: guard(async (_req, res) => {
+      handler: guard(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        // 面板知道自己在哪个会话就带上（`?sessionId=`），overview 会告诉它「当前会话启用」该怎么显示
+        const querySessionId = (url.searchParams.get('sessionId') ?? '').trim()
         const list = await store.listCharacters()
         const active = prompt.snapshot()
         const sourceCount: Record<string, number> = {}
@@ -218,7 +232,10 @@ export function buildRoutes(
         }
         // 交互模式与 L1 渲染走同一个解析函数（session.mode > _active.mode > 'text+action'），
         // 否则会出现「面板说纯文本、模型还在写动作」的两套口径。
-        const mode = await prompt.resolvedMode()
+        const mode = await prompt.resolvedMode(querySessionId === '' ? undefined : querySessionId)
+        const bindings = prompt.bindingSnapshot()
+        const currentBinding = querySessionId === '' ? undefined : bindings[querySessionId]
+        const target = prompt.resolveTarget(querySessionId === '' ? undefined : querySessionId)
         send(res, 200, {
           ok: true,
           root: store.root,
@@ -227,6 +244,27 @@ export function buildRoutes(
           // 纪律包档位（off / lite / full）：面板据此显示开关状态
           discipline: prompt.disciplineLevel,
           relationTag: prompt.relationTag() ?? '',
+          // ---- 会话绑定（「当前会话启用」按钮的数据源）----
+          // 注意：`bindings` 是摘要，不是全量；面板判断「本会话能不能切」看 `sessionId !== ''`
+          sessionId: querySessionId,
+          bindings: {
+            /** 绑定总数 */
+            count: Object.keys(bindings).length,
+            /** 当前会话的绑定（没绑定 / 没带 sessionId 时为 null） */
+            current: currentBinding === undefined
+              ? null
+              : { sessionId: querySessionId, character: currentBinding.character, boundAt: currentBinding.boundAt },
+            /** 当前会话最终用哪个角色（会话绑定 > 全局启用 > 未启用） */
+            effective: {
+              character: target.character ?? '',
+              source: target.source,
+            },
+            items: Object.entries(bindings).map(([sessionId, binding]) => ({
+              sessionId,
+              character: binding.character,
+              boundAt: binding.boundAt,
+            })),
+          },
           stats: {
             characters: list.length,
             memoryEntries: totalMemory,
@@ -243,9 +281,55 @@ export function buildRoutes(
       path: `${ROUTE_PREFIX}/preview`,
       handler: guard(async (req, res) => {
         requireMethod(req, 'GET')
+        // `?sessionId=` 给了就预览「那个会话实际会注入什么」，不给就是全局视角。
         // **纯只读**：不 refresh、不 notify、不写盘。文本来自 PromptController 的真实渲染路径，
         // 绝不在这里重新拼一份（拼一份就等于给"预览与真实注入漂移"开了口子）。
-        send(res, 200, { ok: true, ...prompt.preview() })
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const sessionId = (url.searchParams.get('sessionId') ?? '').trim()
+        send(res, 200, { ok: true, ...prompt.preview(sessionId === '' ? undefined : sessionId) })
+      }),
+    },
+    // ------------------------------------------------------------ 会话绑定（当前会话启用）
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/bind`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const name = String(body['name'] ?? '').trim()
+        const sessionId = String(body['sessionId'] ?? '').trim()
+        if (name === '') throw new Error('缺少角色名 name')
+        if (sessionId === '') throw new Error('缺少 sessionId（「当前会话启用」必须指名会话）')
+        const binding = await store.bindSession(sessionId, name)
+        await prompt.reloadBindings()
+        prompt.refreshMount()
+        send(res, 200, {
+          ok: true,
+          bound: true,
+          character: binding.character,
+          sessionId,
+          boundAt: binding.boundAt,
+        })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/unbind`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const sessionId = String(body['sessionId'] ?? '').trim()
+        if (sessionId === '') throw new Error('缺少 sessionId')
+        const previous = await store.unbindSession(sessionId)
+        await prompt.reloadBindings()
+        prompt.refreshMount()
+        // 解除后该会话回落到全局启用（没有全局启用就是「未启用」）
+        const effective = prompt.characterForSession(sessionId) ?? ''
+        send(res, 200, {
+          ok: true,
+          bound: false,
+          character: previous?.character ?? '',
+          sessionId,
+          effective,
+        })
       }),
     },
     // ------------------------------------------------------------ 角色列表
@@ -263,9 +347,15 @@ export function buildRoutes(
       handler: guard(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const name = url.searchParams.get('name') ?? ''
+        const querySessionId = (url.searchParams.get('sessionId') ?? '').trim()
         const ccv3 = await store.readCcV3(name)
         if (ccv3 === undefined) { send(res, 404, { ok: false, error: `找不到角色：${name}` }); return }
         const relation = await store.relationState(name)
+        const bindings = prompt.bindingSnapshot()
+        const boundSessions = Object.entries(bindings)
+          .filter(([, binding]) => binding.character === name)
+          .map(([sessionId]) => sessionId)
+        const target = prompt.resolveTarget(querySessionId === '' ? undefined : querySessionId)
         send(res, 200, {
           ok: true,
           name,
@@ -281,6 +371,17 @@ export function buildRoutes(
             baseline: relation.baseline,
             current: relation.current,
             log: relation.log,
+          },
+          // ---- 会话绑定（面板据此画「当前会话启用 / 全局启用」两个按钮的选中态）----
+          binding: {
+            /** 当前会话（带 `?sessionId=`）是否绑在这张卡上 */
+            boundHere: querySessionId !== '' && bindings[querySessionId]?.character === name,
+            /** 这张卡被哪些会话绑定（摘要，最多列出全部 sessionId） */
+            sessions: boundSessions,
+            /** 这张卡是否是全局启用角色 */
+            global: prompt.characterName === name,
+            /** 当前会话最终用哪个角色（会话绑定 > 全局启用 > 未启用） */
+            effective: { character: target.character ?? '', source: target.source },
           },
           openingState: await store.openingState(name),
         })
@@ -305,7 +406,8 @@ export function buildRoutes(
         }
         // 结构是权威、原生是投影：给 card 就重投影，extensions.aiwu / character_book 原样保留
         const saved = await store.saveCard({ name, card, ccv3 })
-        if (prompt.characterName === name) await afterWrite(prompt)
+        // 改卡后要刷**所有正在用它的槽位**（全局 + 每个绑了它的会话），否则会话里还是旧人设
+        await prompt.refreshCharacter(saved.name)
         // warnings：保存**成功**但值得提示的事（当前是世界书超出建议预算，不拦、不截断）
         send(res, 200, {
           ok: true,
@@ -358,7 +460,13 @@ export function buildRoutes(
         if (name === '') throw new Error('缺少角色名')
         if (prompt.characterName === name) await prompt.deactivate()
         await store.deleteCharacter(name, withMemory)
-        send(res, 200, { ok: true })
+        // 删卡连带清掉「绑在这张卡上」的会话绑定：留着就是悬空绑定（绑定的卡没了 = 该会话未启用）
+        const pruned = await store.pruneBindingsOf(name)
+        if (pruned.length > 0) {
+          await prompt.reloadBindings()
+          prompt.refreshMount()
+        }
+        send(res, 200, { ok: true, prunedBindings: pruned })
       }),
     },
     // ------------------------------------------------------------ 启用（插）
@@ -389,7 +497,22 @@ export function buildRoutes(
         const body = await readBody(req)
         const mode = body['mode'] === 'text' ? 'text' : 'text+action'
         const explicit = String(body['name'] ?? '').trim()
+        const querySessionId = String(body['sessionId'] ?? '').trim()
         const activeName = prompt.characterName
+
+        // ⓪ body 带 sessionId：按**该会话的决议角色**写（会话绑定 > 全局启用），
+        //    这样「会话绑了 A、全局启用 B」时，在这个会话里切模式落到 A 身上
+        if (querySessionId !== '') {
+          const character = prompt.characterForSession(querySessionId)
+          if (character !== undefined) {
+            const result = await prompt.applyInteractionMode(mode, character)
+            send(res, 200, {
+              ok: true, active: result.active, name: character, mode,
+              sessionId: querySessionId, scope: 'session',
+            })
+            return
+          }
+        }
 
         // ① 有启用角色（body 带不带 name 只要是同一个）：session 权威 + _active 兜底，并刷新 L1 模式段
         if (activeName !== undefined && (explicit === '' || explicit === activeName)) {
@@ -443,7 +566,7 @@ export function buildRoutes(
           }
         })
         await store.writeDiary(name, normalized)
-        if (prompt.characterName === name) await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true })
       }),
     },
@@ -457,7 +580,7 @@ export function buildRoutes(
         const keyword = String(body['keyword'] ?? '').trim()
         if (keyword === '') throw new Error('缺少要忘记的关键词 keyword')
         const result = await store.forget(name, keyword)
-        await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true, ...result })
       }),
     },
@@ -478,7 +601,7 @@ export function buildRoutes(
           index: typeof body['index'] === 'number' ? body['index'] : undefined,
         }
         const result = await store.editDiary(name, patch)
-        await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true, ...result })
       }),
     },
@@ -497,7 +620,7 @@ export function buildRoutes(
         const result = scope === 'all'
           ? await store.resetStory(name)
           : await store.resetSession(name)
-        await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true, ...result })
       }),
     },
@@ -531,7 +654,7 @@ export function buildRoutes(
           value as RelationBand,
           typeof body['why'] === 'string' ? body['why'] : undefined,
         )
-        await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true, ...state, tag: `${state.character}（${state.current}）` })
       }),
     },
@@ -545,7 +668,7 @@ export function buildRoutes(
         const raw = body['candidates']
         const candidates = Array.isArray(raw) ? raw.map(String) : []
         const result = await store.rotateOpening(name, { candidates })
-        await afterWrite(prompt)
+        await afterWriteFor(prompt, name)
         send(res, 200, { ok: true, ...result })
       }),
     },
@@ -576,7 +699,9 @@ export function buildRoutes(
           turnId: typeof body['turnId'] === 'string' ? body['turnId'] : undefined,
           count: body['count'] !== false,
         })
-        await afterWrite(prompt)
+        const written = result.character
+        if (written !== undefined) await afterWriteFor(prompt, written)
+        else await afterWrite(prompt)
         send(res, 200, { ok: true, ...result })
       }),
     },

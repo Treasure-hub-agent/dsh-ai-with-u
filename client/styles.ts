@@ -786,7 +786,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   text-overflow: ellipsis;
 }
 
-.awu-sigilBtns { display: flex; gap: var(--awu-gap-3); flex: none; }
+.awu-sigilBtns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--awu-gap-3); flex: none; }
 
 .awu-idleDot {
   flex: none;
@@ -1456,6 +1456,60 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-heroActions .awu-btn svg { flex: none; }
+
+/* ---- 会话绑定 / 全局启用的边界说明（可见文案，不是 tooltip） ---- */
+.awu-bindHints {
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-2);
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border: 1px solid var(--awu-line);
+  border-left: 2px solid color-mix(in srgb, var(--awu-accent) 55%, transparent);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+}
+
+.awu-bindHint {
+  display: flex;
+  align-items: baseline;
+  gap: var(--awu-gap-3);
+  min-width: 0;
+  font-size: var(--awu-fs-label);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+}
+
+.awu-bindHint b {
+  flex: none;
+  font-weight: 600;
+  color: var(--awu-ink);
+}
+
+.awu-bindHint span { min-width: 0; }
+.awu-bindHint[data-muted="true"] { color: var(--awu-ink-mute); font-size: var(--awu-fs-caption); }
+
+/* ---- 中性信息行（正则脚本已屏蔽之类：**不是警告**，所以不用警告色） ---- */
+.awu-noteRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--awu-gap-3);
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+  font-size: var(--awu-fs-label);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-mute);
+}
+
+.awu-noteDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: var(--awu-r-pill);
+  background: var(--awu-ink-faint);
+}
 
 /* iOS inset grouped list：圆角分组 + 细分隔线 */
 /* 分组卡片：与角色卡同一套玻璃材质（描边 + 顶部高光），否则详情页左边是玻璃、

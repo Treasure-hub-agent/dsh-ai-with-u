@@ -899,14 +899,22 @@ export const CARD_HARD_LIMITS = {
 /**
  * 世界书**软上限**：只做提示，绝不阻断保存、绝不截断。
  *
- * 数值是建议值不是墙：单条 4000 字、全本 20000 字。
- * 留这两个数是因为——单条过长时一次命中的 token 会突然变大，全本过大时命中率会下降，
- * 但这两件事都不影响「卡能不能用」，所以只提醒。
+ * 只有「单条偏长」这一项：单条过长时一次命中的 token 会突然变大，值得提醒一句。
+ * **「全本字数超限」这条 2026-11-01 按主人要求删掉了**——世界书按需注入，全本多大都不影响
+ * 这一轮花多少 token，报字数只会让用户以为卡坏了（真卡 98869 字被拦过一次）。
+ * 条数上限（`too-many-entries`）保留在体检里，那是「会真的进不去」的问题。
  */
 export const CARD_SOFT_LIMITS = {
   bookEntry: 4000,
-  bookTotal: 20000,
 } as const
+
+/**
+ * 酒馆正则脚本的口径（**写死一处**，日志 / 面板 / 导入警告都引用它，防止文案漂移）。
+ *
+ * 我们既不执行提示词侧正则，也不执行显示层正则：DSH 没有显示层扩展点。
+ * 卡里的 `regex_scripts` 字段**原样保留**（不删用户资产），只是不参与任何渲染。
+ */
+export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示词侧与显示侧都不执行'
 
 /** 校验角色卡**硬上限**；超限抛错（调用方负责变成 400 给前端）。世界书不在硬拦范围，见 {@link CARD_SOFT_LIMITS}。 */
 export function assertCardLimits(card: CharacterCardV3): void {
@@ -931,11 +939,10 @@ export function assertCardLimits(card: CharacterCardV3): void {
 const BOOK_WARNING_SAMPLE = 3
 
 /**
- * 世界书超限的**软警告**（保存/导入共用这一份文案，单一真源）。
+ * 世界书**单条偏长**的软警告（保存/导入共用这一份文案，单一真源）。
  *
- * 语义：卡片照常保存、世界书一个字都不改，只是把「超出建议预算」这件事如实告诉用户。
- * 文案里必须带**实际字数与上限**，并说明「按需注入、超出预算的部分不会进提示词」——
- * 否则用户会以为卡坏了。
+ * 语义：卡片照常保存、世界书一个字都不改，只是把「单条偏长」这件事如实告诉用户。
+ * ⚠️ 全本字数超限**不再提醒**（2026-11-01 主人要求：按需注入，全本多大都不影响这一轮）。
  */
 export function collectCardWarnings(card: CharacterCardV3): string[] {
   const book = card.data.character_book
@@ -943,10 +950,8 @@ export function collectCardWarnings(card: CharacterCardV3): string[] {
   const entries = Array.isArray(book.entries) ? book.entries : []
   const warnings: string[] = []
   const longEntries: string[] = []
-  let total = 0
   for (const entry of entries) {
     const content = str(entry.content)
-    total += content.length
     if (content.length <= CARD_SOFT_LIMITS.bookEntry) continue
     const label = str(entry.name).trim() !== '' ? str(entry.name).trim() : str(entry.id).trim()
     longEntries.push(`「${label === '' ? '未命名' : label}」${content.length} 字`)
@@ -958,12 +963,6 @@ export function collectCardWarnings(card: CharacterCardV3): string[] {
       `世界书有 ${longEntries.length} 条偏长（建议单条 ${CARD_SOFT_LIMITS.bookEntry} 字以内）：${shown}`
       + `${rest > 0 ? `，另有 ${rest} 条同样偏长` : ''}。`
       + '世界书按需注入，超出预算的部分不会进提示词，卡片本身功能不受影响；想让命中更稳可以拆成多条。',
-    )
-  }
-  if (total > CARD_SOFT_LIMITS.bookTotal) {
-    warnings.push(
-      `世界书总字数 ${total} 字，超过建议上限 ${CARD_SOFT_LIMITS.bookTotal}：`
-      + '世界书按需注入，超出预算的部分不会进提示词，卡片照常可用；想命中更准可以合并或精简条目。',
     )
   }
   return warnings
@@ -2184,7 +2183,11 @@ export interface CardLengthStats {
 }
 
 export interface LengthWarning {
-  code: 'description' | 'l1' | 'lore-entry' | 'lore-total' | 'lore-keys' | 'lore-selective' | 'card-size'
+  /**
+   * `too-many-entries` = 世界书**条数**超建议线（会真的被预算裁掉，值得报）。
+   * ⚠️ 2026-11-01 起**没有**「全本字数超限」这一项（主人要求：按需注入，字数不是问题）。
+   */
+  code: 'description' | 'l1' | 'lore-entry' | 'too-many-entries' | 'lore-keys' | 'lore-selective' | 'card-size'
   chars: number
   message: string
 }
@@ -2230,11 +2233,12 @@ export function lengthWarnings(card: CharacterCardV3): LengthWarning[] {
       message: `世界书有一条 ${stats.loreEntryMaxChars} 字，建议拆成多条、各自配关键词，命中更准。`,
     })
   }
-  if (stats.loreTotalChars > LENGTH_LIMITS.loreTotal || stats.loreEntryCount > LENGTH_LIMITS.loreEntries) {
+  // 只报**条数**（条数超了会真的被预算裁掉）；全本字数不报——按需注入，字数本身不是问题
+  if (stats.loreEntryCount > LENGTH_LIMITS.loreEntries) {
     warnings.push({
-      code: 'lore-total',
+      code: 'too-many-entries',
       chars: stats.loreTotalChars,
-      message: `世界书偏大（${stats.loreEntryCount} 条 / ${stats.loreTotalChars} 字），命中率会下降，建议合并同主题条目。`,
+      message: `世界书有 ${stats.loreEntryCount} 条（建议 ${LENGTH_LIMITS.loreEntries} 条以内）：单轮最多注入 ${LORE_DEFAULTS.maxEntries} 条，其余不会进提示词。`,
     })
   }
   const keyless = (card.data.character_book?.entries ?? []).filter(e => list(e.keys).length === 0 && e.constant !== true)

@@ -1288,14 +1288,21 @@ head('[21] 不执行的正则脚本要「保留 + 告警」（ST 卡是用户资
     }
 
     // ③ 导入预览要明说「不执行」，且要说清两侧都不做（否则用户会以为是「暂时没接」）
+    //   允许引用单一真源常量：警告里插 `${ST_SCRIPT_STANCE}` 比复制一份文案更好，
+    //   只要常量本身写清了「不执行 + 正则 + 显示侧」就算满足（上一版判据在这里误报过一次）。
+    const tavernSrc = await readSource('src/tavern.ts')
+    const stanceText = /export\s+const\s+ST_SCRIPT_STANCE\s*=\s*['"`]([^'"`]+)['"`]/u.exec(tavernSrc ?? '')?.[1] ?? ''
+    const stanceCovers = /不执行/u.test(stanceText) && /正则/u.test(stanceText) && /显示侧/u.test(stanceText)
     const warnNear = [...imp.matchAll(/warnings\.push\(\s*[`'"]([^`'"]{0,200})/gu)].map(m => m[1])
-    const saysNoExec = warnNear.some(text => /不执行/.test(text) && /正则|regex/u.test(text) && /显示/.test(text))
-    if (saysNoExec) {
-      ok('导入预览警告说明「不执行酒馆正则脚本（提示词侧与显示侧）」')
+    const saysNoExecDirect = warnNear.some(text => /不执行/.test(text) && /正则|regex/u.test(text) && /显示/.test(text))
+    const saysNoExecViaStance = warnNear.some(text => /ST_SCRIPT_STANCE/.test(text)) && stanceCovers
+    if (saysNoExecDirect || saysNoExecViaStance) {
+      ok('导入预览警告说明「不执行酒馆正则脚本（提示词侧与显示侧）」',
+        saysNoExecViaStance && !saysNoExecDirect ? '引用 ST_SCRIPT_STANCE 单一真源' : '')
     } else {
       bad('导入预览警告说明「不执行酒馆正则脚本（提示词侧与显示侧）」',
-        '没有一条警告同时说清「不执行 + 正则 + 显示侧」——只写「已忽略」用户会以为以后会支持；'
-        + '必须写明「提示词侧与显示侧都不执行；显示层 DSH 没有扩展点」，指向 README 兼容矩阵。该找 host-core')
+        '没有一条警告说清「不执行 + 正则 + 显示侧」（直接写或引用 ST_SCRIPT_STANCE 都行）：'
+        + '只写「已忽略」用户会以为以后会支持；必须写明「提示词侧与显示侧都不执行；显示层 DSH 没有扩展点」。该找 host-core')
     }
 
     // ④ depth_prompt 保留但不生效，非空时必须提示
@@ -1312,6 +1319,152 @@ head('[21] 不执行的正则脚本要「保留 + 告警」（ST 卡是用户资
           '提到了 depth_prompt 但附近没有 warnings.push：警告要么没写、要么写在别处没法判。该找 host-core（非空时提示「保留但不生效」）')
       }
     }
+  }
+}
+
+// ================================================================ 22. 角色绑定
+head('[22] 角色绑定（会话作用域：/bind · 决议优先级 · LRU 上限 · 工具层按会话）')
+{
+  const web = await readSource('src/web.ts')
+  const promptSrc = await readSource('src/prompt.ts')
+  const tools = await readSource('src/tools.ts')
+
+  // ① 绑定 / 解绑路由
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const bind = sliceRoute(web, '/bind')
+    const unbind = sliceRoute(web, '/unbind')
+    if (bind !== undefined && unbind !== undefined) {
+      ok('有 /bind 与 /unbind 路由')
+    } else {
+      bad('有 /bind 与 /unbind 路由',
+        `缺 ${[bind === undefined ? '/bind' : '', unbind === undefined ? '/unbind' : ''].filter(Boolean).join(' 与 ')}：`
+        + '「当前会话启用」没有落点，面板只能退回全局启用——两种作用域就会退化成一种。该找 host-core')
+    }
+  }
+
+  // ② 决议函数同时有 session / global 两个来源
+  if (promptSrc === undefined) {
+    bad('src/prompt.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const defAt = /resolveTarget\s*\(\s*sessionId/u.exec(promptSrc) ?? /resolveTarget\s*\(/u.exec(promptSrc)
+    const braceAt = defAt === null ? -1 : promptSrc.indexOf('{', defAt.index + defAt[0].length)
+    const body = braceAt < 0 ? '' : (sliceBalanced(promptSrc, braceAt) ?? '')
+    if (defAt === null || body === '') {
+      bad('决议函数 resolveTarget 存在',
+        'prompt.ts 里找不到 resolveTarget 这类「按会话决议角色」的函数：每个段/工具各自算一遍，迟早算出不同答案。该找 host-core')
+    } else {
+      const hasSession = /source:\s*'session'/u.test(body) || /\bbindings\s*\[/u.test(body)
+      const hasGlobal = /source:\s*'global'/u.test(body)
+      if (hasSession && hasGlobal) {
+        ok('决议同时覆盖会话绑定与全局启用')
+      } else {
+        bad('决议同时覆盖会话绑定与全局启用',
+          `决议函数里${hasSession ? '' : '没看到会话绑定分支'}${!hasSession && !hasGlobal ? '、' : ''}${hasGlobal ? '' : '没看到全局兜底分支'}：`
+          + '优先级必须写死成「会话绑定 > 全局启用 > 未启用」，两条来源缺一条就会串台。该找 host-core')
+      }
+
+      // ③ 出错方向必须安全：绑卡被删 → 该会话未启用，**不回退全局**
+      const deadHandled = /deadSlots/u.test(promptSrc) && /deadSlots\.has\s*\(/u.test(body) && /source:\s*'none'/u.test(body)
+      if (deadHandled) {
+        ok('绑卡被删时不回落全局', 'deadSlots → source: none')
+      } else {
+        bad('绑卡被删时不回落全局',
+          '看不到「绑定的卡被删 → 该会话明确未启用」的处理（deadSlots / source:none）：'
+          + '一旦回落到全局，用户会以为在跟 A 聊、其实在跟 B 聊——**这个方向的错误比不隔离更糟**。该找 host-core')
+      }
+    }
+
+    // ④ 按会话缓存 + 上限（渲染路径一次组装要调五次，必须有界）
+    if (/SESSION_CACHE_LIMIT|CACHE_LIMIT/u.test(promptSrc) && /Map</u.test(promptSrc)) {
+      ok('按会话缓存且有上限', (/(?:SESSION_)?CACHE_LIMIT\s*=\s*(\d+)/u.exec(promptSrc)?.[1] ?? '?') + ' 条')
+    } else {
+      bad('按会话缓存且有上限',
+        '没看到「按会话缓存 + 容量上限」：不按会话缓存会在多会话间串味；不设上限则长跑必泄漏。该找 host-core')
+    }
+  }
+
+  // ⑤ 工具层也按会话决议（否则「提示词隔离、工具串台」比不隔离更糟）
+  if (tools === undefined) {
+    bad('src/tools.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const codeOnly = tools.split('\n')
+      .filter(line => !/^\s*(\*|\/\/|\/\*)/u.test(line))
+      .join('\n')
+    const stillGlobal = /prompt\.characterName/u.test(codeOnly)
+    const bySession = /characterForSession|resolveTarget/u.test(codeOnly) && /sessionIdOf/u.test(codeOnly)
+    if (!stillGlobal && bySession) {
+      ok('工具层按会话决议角色', 'characterForSession + sessionIdOf')
+    } else if (stillGlobal) {
+      bad('工具层按会话决议角色',
+        'tools.ts 的代码里仍在用 `prompt.characterName`（全局值）：会话绑定 A、全局启用 B 时，'
+        + '提示词是 A、写日记/查关系却写到 B 上——**这种「一半隔离」比完全不隔离更危险**。该找 host-core')
+    } else {
+      bad('工具层按会话决议角色',
+        'tools.ts 里看不到按会话取角色的痕迹（characterForSession / resolveTarget + sessionIdOf）。该找 host-core')
+    }
+  }
+}
+
+// ================================================================ 23. 正则屏蔽 + 去字数提醒
+head('[23] 正则屏蔽可证明（ST_SCRIPT_STANCE 全链路）与「字数提醒」已删')
+{
+  const tavern = await readSource('src/tavern.ts')
+  if (tavern === undefined) {
+    bad('src/tavern.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const stance = /export\s+const\s+ST_SCRIPT_STANCE\s*=\s*['"`]([^'"`]+)['"`]/u.exec(tavern)?.[1]
+    if (stance === undefined) {
+      bad('有 ST_SCRIPT_STANCE 口径常量',
+        '没有把「不执行酒馆正则脚本」写成代码常量：日志、面板、导入警告各写一份文案，早晚漂移成三种说法。该找 host-core')
+    } else if (!/不执行/u.test(stance) || !/显示侧/u.test(stance)) {
+      bad('有 ST_SCRIPT_STANCE 口径常量',
+        `口径文案不完整（${stance}）：要同时说清「不执行」与「显示侧也不执行」，否则读者以为是「暂时没接」。该找 host-core`)
+    } else {
+      ok('有 ST_SCRIPT_STANCE 口径常量', stance.slice(0, 40))
+    }
+  }
+
+  // 屏蔽要有「可证明」的断言，不是口头保证
+  const tavernVerify = await readSource('scripts/verify-tavern.mjs')
+  if (tavernVerify === undefined) {
+    skipped('正则屏蔽有自检证明', '读不到 scripts/verify-tavern.mjs')
+  } else {
+    const markerTest = /ST_SCRIPT_STANCE/u.test(tavernVerify)
+    const byteEqual = (tavernVerify.match(/renderL1(?:Static)?\(\w+\)\s*===\s*renderL1/u) ?? []).length > 0
+      || /逐字相同/u.test(tavernVerify)
+    const preserves = /原样保留/u.test(tavernVerify)
+    if (markerTest && byteEqual && preserves) {
+      ok('正则屏蔽有自检证明', '口径常量 + 逐字相同 + 字段保留')
+    } else {
+      bad('正则屏蔽有自检证明',
+        'verify-tavern.mjs 里缺屏蔽证明：需要三条——① 特征串不出现在 L1/preview ② 去掉脚本后文本逐字相同 ③ 字段原样保留。'
+        + `当前命中：口径 ${markerTest ? '✓' : '✗'} / 逐字相同 ${byteEqual ? '✓' : '✗'} / 保留 ${preserves ? '✓' : '✗'}。该找 host-core`)
+    }
+  }
+
+  // 字数提醒已删（只看字符串字面量：注释里往往正写着「book-too-large 已删」）
+  const schema = await readSource('client/lorebook-schema.ts')
+  if (schema === undefined) {
+    bad('client/lorebook-schema.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else if (/['"]book-too-large['"]/u.test(schema)) {
+    bad('book-too-large（字数提醒）已删',
+      '`book-too-large` 还在：主人明确要求「字数超出」这条提醒不要（世界书按需注入，字数本身不是问题），'
+      + '留着只会继续制造噪音。该找 client-ui 整条删掉（code + 文案）')
+  } else {
+    ok('book-too-large（字数提醒）已删', '只剩条数提醒')
+  }
+
+  // 面板要让用户看见「已屏蔽」
+  const text = (await readSource('client/text.ts')) ?? ''
+  const blockedKey = [...text.matchAll(/['"]([A-Za-z0-9_.]*(?:regex|script)[A-Za-z0-9_.]*)['"]\s*:\s*['"]([^'"]*屏蔽[^'"]*)['"]/gu)]
+  if (blockedKey.length > 0) {
+    ok('面板有「正则已屏蔽」中性文案', `${blockedKey[0][1]} = ${blockedKey[0][2].slice(0, 30)}…`)
+  } else {
+    bad('面板有「正则已屏蔽」中性文案',
+      '没有一条「本卡含 N 条酒馆正则脚本，已屏蔽」的文案：用户看不到屏蔽状态，就会以为脚本在生效（或以为卡坏了）。'
+      + '该找 client-ui（中性信息，不是红条）')
   }
 }
 
