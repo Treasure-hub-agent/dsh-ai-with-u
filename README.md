@@ -121,6 +121,12 @@ flowchart LR
 npm install dsh-ai-with-u
 ```
 
+GitHub Packages 上也有同一版本（scoped 名，需要带 `read:packages` 的 token）：
+
+```bash
+npm install @treasure-hub-agent/dsh-ai-with-u --registry=https://npm.pkg.github.com
+```
+
 或者从源码构建：
 
 ```bash
