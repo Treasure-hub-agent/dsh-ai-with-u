@@ -122,9 +122,11 @@ section('1. session.json 写入（turn_count / last_ts / recent）')
   const sl = await store.readSession(NAME)
   check(sl.recent.every(x => x.length <= 140), '单条摘要长度受控')
 
-  // 本地时间戳格式
-  const iso = localIsoTimestamp(new Date(2026, 7, 8, 22, 30, 0))
-  check(iso === '2026-08-08T22:30:00+08:00', `last_ts 格式对齐原 skill 示例：${iso}`)
+  // 本地时间戳格式：保留本地墙上时间 + 显式偏移（不写死 +08:00，CI 在 UTC 也过）
+  const stampDate = new Date(2026, 7, 8, 22, 30, 0)
+  const iso = localIsoTimestamp(stampDate)
+  check(/^2026-08-08T22:30:00[+-]\d{2}:\d{2}$/u.test(iso) && Date.parse(iso) === stampDate.getTime(),
+    `last_ts 格式对齐原 skill 示例（本地时间 + 显式偏移）：${iso}`)
 }
 
 // ---------------------------------------------------------------- 2. 忘记
