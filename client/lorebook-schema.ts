@@ -52,11 +52,15 @@ export interface LoreBookDraft {
 /**
  * 体检等级。
  *
- * 真卡（89 条 / 9.9 万字）在旧规则下报了 **323 条「问题」**，而真正会失效的只有 2 条。
- * 所以规则必须分级：
- *  - `error`：这条/这本书**真的不会生效**（没关键词也不是常驻、内容为空）；
- *  - `warn`：多半是配置失误，但玩法上还成立；
- *  - `info`：只是「知道一下」的规模提示（真卡常态，不该刷屏）。
+ * 真卡（89 条 / 9.9 万字）在旧规则下报了 **323 条「问题」**，逐条降级后仍有 104 条 info ——
+ * 主人一句「还是有 100 多条提示，将不必要的都去掉」点破了问题：
+ *
+ * **一条提示存在的意义，是推动用户做一个动作**；没有动作、或者做了也没差别的，
+ * 就不该以「条」的形式存在。所以现在：
+ *  - `error`：这条/这本书**真的不会生效**（没关键词也不是常驻、内容为空）——必须动手；
+ *  - `warn`：规模超出建议线，但**不会报错**，指一个"能看清单"的动作；
+ *  - `info`：只保留**聚合摘要**（全表一条），不逐条刷屏；唯一的逐条例外是
+ *    「单条超过关键词预算一半」——那种命中一次就会挤掉别人，确实需要拆条。
  */
 export type LoreIssueLevel = 'error' | 'warn' | 'info'
 
@@ -68,14 +72,19 @@ export type LoreIssueLevel = 'error' | 'warn' | 'info'
  *    同序按数组顺序排，本来就不冲突 —— 报它是纯噪声。
  *  - `selective-without-secondary`：`selective:true` + 空 secondary 在 ST 里等于该字段无效，
  *    功能完全正常（真卡 57 条命中），没有可执行动作，干脆不报。
+ *
+ * ⚠️ 2026-11-01 又把两个批量项**收成聚合**（主人第二次反馈「100 多条」）：
+ *  - `content-too-long`（67 条）→ `long-entries`（1 条）+ 少量 >3000 字的逐条例外；
+ *  - `duplicate-keys`（37 条）→ `shared-keys`（1 条）。
  */
 export type LoreIssueCode =
-  | 'no-keys'
-  | 'empty-content'
-  | 'duplicate-keys'
-  | 'content-too-long'
-  | 'too-many-entries'
-  | 'book-too-large'
+  | 'no-keys'            // error：非常驻且没关键词，永远命不中
+  | 'empty-content'      // error：内容为空，注入了也白搭
+  | 'too-many-entries'   // warn：条数超建议线（不报错，指去被裁清单）
+  | 'book-too-large'     // warn：总字数超建议线（不报错，按需注入）
+  | 'long-entries'       // info：偏长条目**聚合**一条（默认不逐条）
+  | 'shared-keys'        // info：共享关键词**聚合**一条
+  | 'content-too-long'   // info：单条 >3000 字的**逐条例外**（命中即挤掉别人）
 
 export interface LoreIssue {
   /** 条目级问题给条目 id；书级/聚合类问题给空串 */
@@ -84,7 +93,7 @@ export interface LoreIssue {
   level: LoreIssueLevel
   /** 给 UI 直接显示的补充信息（关键词、字数、占比等），已格式化 */
   detail?: string
-  /** 聚合类问题（如重复关键词）带上的条数 */
+  /** 聚合类问题带上的条数（偏长条目数 / 共享关键词数） */
   count?: number
 }
 
@@ -99,9 +108,17 @@ export const LORE_BUDGET = {
   chars: 6000,
 } as const
 
-/** 体积参考线（只用于 info 提示，不阻断保存）。 */
+/**
+ * 体积参考线（只用于提示，不阻断保存）。
+ *
+ * - `contentChars`：**聚合**用的「偏长」参考线（真卡 67 条命中都落在这里，收成一条）；
+ * - `hardContentChars`：**逐条报**的例外线 = 关键词预算的一半。超过它的条目命中一次
+ *   就会挤掉别人的额度，这是真需要动作的（拆条），所以单独列出来。
+ *   注意：这两个数字各有分工，别把例外线调回 800。
+ */
 export const LORE_LIMITS = {
   contentChars: 800,
+  hardContentChars: Math.round(LORE_BUDGET.chars / 2),
   totalChars: 20_000,
   entries: 30,
 } as const
@@ -399,17 +416,22 @@ export function moveEntry(entries: LoreEntryDraft[], index: number, delta: -1 | 
 // ---------------------------------------------------------------- 体检
 
 /**
- * 结构问题检测（分级版）。
+ * 结构问题检测（分级 + 聚合版）。
  *
- * 只报"用户很可能没意识到"的问题；**不阻断保存**（架构稿 §5.2：不拒绝保存）。
- * 真卡（89 条 / 9.9 万字 / 89 条 use_regex）实测：旧规则 323 条，其中只有 2 条真问题；
- * 现在 error 只留「真的不会生效」这两种，其余降为 info，且重复关键词**按关键词聚合成一条**。
+ * 只报"用户很可能没意识到、且**有动作可做**"的问题；**不阻断保存**（架构稿 §5.2）。
+ * 真卡（89 条 / 9.9 万字 / 89 条 use_regex）实测：
+ *  - 旧规则 323 条（order-collision / selective 等纯噪声已删）；
+ *  - 逐条降级后仍有 104 条 info → 现在**批量项全部聚合成一条**：
+ *      偏长条目 → `long-entries`（1 条）、共享关键词 → `shared-keys`（1 条）；
+ *    唯一的逐条例外是单条 >3000 字（关键词预算的一半）：命中一次就挤掉别人，真要拆条。
  */
 export function loreIssues(entries: LoreEntryDraft[]): LoreIssue[] {
   const issues: LoreIssue[] = []
 
   /** 关键词 → 拥有它的条目（聚合用；ST 允许多条共用关键词，这不是错） */
-  const keyOwners = new Map<string, { key: string; ids: string[] }>()
+  const keyOwners = new Map<string, string[]>()
+  /** 落在 (800, 3000] 的偏长条目字数（聚合成一条 info，不逐条报） */
+  const longChars: number[] = []
 
   for (const entry of entries) {
     const keys = entry.keys.map(key => key.trim()).filter(key => key !== '')
@@ -424,9 +446,9 @@ export function loreIssues(entries: LoreEntryDraft[]): LoreIssue[] {
       issues.push({ entryId: entry.id, code: 'empty-content', level: 'error' })
     }
 
-    // info：单条偏大。真卡 800~2600 字是常态，所以只报"占本轮预算多少"，不是硬伤
+    // info 例外：单条占掉关键词预算一半以上 —— 命中一次就会挤掉别人，真需要拆条
     const chars = countChars(entry.content)
-    if (chars > LORE_LIMITS.contentChars) {
+    if (chars > LORE_LIMITS.hardContentChars) {
       const percent = Math.round((chars / LORE_BUDGET.chars) * 100)
       issues.push({
         entryId: entry.id,
@@ -434,22 +456,40 @@ export function loreIssues(entries: LoreEntryDraft[]): LoreIssue[] {
         level: 'info',
         detail: `${chars} 字 · ${percent}%`,
       })
+    } else if (chars > LORE_LIMITS.contentChars) {
+      longChars.push(chars)
     }
 
     for (const key of keys) {
       const lower = key.toLowerCase()
-      const bucket = keyOwners.get(lower)
-      if (bucket === undefined) keyOwners.set(lower, { key, ids: [entry.id] })
-      else bucket.ids.push(entry.id)
+      const owner = keyOwners.get(lower)
+      if (owner === undefined) keyOwners.set(lower, [entry.id])
+      else owner.push(entry.id)
     }
   }
 
-  // info：多个条目共享关键词 —— ST 里本来就会一起注入，是按关键词**聚合报一条**
-  //（真卡里 110 条命中其实只来自少数几个词，逐条报就是刷屏）
-  for (const { key, ids } of keyOwners.values()) {
-    if (ids.length > 1) {
-      issues.push({ entryId: '', code: 'duplicate-keys', level: 'info', detail: key, count: ids.length })
+  // info 聚合：偏长条目（真卡 67 条 → 1 条）。条目按需注入，命中才占预算，通常不用改
+  if (longChars.length > 0) {
+    issues.push({
+      entryId: '',
+      code: 'long-entries',
+      level: 'info',
+      count: longChars.length,
+      detail: String(longChars.reduce((max, chars) => (chars > max ? chars : max), 0)),
+    })
+  }
+
+  // info 聚合：共享关键词（真卡 37 个词 → 1 条）。ST 里本来就会一起注入，命中时成组出现
+  let sharedCount = 0
+  let sharedMax = 0
+  for (const owners of keyOwners.values()) {
+    if (owners.length > 1) {
+      sharedCount += 1
+      if (owners.length > sharedMax) sharedMax = owners.length
     }
+  }
+  if (sharedCount > 0) {
+    issues.push({ entryId: '', code: 'shared-keys', level: 'info', count: sharedCount, detail: String(sharedMax) })
   }
 
   const totalChars = entries.reduce((sum, entry) => sum + countChars(entry.content), 0)

@@ -1207,8 +1207,8 @@ README 的矩阵里，「支持」全部对应**代码里真的生效**；下面
 
 | 指标 | 修复前（宿主报告） | 现在（探针实测） |
 |---|---|---|
-| 面板体检问题数 | 323 条（真问题 2 条） | **106 条，error 0 / warn 2 / info 104** |
-| └ 构成 | order-collision / duplicate-keys / content-too-long / selective-without-secondary 混在一起 | `content-too-long` ×67 · `duplicate-keys` ×37（按关键词聚合）· `too-many-entries` ×1（warn）· `book-too-large` ×1（warn） |
+| 面板体检问题数 | 323 条（真问题 2 条） | **4 条，error 0 / warn 2 / info 2** |
+| └ 构成 | order-collision / duplicate-keys / content-too-long / selective-without-secondary 混在一起 | warn：`too-many-entries` ×1 · `book-too-large` ×1；info（聚合）：`long-entries` ×1（67 条偏长，最长 2621 字）· `shared-keys` ×1（37 个词，最多 3 条共用） |
 | 常驻注入 | 6 条有效常驻里 2 条被关键词预算静默挤掉 | **6/6 全注入，`constantDropped: []`**，9577 / 12000 字 |
 | 关键词被裁 | — | `keywordDropped: []`（这轮没触发） |
 | `droppedByBudget`（兼容字段，两池并集） | `["5","86"]` | `[]` |
@@ -1229,6 +1229,6 @@ README 的矩阵里，「支持」全部对应**代码里真的生效**；下面
 
 ### 本轮仍待真机复看
 
-1. 用这张真卡做一次真实对话：面板体检显示「0 必须处理 / 2 条提醒 / 104 条提示」是否符合预期观感（104 条 info 默认折叠，是否仍然吵）。
+1. 用这张真卡做一次真实对话：面板体检显示「提醒 2 · 提示 2」是否符合预期（提示默认折叠，不该再刷屏）。
 2. 世界书诊断区显示「本轮注入 N 条 / 常驻 6 条 9577 字」是否与对话实际一致。
 3. **三档的定级判据（Lead 已定，别再摇摆）**：`error` = 这条设定**永远不会生效**（非常驻且无关键词、内容为空）；`warn` = 这条设定**会因为预算/条数而进不去**（`too-many-entries`、`book-too-large`）；`info` = 会影响手感但不会失效（`content-too-long`、`duplicate-keys`）。判据一句话：**会不会真的丢内容**——会丢的给 warn，不会丢的给 info。

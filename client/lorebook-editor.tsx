@@ -65,7 +65,7 @@ export interface LorebookSectionProps {
 
 /** 问题码 → 建议上限（模板里的 `{max}`）。只用于措辞，不参与判断。 */
 function limitOf(code: LoreIssue['code']): number {
-  if (code === 'content-too-long') return LORE_LIMITS.contentChars
+  if (code === 'content-too-long') return LORE_LIMITS.hardContentChars
   if (code === 'too-many-entries') return LORE_LIMITS.entries
   if (code === 'book-too-large') return LORE_LIMITS.totalChars
   return 0
@@ -347,6 +347,9 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
   useEffect(() => { onFocusLayerChange?.(focusId !== '') }, [focusId, onFocusLayerChange])
 
   const totals = useMemo(() => loreTotals(entries), [entries])
+  /** 没有任何需要动作的问题（error=0 且 warn=0）→ 顶部只给一句「体检通过」 */
+  const passes = totals.errors === 0 && totals.warns === 0
+
   /** 体检结果按条目归堆：展开某条时只显示它自己的问题。 */
   const issuesByEntry = useMemo(() => {
     const map = new Map<string, LoreIssue[]>()
@@ -491,21 +494,35 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
                 })}
               </div>
 
-              {/* 体检分组摘要 + 列表：错误/提醒默认展开，提示默认折叠 */}
-              <div className="awu-loreHealth">
-                <span className="awu-exportPill" data-state={totals.errors > 0 ? 'bad' : totals.errors + totals.warns > 0 ? 'warn' : 'ok'}>
-                  {t('lore.level.error')} {totals.errors}
-                </span>
-                <span className="awu-exportPill" data-state={totals.warns > 0 ? 'warn' : 'none'}>
-                  {t('lore.level.warn')} {totals.warns}
-                </span>
-                <span className="awu-exportPill" data-state={totals.infos > 0 ? 'warn' : 'none'}>
-                  {t('lore.level.info')} {totals.infos}
-                </span>
-                {totals.errors + totals.warns === 0 && (
-                  <span className="awu-hint">{t('lore.healthOk')}</span>
-                )}
-              </div>
+              {/*
+                体检结论：**没有任何需要动作的问题**时只给一句「体检通过」，
+                不再挂一排「错误 0 / 提醒 0 / 提示 2」的胶囊——主人要的是「有没有事要处理」，
+                不是报表。有 error/warn 时才显示分组计数。
+              */}
+              {passes ? (
+                <div className="awu-loreHealth" data-state="ok">
+                  <span className="awu-exportPill" data-state="ok">{t('lore.healthPass')}</span>
+                </div>
+              ) : (
+                <div className="awu-loreHealth">
+                  {/* 计数为 0 的档位不挂胶囊：0 条没有动作可做，摆出来又是噪声 */}
+                  {totals.errors > 0 && (
+                    <span className="awu-exportPill" data-state="bad">
+                      {t('lore.level.error')} {totals.errors}
+                    </span>
+                  )}
+                  {totals.warns > 0 && (
+                    <span className="awu-exportPill" data-state="warn">
+                      {t('lore.level.warn')} {totals.warns}
+                    </span>
+                  )}
+                  {totals.infos > 0 && (
+                    <span className="awu-exportPill" data-state="warn">
+                      {t('lore.level.info')} {totals.infos}
+                    </span>
+                  )}
+                </div>
+              )}
 
               {(errorIssues.length > 0 || warnIssues.length > 0) && (
                 <ul className="awu-issueList awu-loreIssueList" role="status" aria-live="polite">
@@ -523,6 +540,7 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
                     aria-expanded={showInfo}
                     onClick={() => setShowInfo(current => !current)}
                   >
+                    <IconChevron size={11} style={{ transform: showInfo ? 'rotate(90deg)' : 'none' }} />
                     {showInfo ? t('lore.issues.hideInfo') : t('lore.issues.showInfo', { n: infoIssues.length })}
                   </button>
                   {showInfo && (
