@@ -269,7 +269,7 @@ ellipsis 没有裁切上下文。
 }
 ```
 
-`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 八套自检`，
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 九套自检`，
 另有独立的 `npm run typecheck:client`。
 
 > 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
@@ -502,7 +502,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 八套自检（合计 641 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 720 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -519,7 +519,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 八套合计 **641 项**。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **720 项**（截至 v0.3.0 验收轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -553,7 +553,7 @@ pnpm install --lockfile-only --prefer-offline
 | 项 | 说明 |
 |---|---|
 | **改名功能** | 涉及目录重命名，需后端加 `POST /character/rename {from, to}` |
-| ~~**蒸馏角色**~~ | ✅ 已做（`src/distill.ts` + `awu_card_save` + 面板 CTA，`verify-distill` 93 项） |
+| ~~**蒸馏角色**~~ | ✅ 已做（`src/distill.ts` + `awu_card_save` + 面板 CTA，`verify-distill` 121 项） |
 | ~~**PNG/CHARX 导入**~~ | ✅ 已做（`src/import-card.ts` + 面板「导入角色卡」，`verify-import` 49 项） |
 | ~~**一键导入原 skill 数据**~~ | ✅ 已覆盖：`characters/` 下旧格式卡读时自动归一；外部卡走「导入角色卡」 |
 | **淡入淡出动画细化** | 目前动效已有，可继续打磨 |
@@ -692,7 +692,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
 | `awu_diary_write` 支持 `topic` / `mood`（同事务写 session） | `src/tools.ts`、`src/store.ts` | 盘活 L1 的两个死字段 |
 | 面板「导入角色卡」（PNG / CHARX / JSON，预览不落盘、同名二次确认）+ 编辑器第 11 分区「世界书」 | `client/index.tsx`、`client/card-editor.tsx`、`client/lorebook-editor.tsx`（新）、`client/text.ts` | 后端 `POST /character/import` 与世界书数据层都在，界面零入口 = 白做 |
 | 清死路由 `ROUTES.distillParse` / `parseDistillCard` | `client/api.ts` | 宿主从没注册这条路由，留着就是永远抛 `ApiUnavailableError` |
-| 新增 `scripts/verify-wiring.mjs`（接线体检，8 组断言，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
+| 新增 `scripts/verify-wiring.mjs`（接线体检，14 组断言：8 组接线 + 6 组验收回归，含产物漂移检查） | `scripts/verify-wiring.mjs` | 见下 |
 
 ### 为什么要一个「接线体检」脚本
 
@@ -704,7 +704,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
    **全项目零引用**，世界书改不了。
 
 这两种状态下 `tsc`、esbuild、七套自检（当时还没有 `verify-wiring`）**全是绿的**——因为类型检查只问「类型对不对」，不问「有没有人调用」。
-`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 8 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
+`scripts/verify-wiring.mjs` 就干这一件事：纯静态读源码，断言 14 组接线（导入入口 / 世界书接线与文案 key / 死路由已清 /
 纪律包名字 order 长度 / `awu_mode` 与 `awu_relation.set` / `SessionState` 新字段 / 世界书改动是否随 `ccv3` 发出去 /
 **产物里的纪律包文本与源码逐字一致**）。
 拿不准的用 `[skip]`，不误报——红点必须都是真问题，否则没人看。
@@ -751,3 +751,138 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
 
 这次没覆盖到的（留给下一轮或发版后观察）：真机重装后的面板点击链路（导入 → 预览 → 覆盖 → 世界书编辑 → 保存回读）、
 `awu_mode` / `awu_relation.set` 在真实模型对话里的调用时机、`relation_log` 长期增长到 50 条后的面板呈现。
+
+---
+
+## 十一、2026-10-31 · 验收轮（v0.3.0 真机反馈 7 条）
+
+主人在真机上装了 v0.3.0 跑了一遍，报 7 条：**6 条前端、1 条宿主侧过严**。全部自检当时是绿的——
+这些都不是「代码坏了」，而是「代码按实现者的假设跑，但主人的用法不在假设里」。所以这一节记的是**根因**，不是改动清单。
+
+行号是 v0.3.0（HEAD `90cd1ec`）当时的，客户端文件一直在动，**别拿行号当锚点**，看函数名/文案 key。
+
+### 逐条：现象 → 根因 → 改法 → 归属
+
+| # | 现象 | 根因 | 改法 | 归属 |
+|---|---|---|---|---|
+| 1 | 日记页右侧显示「先启用或选择一位角色」，但明明选了卡 | `client/index.tsx:1351` 的 `viewName` 只在日记 tab 看 `active.character`：选了卡但没启用 = 空串，于是走空态 | 改为「先 `detailName`，再 `active.character`」；空态拆三分支（没选/没日记/加载失败），「没有日记」单独文案 | E |
+| 2 | **把卡拖进导入框，文件被发到会话输入框** | `client/index.tsx:601-628` 的 dropzone 只 `preventDefault()`，**没 `stopPropagation()`** → drop 事件冒泡到宿主 composer，它照样接文件 | 弹层根节点统一 `preventDefault + stopPropagation`；框外 drop 给「拖到虚线框里」提示；弹层打开期间挂 document 级兜底并记得卸载 | E |
+| 3 | 提示条（notice）常驻不消失 | `client/index.tsx:1232` 只有 `useState('')` + 各处 `setNotice(...)`，**没有任何计时器** | 成功类 5 秒自动消失 + 手动关闭；错误类留待手关；新提示覆盖旧计时器（cleanup 清）；`aria-live="polite"` | E |
+| 4 | 找不到在哪里切「纯文本 / 文本 + 动作」 | 模式开关藏在「启用中角色」状态条的小图标里（`client/index.tsx:1803-1820`）：**没启用角色就完全看不到**，而 mode 其实是偏好不需要角色 | 角色簿左栏工具栏加两枚显式胶囊（当前值高亮），不需要启用就能点，点击即 `POST /mode`；原图标入口保留 | E |
+| 5 | 「新建角色」和「蒸馏角色卡」一大一小、名字不对仗 | 两个入口是不同时期加的：蒸馏是主 CTA（大），新建是 `data-size="sm"` 的小按钮，文案 `roster.new`=「新建角色」 | 改名**「自创角色卡」**（中英各一），与「蒸馏角色卡」同级并排、同级尺寸；断言按「文案 key + 同一工具栏」判，不写行号 | E |
+| 6 | 自创角色卡只有三个空字段，想让人设自己长出来 | 新建弹层（`client/index.tsx:369` 起）只调 `draftCard` + `saveCharacter` 落骨架，**宿主那条 arm 通道只服务蒸馏**（`DistillArm` 没有 `kind`） | 加「让 AI 补全人设」勾选：先存骨架卡 → `POST /distill/arm {kind:'create'}` → 复用蒸馏的 `insertText → submit` 通道 → 关弹层提示已发出。宿主侧 `kind` 区分 `flow.md` / `flow-create.md` | E + D |
+| 7 | 导入大卡被硬拦：「世界书总字数超限（98869，上限 20000）：请精简后再保存」 | `src/tavern.ts:882-883` 的 `CARD_HARD_LIMITS` 里，`bookEntry`/`bookTotal` 和五个原生字段**混在同一个 `assertCardLimits` 硬拦里**（throw 在 `:911` 与 `:916`） | 拆语义：五个原生字段（description 2000 / personality 4000 / scenario 4000 / system_prompt 4000 / post_history 4000）继续硬拦；`bookEntry`/`bookTotal` 改 `collectCardWarnings()` 产出的**软警告**，`saveCard` 返回 `warnings`，`POST /character/save` 与 `/character/import` 都带出来 | D |
+
+### 两条教训（比这 7 条本身更值钱）
+
+**教训 1：`assertCardLimits` 把「有预算的注入」和「无预算直进提示词」混在一个硬拦里。**
+
+世界书是**按需注入**的：`LORE_DEFAULTS` 早就限了 `maxEntries=12 / budgetChars=6000`，一本 9.8 万字的书不会撑爆上下文，
+只是大部分条目这一轮用不到。而那五个原生字段是**整段直进系统提示词**的，没有预算兜底，超了必须拦。
+把两类放在同一个 `assertCardLimits` 里，等于用「最危险那类」的尺度去管「有预算那类」——表现就是「书是好的，插件不让进」。
+
+判据要写成一句话：**这条内容进提示词时有没有预算？** 有预算的给警告，没预算的才拦。
+
+**教训 2：拖放只 `preventDefault()` 不够，必须 `stopPropagation()`。**
+
+`preventDefault()` 只告诉浏览器「这个 drop 不用默认行为」，事件仍然会**往上传**。宿主 composer 在 document 层监听 drop，
+于是文件既进了导入框、又被塞进会话输入框。正确姿势是两层：
+
+```text
+弹层根节点：onDragOver/onDrop → preventDefault() + stopPropagation()   // 拦住冒泡
+document 级：dragover/drop    → preventDefault() + stopPropagation()   // 弹层开着时兜底，关闭即卸载
+```
+
+代价是「document 级监听忘了卸载」会让整个页面再也拖不动文件——所以它和弹层生命周期必须绑在一起。
+
+### 这一轮的断言（verify-wiring [9]–[14]）
+
+六条新断言全部按**文案 key / 结构特征**写，不写行号（客户端文件一直在动，行号断言活不过一天）：
+
+- `[9]` 自创卡 AI 补全接线：client 有 `kind: 'create'` 的 arm 调用 → `src/web.ts` 的 arm 路由读 kind → `distill/flow-create.md` > 2000 字节
+- `[10]` 世界书软警告契约：tavern 不再对 bookEntry/bookTotal 抛错 → save 响应含 `warnings` → client 保存返回类型收 `warnings`
+- `[11]` 提示条自动消失：notice 有 `setTimeout` + `clearTimeout`，且有专门的可关闭入口（通用 `common.close` 不算数，那样判绿等于没判）
+- `[12]` 按钮文案与同级：中英各一条「自创角色卡」→ 与 `DistillEntry`（蒸馏角色卡）在同一工具栏跨度内
+- `[13]` mode 三段契约：`/mode` 路由块里不再有 `resolveName` 硬解析（无目标不抛错）→ 响应含 `scope` 与 `global` 分支 → 无目标时仍写全局兜底（`prompt.setMode`）
+- `[14]` 补全手册的名字约束：`flow-create.md` 里要有「以给定/面板名字为准、不改名」的硬约束，以及「`overwrite:true` 覆盖同名骨架卡（不是新建）」
+
+`[13]` 与 `[14]` 是 Lead 拍板后从「真机才能发现」升级成静态断言的：前者是**契约缺口**（见下），
+后者是**手册缺陷**——两者都能靠读源码/读文档判出来，没理由留给真机。
+
+拿不准的一律 `[skip]`：比如「文案还没改」时，同级那条会跳过而不是拿旧 key 判绿——**假绿点比红点更坏**，
+它会让人以为这条已经验过了。
+
+### 这一轮没验透、需要真机复看的两处
+
+1. **拖放的两层监听有没有正确卸载**（第 2 条）：静态脚本只能看出「有没有 `stopPropagation()`」，
+   看不出 document 级监听是否在弹层关闭时卸载。忘了卸 = 整个页面从此拖不动文件；拦得太宽 = 面板内其它拖拽也废了。
+   必须真机拖一次、开关弹层再拖一次。
+2. **提示条的计时器有没有只作用于成功类**（第 3 条）：断言只查 `setTimeout` / `clearTimeout` 存在，
+   分不出「错误提示也被 5 秒卷走」。错误提示自动消失会让用户错过失败原因，比常驻更糟。
+
+> 另外两条曾经也只能真机看，现在已经被钉死：
+> **模式胶囊**——`/mode` 原来的 `resolveName`（`src/web.ts:182-187`）在「body 无 name 且没启用角色」时直接
+> throw「缺少角色名，且当前没有启用角色」，而面板的 `setInteractionMode(mode)` 只发 `{ mode }`，胶囊点下去就是 400。
+> 契约改成三段（有启用→session / 带 name→该角色 / 都没有→全局兜底 `_active.mode` + `scope:'global'`）后，`[13]` 守着它。
+> **AI 补全的名字一致性**——`awu_card_save` 的 `overwrite:true` 按名字匹配，AI 若按自己推断的名字落盘，
+> 结果不是补全而是**多出一张壳卡**；现在 `flow-create.md` 里写死了「按给定名字 + overwrite 覆盖」，`[14]` 守着它。
+
+### 集成验收记录（F2，九套全量）
+
+`npm run build` 一次过，九套自检合计 **720 项通过 / 0 失败**（日志里 ✓ 720、✗ 0，`exit=0`）：
+
+| 自检 | 通过项 |
+|---|---|
+| `verify-bundle`（客户端产物可加载） | 9 |
+| `verify-wiring`（14 组接线 + 验收回归 + 产物漂移） | 33 |
+| `verify`（产物形状 / 新鲜度 / 孤儿产物） | 15 |
+| `verify-tavern`（卡格式 / 迁移 / 世界书 / 软警告） | 254（+36） |
+| `verify-distill`（蒸馏 / 补全武装 / kind） | 121（+28） |
+| `verify-import`（PNG / CHARX / JSON） | 49 |
+| `verify-session`（会话 / 指令 / 纪律包 / 关系） | 184 |
+| `verify-host`（真实 cordis 装配） | 55 |
+
+产物抽查（26 项全命中）：`lib/client.js` 272.9 KB 里有「自创角色卡 / 蒸馏角色卡 / 纯文本 / 文本 + 动作 /
+让 AI 补全人设 / 还没有日记 / 把卡拖到」，以及 `cta.selfCreate`、`new.aiFill`、`notice.close`、
+`awu-ctaRow`、`awu-modePill`、`awu-importDrop`、`kind:"create"`、`scope`；`lib/prompt.js` 里纪律包段名与正文都在。
+
+> ⚠️ 两个产物工具的编码行为**不一致**，抽查时容易误判：esbuild（`lib/client.js`）默认 `charset: ascii`，
+> 中文是 `\uXXXX`（9699 处，0 个未转义汉字）；tsc（`lib/prompt.js`）**保留原始 UTF-8**，直接 grep 中文即可。
+> 我自己第一次抽查就踩了两次：把空格也转义了（`文本 + 动作` 假失配）、拿转义串去查 prompt.js（`禁止词库` 假失配）。
+
+### 主人报的 7 条：逐条判定
+
+| # | 判定 | 依据（静态可查的部分） |
+|---|---|---|
+| 1 日记空态错 | **已修** | `viewName = tab==='diary' ? (detailName || (active.enabled ? active.character : '')) : detailName`；三分支齐：无选择→提示、无日记→`diary.emptyFor`+`emptyForHint`、加载失败→`data-kind="error"` + `detailError` 原文 + 重试按钮 |
+| 2 拖卡发进会话框 | **已修**（细节需真机） | 四层：拖放区 `preventDefault+stopPropagation`、`Overlay` 遮罩对文件拖放 `preventDefault+stopPropagation` 并回调「把卡拖到虚线框里」、弹层打开期间 document 捕获阶段 `dragover/drop` 兜底（`dialog !== ''` 才挂、卸载清理齐）、面板根节点常驻吞文件拖放 |
+| 3 提示条常驻 | **已修** | `notice: {text, tone}` + `NOTICE_TTL_MS=5000`，**只有 `tone==='ok'` 才起计时器**、`warn` 留待手关；新提示先 `clearNoticeTimer()`；卸载 `useEffect` 清计时器；`dismissNotice` 供关闭按钮用 |
+| 4 模式没暴露 / 无卡时不能切 | **已修** | 工具栏两枚胶囊（`awu-modePill`，当前值 `data-on`）；`applyMode` 有选中卡时带 `targetName`，无目标时走后端三段返回 `scope:'global'` 并提示「待启用生效」（`mode.pending`），不报错 |
+| 5 按钮一大一小 | **已修** | `cta.selfCreate` =「自创角色卡」/「Create card」，中英齐；与 `<DistillEntry>` 同在 `awu-ctaRow` 一行同级 |
+| 6 自创卡缺 AI 补全 | **已修**（省与否两条路径都在） | 勾选 → `submitWithAi`：先 `saveCharacter` 落骨架卡 → `armDistill({kind:'create'})` → 复用 `insertText→submit`；**不勾选 → `submitForm` 只落表单卡**（旧行为不变，`new.done` 提示） |
+| 7 大卡被硬拦 | **已修** | `collectCardWarnings` 替代 bookEntry/bookTotal 的 throw；`saveCard` 返回 warnings；`/character/save` 与 `/character/import` 都带出（导入预览就已经看见）；五个原生字段仍硬拦 |
+
+**需真机复看的**（静态断言碰不到）：拖放的两层监听在开关弹层后是否干净（忘卸 = 整页拖不动文件）、
+提示条是否真的只对成功类计时（`warn` 类不该被卷走）、AI 补全跑完后是否**覆盖**了骨架卡而不是多落一张。
+
+### 两条独立判断（不采信实现者的结论，自己验）
+
+**① 面板内非导入态的文件拖放被整体吞掉 —— 是取舍，但「吞而不告」欠一句提示。**
+`.awu-panel` 根节点常驻 `onDragOver/onDrop`，只对 `Files` 类型 `preventDefault+stopPropagation`。
+放行的代价很明确：宿主 composer 在 document 层收 drop，卡文件会被当附件发进对话（就是主人报的第 2 条）。
+所以「吞」方向是对的，而且它只拦文件、不影响面板内文字拖拽与滚动（有 `dragHasFiles` 判断）。
+欠的是反馈：用户在面板上拖一张卡进去，界面毫无变化，而导入弹层内同样的动作会提示「把卡拖到虚线框里」。
+建议（低优先级）：面板根收到文件 drop 时给一句「卡文件请从『导入角色卡』拖入」，或直接打开导入弹层预览。
+
+**② 日记页看非启用卡时不显示关系条 —— 方向对，但只做对了一半。**
+现实现是 `relation={diaryDetail.name === liveName ? relation : undefined}`：拿「启用中角色的关系」去贴在别人的日记上是错的
+（代码注释也这么写），这点判断正确。但 `GET /character` **本来就按卡返回 `relation`**（`client/api.ts` 的 `charDetail.relation`），
+所以被看那张卡自己的档位是拿得到的。现在的写法把「别人的关系」和「自己的关系」一起否掉了：
+不贴错数据 ✅，但用户看某张卡的日记时看不到它自己的关系状态（信息缺失，不是数据错误）。
+是否补上属于产品判断——若日记页不打算承担「看关系」职责，现状可接受；若要补，用 `diaryDetail.relation` 而不是 `active` 那份。
+
+### 这次没覆盖到的
+
+真机点击链路（导入 → 预览 → 同名覆盖 → 世界书编辑 → 保存回读 → 提示条自动消失）、
+`awu_mode` / `awu_relation.set` 在真实模型对话里的调用时机、AI 补全端到端（真实模型是否按 `flow-create.md` 先问 3–5 个问题、
+是否按给定名字覆盖）、桌面 profile 重启加载。

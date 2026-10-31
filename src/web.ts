@@ -15,10 +15,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Store, DiaryEditInput, RelationBand } from './store.js'
 import { RELATION_BANDS } from './store.js'
 import type { PromptController } from './prompt.js'
-import type { DistillArm } from './distill.js'
+import type { DistillArm, DistillKind } from './distill.js'
 import { distillFlowInfo } from './distill.js'
 import { parseCardBuffer } from './import-card.js'
-import { normalizeCard, cardName, toLegacyView } from './tavern.js'
+import { normalizeCard, cardName, collectCardWarnings, toLegacyView } from './tavern.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
 
@@ -153,6 +153,18 @@ async function afterWrite(prompt: PromptController): Promise<void> {
 }
 
 /**
+ * 解析「时间窗通道」：`distill`（从作品蒸馏，缺省）| `create`（骨架卡 AI 补全）。
+ *
+ * 缺省 distill 是**向后兼容**（旧面板的 arm 请求不带 kind）；非法值直接 400，
+ * 不静默降级——面板写错 kind 时如果悄悄开了蒸馏窗口，用户会拿到一份错的指令。
+ */
+function parseKind(value: unknown, where: string): DistillKind {
+  if (value === undefined || value === null || value === '') return 'distill'
+  if (value === 'distill' || value === 'create') return value
+  throw new Error(`${where} 的 kind 只能是 distill 或 create（收到 ${String(value)}）`)
+}
+
+/**
  * 构造全部路由。返回 method+path → handler 的映射，由 index.ts 统一注册。
  *
  * ⚠️ `webServer.register` 只吃 `{kind, path, handler}`，**`method` 字段从未生效**（host.md P0-1）。
@@ -283,7 +295,14 @@ export function buildRoutes(
         // 结构是权威、原生是投影：给 card 就重投影，extensions.aiwu / character_book 原样保留
         const saved = await store.saveCard({ name, card, ccv3 })
         if (prompt.characterName === name) await afterWrite(prompt)
-        send(res, 200, { ok: true, name: saved.name, card: toLegacyView(saved.card), ccv3: saved.card })
+        // warnings：保存**成功**但值得提示的事（当前是世界书超出建议预算，不拦、不截断）
+        send(res, 200, {
+          ok: true,
+          name: saved.name,
+          card: toLegacyView(saved.card),
+          ccv3: saved.card,
+          warnings: saved.warnings,
+        })
       }),
     },
     // ------------------------------------------------------------ 导入酒馆卡（PNG / CHARX / JSON）
@@ -303,11 +322,14 @@ export function buildRoutes(
         const name = cardName(ccv3).trim()
         if (name === '') throw new Error('无法确定角色名：卡片里没有 name，文件名也推不出来')
         const conflict = (await store.readCcV3(name)) === undefined ? undefined : { name }
+        // 导入预览就把「世界书超出建议预算」告诉用户：解析器自己的 warnings + 卡片软警告，
+        // 这样用户在点"确认导入"之前就知道这本世界书有多大、会不会被截（答：不会截，只是命中变少）。
+        const warnings = [...parsed.warnings, ...collectCardWarnings(ccv3)]
         // **不写盘**：用户在面板确认后才走 /character/save
         send(res, 200, {
           ok: true,
           format: parsed.format,
-          warnings: parsed.warnings,
+          warnings,
           ccv3,
           name,
           ...(conflict === undefined ? {} : { conflict }),
@@ -355,18 +377,26 @@ export function buildRoutes(
       handler: guard(async (req, res) => {
         const body = await readBody(req)
         const mode = body['mode'] === 'text' ? 'text' : 'text+action'
-        // 兼容旧调用：body 不带 name 时操作当前启用角色；带了 name 也可指定（面板/多存档工具）
-        const name = resolveName(body)
-        if (name === prompt.characterName) {
-          // 统一入口：session.json 写权威值，_active.json 同步兜底，并刷新 L1 的模式段
+        const explicit = String(body['name'] ?? '').trim()
+        const activeName = prompt.characterName
+
+        // ① 有启用角色（body 带不带 name 只要是同一个）：session 权威 + _active 兜底，并刷新 L1 模式段
+        if (activeName !== undefined && (explicit === '' || explicit === activeName)) {
           const result = await prompt.applyInteractionMode(mode)
-          send(res, 200, { ok: true, active: result.active, name, mode })
+          send(res, 200, { ok: true, active: result.active, name: activeName, mode, scope: 'session' })
           return
         }
-        // 指定的不是当前启用角色：只写它的会话模式，同时把全局兜底对齐（保持两处口径一致）
-        await store.setMode(name, mode)
+        // ② 没启用 / 指定的不是启用中的角色，但 body 带了 name：写那张卡的 session + 对齐全局兜底
+        if (explicit !== '') {
+          await store.setMode(explicit, mode)
+          const active = await prompt.setMode(mode)
+          send(res, 200, { ok: true, active, name: explicit, mode, scope: 'session' })
+          return
+        }
+        // ③ 既没启用角色、body 也没带 name：只写全局兜底，**不报错**。
+        //    语义 =「这是你对下一个启用角色的默认偏好」——对话模式胶囊在空闲态也要能点。
         const active = await prompt.setMode(mode)
-        send(res, 200, { ok: true, active, name, mode })
+        send(res, 200, { ok: true, active, mode, scope: 'global' })
       }),
     },
     // ------------------------------------------------------------ 纪律包档位
@@ -539,33 +569,43 @@ export function buildRoutes(
         send(res, 200, { ok: true, ...result })
       }),
     },
-    // ------------------------------------------------------------ 蒸馏：流程文件（只读，不武装）
+    // ------------------------------------------------------------ 流程文件（只读，不武装）
     {
       method: 'GET',
       path: `${ROUTE_PREFIX}/distill/flow`,
       handler: guard(async (req, res) => {
         requireMethod(req, 'GET')
-        // 指令里只有 flow.md 的绝对路径与一句要求；流程正文永不进提示词（L2 铁律）
-        send(res, 200, { ok: true, ...await distillFlowInfo() })
+        // `?kind=distill`（缺省，向后兼容）| `create`（自创角色 AI 补全）
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const kind = parseKind(url.searchParams.get('kind'), 'GET /distill/flow')
+        // 指令里只有流程文件的绝对路径与一句要求；流程正文永不进提示词（L2 铁律）
+        send(res, 200, { ok: true, ...await distillFlowInfo(kind, url.searchParams.get('name') ?? undefined) })
       }),
     },
-    // ------------------------------------------------------------ 蒸馏：临时武装（挂 awu_card_save）
+    // ------------------------------------------------------------ 临时武装（挂 awu_card_save）
     {
       method: 'POST',
       path: `${ROUTE_PREFIX}/distill/arm`,
       handler: guard(async (req, res) => {
         requireMethod(req, 'POST')
-        if (arm === undefined) throw new Error('当前宿主未提供蒸馏武装能力（工具服务未就绪）')
-        const flow = await distillFlowInfo()
-        // 先读指令再武装：flow.md 缺失时不要先把工具挂上去
-        const snapshot = arm.arm()
+        if (arm === undefined) throw new Error('当前宿主未提供时间窗武装能力（工具服务未就绪）')
+        // body 可空（旧面板不带 body）：不带就是蒸馏通道
+        const body = await readBody(req)
+        const kind = parseKind(body['kind'], 'POST /distill/arm')
+        const name = typeof body['name'] === 'string' ? body['name'].trim() : ''
+        // 先读指令再武装：流程文件缺失时不要先把写卡权力开出去
+        const flow = await distillFlowInfo(kind, name)
+        const snapshot = arm.arm(undefined, kind)
         send(res, 200, {
           ok: true,
           armed: snapshot.armed,
+          // kind 必须回给面板：create 通道的 UI 文案与 distill 不同（同一个窗口，两条入口）
+          kind: snapshot.kind,
           expiresAt: snapshot.expiresAt ?? '',
           instruction: flow.instruction,
           path: flow.path,
           chars: flow.chars,
+          name: flow.name,
         })
       }),
     },
@@ -575,7 +615,7 @@ export function buildRoutes(
       handler: guard(async (req, res) => {
         requireMethod(req, 'POST')
         arm?.disarm()
-        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false }) })
+        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false, kind: 'distill' }) })
       }),
     },
     {
@@ -583,7 +623,7 @@ export function buildRoutes(
       path: `${ROUTE_PREFIX}/distill/state`,
       handler: guard(async (req, res) => {
         requireMethod(req, 'GET')
-        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false }) })
+        send(res, 200, { ok: true, ...(arm?.snapshot() ?? { armed: false, kind: 'distill' }) })
       }),
     },
   ]

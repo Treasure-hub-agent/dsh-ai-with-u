@@ -33,6 +33,7 @@ import { createPortal } from 'react-dom'
 import type { JSX } from 'react'
 
 import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
+import type { DistillKind } from './api'
 import { IconClose, IconQuill } from './icons'
 import type { Translate } from './text'
 
@@ -242,10 +243,74 @@ export async function sendDistillInstruction(instructionInput?: string): Promise
   }
 }
 
+// ---------------------------------------------------------------- 公共 arm + 发送
+
+/** arm 请求载荷：两条流程共用同一个窗口接口。 */
+export interface ArmRequest {
+  kind: DistillKind
+  /** 仅 `create` 用：要补全的骨架卡名（宿主据此把覆盖目标钉进指令）。 */
+  name?: string
+}
+
+/**
+ * 「给这张骨架卡补全人设」的 arm 载荷。
+ *
+ * 宿主靠 `kind` 分流执行手册（distill → flow.md，create → flow-create.md），
+ * 再用 `name` 把「补完覆盖哪张卡」写进指令 —— 所以名字必须一起送。
+ */
+export function createArm(name: string): ArmRequest {
+  return { kind: 'create', name }
+}
+
+/** 「从作品蒸馏一张新卡」用的 arm 载荷（默认就是它）。 */
+export const DISTILL_ARM: ArmRequest = { kind: 'distill' }
+
+/** arm + 发送的合成结果。 */
+export interface ArmSendOutcome {
+  /** arm 是否成功；失败时没有指令可发 */
+  armed: boolean
+  /** arm 失败原因（后端原文，直接给用户看） */
+  armError?: string
+  /** 要发进会话的指令（arm 失败时为空串） */
+  instruction: string
+  /** 发送结果；arm 失败时为 undefined */
+  send?: SendResult
+}
+
+/**
+ * 公共「让 AI 干活」通道：`arm(kind)` → `insertText` → `submit`。
+ *
+ * 蒸馏入口（`DistillDialog`）与自创卡补全入口（新建弹层）**共用这一个函数**，
+ * 两条流程只差 `kind`；insertText / submit 那套防御逻辑只留一份，谁也别再抄第二遍。
+ *
+ * 顺序不能反：AI 的落盘工具只在 arm 出来的窗口内可用，先发指令再 arm 会让它存不了卡。
+ */
+export async function armAndSendInstruction(request: ArmRequest = DISTILL_ARM): Promise<ArmSendOutcome> {
+  let instruction = ''
+  try {
+    instruction = (await armDistill(request.kind, request.name)).instruction
+  } catch (error) {
+    return { armed: false, armError: errorText(error), instruction: '' }
+  }
+  const send = await sendDistillInstruction(instruction)
+  return { armed: true, instruction: send.instruction, send }
+}
+
+/** 发送失败码 → 一句人话（两个入口共用，避免文案两处漂移）。 */
+export function sendFailureText(
+  reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed',
+  t: Translate,
+): string {
+  if (reason === 'no-dock') return t('distill.noDock')
+  if (reason === 'flow-failed') return t('distill.flowFailed')
+  if (reason === 'insert-failed') return t('distill.insertFailed')
+  return t('distill.submitFailed')
+}
+
 // ---------------------------------------------------------------- 复制兜底
 
 /** 复制到剪贴板；失败不抛错（面板会显示可手动选中的文本）。 */
-async function copyText(text: string): Promise<boolean> {
+export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
     if (clipboard !== undefined && typeof clipboard.writeText === 'function') {
@@ -268,6 +333,20 @@ function useBodyScrollLock(active: boolean): void {
     document.body.style.overflow = 'hidden'
     return () => { document.body.style.overflow = previous }
   }, [active])
+}
+
+/**
+ * 遮罩上的文件拖放：一律拦住。
+ *
+ * 这个弹层也是全屏 portal 遮罩，拖一张卡进来时目标就是它；不拦的话事件会冒到
+ * 宿主 composer，图片被当成附件发出去（与面板导入弹层同一个坑）。
+ * 只对「文件类」动手，面板内的文字拖拽不受影响。
+ */
+function swallowFileDrag(event: { dataTransfer: DataTransfer | null; preventDefault: () => void; stopPropagation: () => void }): void {
+  const types = event.dataTransfer?.types
+  if (types === undefined || !Array.from(types).includes('Files')) return
+  event.preventDefault()
+  event.stopPropagation()
 }
 
 export interface DistillDialogProps {
@@ -340,17 +419,13 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
     return () => document.removeEventListener('keydown', onKey, true)
   }, [busy, close])
 
-  const reasonText = (reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed'): string => {
-    if (reason === 'no-dock') return t('distill.noDock')
-    if (reason === 'flow-failed') return t('distill.flowFailed')
-    if (reason === 'insert-failed') return t('distill.insertFailed')
-    return t('distill.submitFailed')
-  }
+  const reasonText = (reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed'): string =>
+    sendFailureText(reason, t)
 
   /**
    * 「开始蒸馏」= arm（开窗口拿指令）→ 发送通道 → 停在第二步如实回显。
    *
-   * 顺序不能反：AI 的落盘工具只在 arm 出来的窗口内可用，先发指令再 arm 会让它存不了卡。
+   * 具体顺序与降级都在 `armAndSendInstruction` 里（与自创卡补全共用同一份实现）。
    */
   const onStart = (): void => {
     if (busy) return
@@ -358,19 +433,16 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
     setNote(undefined)
     setManual('')
     void (async () => {
-      let instruction = ''
-      try {
-        instruction = (await armDistill()).instruction
-      } catch (error) {
-        setStep('result')
-        setNote({ tone: 'err', text: t('distill.armFailed', { reason: errorText(error) }) })
+      const outcome = await armAndSendInstruction(DISTILL_ARM)
+      setStep('result')
+      if (!outcome.armed) {
+        setNote({ tone: 'err', text: t('distill.armFailed', { reason: outcome.armError ?? '' }) })
         return
       }
-      const sent = await sendDistillInstruction(instruction)
-      setManual(sent.instruction)
-      setStep('result')
-      if (!sent.ok) {
-        setNote({ tone: 'err', text: reasonText(sent.reason) })
+      const sent = outcome.send
+      setManual(outcome.instruction)
+      if (sent === undefined || !sent.ok) {
+        setNote({ tone: 'err', text: sent === undefined ? t('distill.insertFailed') : reasonText(sent.reason) })
         return
       }
       sentRef.current = true
@@ -385,7 +457,7 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
 
   const onCopy = (): void => {
     if (manual === '') return
-    void copyText(manual).then(ok => {
+    void copyToClipboard(manual).then(ok => {
       setNote({
         tone: ok ? 'ok' : 'warn',
         text: ok ? t('distill.copied') : t('distill.copyFailed'),
@@ -400,6 +472,8 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
       className="awu-scrim"
       role="presentation"
       onMouseDown={event => { if (event.target === event.currentTarget && !busy) close() }}
+      onDragOver={swallowFileDrag}
+      onDrop={swallowFileDrag}
     >
       <div className="awu-dialog awu-distill-dialog" role="dialog" aria-modal="true" aria-label={t('distill.title')}>
         <div className="awu-dialogHead">
@@ -554,9 +628,9 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
  * （`text.ts` 的兜底行为），这里检测到「原样返回」就退到已有的 `distill.entryTitle`，
  * 保证在 Lead 合并文案之前界面上也不会出现裸 key。
  */
-export function DistillEntry(props: { t: Translate; label?: string }): JSX.Element {
-  const { t, label } = props
-  const raw = t('distill.entryHint')
+export function DistillEntry(props: { t: Translate; label?: string; hint?: string }): JSX.Element {
+  const { t, label, hint: hintProp } = props
+  const raw = hintProp ?? t('distill.entryHint')
   const hint = raw === 'distill.entryHint' ? t('distill.entryTitle') : raw
   return (
     <div className="awu-distill-entry">

@@ -42,7 +42,14 @@ import {
 } from './api'
 import { CardEditor } from './card-editor'
 import type { CardSavePayload } from './card-editor'
-import { DistillEntry } from './distill'
+import {
+  DistillEntry,
+  armAndSendInstruction,
+  copyToClipboard,
+  createArm,
+  sendFailureText,
+  useComposerReady,
+} from './distill'
 import { GuideView, guideFirstRun, markGuideSeen } from './guide'
 import type {
   ActiveState,
@@ -51,6 +58,7 @@ import type {
   CharacterSummary,
   DiaryEntry,
   ImportCharacterResult,
+  InteractionMode,
   Overview,
   RelationState,
 } from './api'
@@ -98,6 +106,15 @@ export interface FooterActionProps {
 
 type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 
+/** 成功类提示条的存活时间（ms）。警告类不吃这个时间，留到用户手动关。 */
+const NOTICE_TTL_MS = 5000
+
+/** 左栏的两枚模式胶囊（顺序即展示顺序）。 */
+const MODE_OPTIONS: Array<{ value: InteractionMode; labelKey: string; hintKey: string }> = [
+  { value: 'text', labelKey: 'mode.text', hintKey: 'mode.textHint' },
+  { value: 'text+action', labelKey: 'mode.action', hintKey: 'mode.actionHint' },
+]
+
 /** 面板与按钮之间的间距（px）。 */
 /** 面板最小可用宽/高，用于贴边时的兜底夹取。 */
 
@@ -131,13 +148,34 @@ function useScrollLock(active: boolean): void {
   }, [active])
 }
 
-/** 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。 */
+/**
+ * 这次拖拽里有没有文件。
+ *
+ * 只对「拖文件」动手：面板内拖一段选中的文字、拖 scrollbar 之类必须照常工作，
+ * 一刀切 `preventDefault` 会把它们全废掉（宿主 composer 也会跟着失灵）。
+ */
+function dragHasFiles(event: { dataTransfer: DataTransfer | null }): boolean {
+  const types = event.dataTransfer?.types
+  if (types === undefined) return false
+  return Array.from(types).includes('Files')
+}
+
+/**
+ * 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。
+ *
+ * 另外**吞掉落在弹层上的文件拖放**：`.awu-scrim` 是 fixed 全屏遮罩，用户拖一张卡进来时
+ * 目标就是它，但事件会继续冒到宿主 composer，图片会被当成附件发出去（真机踩过）。
+ * 这里 `preventDefault + stopPropagation` 在冒泡阶段收口；虚线拖放区在内层先接住，
+ * 所以真正的拖放不受影响。
+ */
 function Overlay(props: {
   label: string
   onClose: () => void
   children: JSX.Element | JSX.Element[]
+  /** 弹层里「没落在拖放区上」的文件：默认只是吞掉；传了就顺手回调（用于给一句提示） */
+  onFilesDropped?: (files: FileList) => void
 }): JSX.Element {
-  const { label, onClose, children } = props
+  const { label, onClose, children, onFilesDropped } = props
   const boxRef = useRef<HTMLDivElement | null>(null)
   useScrollLock(true)
 
@@ -163,6 +201,18 @@ function Overlay(props: {
       role="presentation"
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose()
+      }}
+      onDragOver={event => {
+        if (!dragHasFiles(event)) return
+        event.preventDefault()
+        event.stopPropagation()
+      }}
+      onDrop={event => {
+        if (!dragHasFiles(event)) return
+        event.preventDefault()
+        event.stopPropagation()
+        const files = event.dataTransfer?.files
+        if (files !== undefined && files.length > 0) onFilesDropped?.(files)
       }}
     >
       <div ref={boxRef} className="awu-dialog" role="dialog" aria-modal="true" aria-label={label}>
@@ -366,92 +416,307 @@ function CharacterTile(props: {
   )
 }
 
-// ---------------------------------------------------------------- 新建角色弹层
+// ---------------------------------------------------------------- 自创角色卡弹层
+
+/** 自创卡落档后的收尾信息：面板据此刷新列表、打开新卡、显示提示。 */
+export interface CreatedCardInfo {
+  name: string
+  /** 已翻译好的提示文案（软警告会拼成多行） */
+  notice: string
+  tone: 'ok' | 'warn'
+}
+
+/** 保存提示里把软警告拼进去：有警告就整条转成警示色（不是红条，也不拦保存）。 */
+function composeSavedNotice(base: string, warnings: string[], t: Translate): string {
+  if (warnings.length === 0) return base
+  return `${base}\n${t('notice.warnHead', { n: warnings.length })}\n${warnings.join('\n')}`
+}
 
 function NewCharacterDialog(props: {
   existing: string[]
-  busy: boolean
+  /** 面板级忙碌（别的动作在跑时不要重复提交） */
+  panelBusy: boolean
   onCancel: () => void
-  onCreate: (name: string, role: string, blurb: string) => void
+  onCreated: (info: CreatedCardInfo) => void
   t: Translate
 }): JSX.Element {
-  const { existing, busy, onCancel, onCreate, t } = props
+  const { existing, panelBusy, onCancel, onCreated, t } = props
+  // 会话输入框是否就绪：勾了「AI 补全」却拿不到输入框时，按钮要如实说明（与蒸馏入口同款）
+  const composerReady = useComposerReady()
+
   const [name, setName] = useState('')
   const [role, setRole] = useState('')
   const [blurb, setBlurb] = useState('')
+  /** 勾选后：先落骨架卡，再把补全指令发进当前会话 */
+  const [aiFill, setAiFill] = useState(false)
   const [error, setError] = useState('')
-  const inputRef = useRef<HTMLInputElement | null>(null)
+  /** form = 填表；result = 骨架卡已落盘，正在回显「发没发出去」 */
+  const [step, setStep] = useState<'form' | 'result'>('form')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | undefined>(undefined)
+  /** 指令原文：发不出去时给用户「复制」兜底 */
+  const [manual, setManual] = useState('')
+  const [warnings, setWarnings] = useState<string[]>([])
+  /** 骨架卡已落盘的名字：关层时要通知面板刷新并打开它 */
+  const [created, setCreated] = useState('')
 
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  const locked = busy || panelBusy
+
+  /**
+   * 关层：
+   *  - 骨架卡已落盘 → 通知面板（刷新 + 打开这张卡），提示文案按「发没发出去」如实给；
+   *  - 还没落盘 → 就是普通取消。
+   */
+  const close = (): void => {
+    if (locked) return
+    if (created === '') { onCancel(); return }
+    const fallback = t('new.aiFillSent')
+    const text = note === undefined ? fallback : note.text
+    onCreated({
+      name: created,
+      notice: composeSavedNotice(text, warnings, t),
+      tone: note !== undefined && note.tone === 'ok' && warnings.length === 0 ? 'ok' : 'warn',
+    })
+  }
+
+  const submitForm = (trimmed: string): void => {
+    setBusy(true)
+    setError('')
+    void saveCharacter(trimmed, draftCard(trimmed, role.trim(), blurb.trim()))
+      .then(saved => {
+        if (!aliveRef.current) return
+        const warns = saved.warnings ?? []
+        onCreated({
+          name: trimmed,
+          notice: composeSavedNotice(t('new.done', { name: trimmed }), warns, t),
+          tone: warns.length === 0 ? 'ok' : 'warn',
+        })
+      })
+      .catch((e: unknown) => { if (aliveRef.current) setError(t('new.saveFailed', { reason: errorText(e) })) })
+      .finally(() => { if (aliveRef.current) setBusy(false) })
+  }
+
+  /**
+   * 勾了「AI 补全」的提交：**先落骨架卡，再 arm(create) → 发送**。
+   *
+   * 顺序不能反：AI 的落盘工具只在 arm 出来的窗口内可用；而骨架卡必须先存在，
+   * 否则 AI 补完也没处落（它补的是同一张卡）。发送通道与蒸馏入口共用
+   * `armAndSendInstruction`，降级（输入框不可用 / 提交失败）一律把指令原文摆出来给「复制」。
+   */
+  const submitWithAi = (trimmed: string): void => {
+    setBusy(true)
+    setError('')
+    void (async () => {
+      let warns: string[] = []
+      try {
+        const saved = await saveCharacter(trimmed, draftCard(trimmed, role.trim(), blurb.trim()))
+        warns = saved.warnings ?? []
+      } catch (e) {
+        if (aliveRef.current) setError(t('new.saveFailed', { reason: errorText(e) }))
+        return
+      }
+      if (!aliveRef.current) return
+      setCreated(trimmed)
+      setWarnings(warns)
+
+      const outcome = await armAndSendInstruction(createArm(trimmed))
+      if (!aliveRef.current) return
+      setStep('result')
+      if (!outcome.armed) {
+        setNote({ tone: 'err', text: t('new.aiArmFailed', { reason: outcome.armError ?? '' }) })
+        return
+      }
+      setManual(outcome.instruction)
+      const send = outcome.send
+      if (send === undefined || !send.ok) {
+        const reason = send === undefined ? t('distill.insertFailed') : sendFailureText(send.reason, t)
+        setNote({ tone: 'err', text: reason })
+        return
+      }
+      if (send.mode === 'sent') setNote({ tone: 'ok', text: t('new.aiFillSent') })
+      else if (send.note === 'busy') setNote({ tone: 'warn', text: t('new.aiFillFilledBusy') })
+      else setNote({ tone: 'warn', text: t('new.aiFillFilled') })
+    })().catch((e: unknown) => {
+      if (aliveRef.current) setError(errorText(e))
+    }).finally(() => { if (aliveRef.current) setBusy(false) })
+  }
+
   const submit = (): void => {
+    if (locked) return
     const trimmed = name.trim()
     if (trimmed === '') { setError(t('new.nameRequired')); return }
     if (existing.includes(trimmed)) { setError(t('new.nameTaken')); return }
+    // 勾了补全却拿不到会话输入框：和按钮置灰保持一致，别让回车绕过这道闸
+    if (aiFill && !composerReady) { setError(t('distill.noDock')); return }
     setError('')
-    onCreate(trimmed, role.trim(), blurb.trim())
+    if (aiFill) submitWithAi(trimmed)
+    else submitForm(trimmed)
   }
 
   const onKey = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
     if (event.key === 'Enter') { event.preventDefault(); submit() }
   }
 
+  const copyInstruction = (): void => {
+    if (manual === '') return
+    void copyToClipboard(manual).then(ok => {
+      setNote({ tone: ok ? 'ok' : 'warn', text: ok ? t('distill.copied') : t('distill.copyFailed') })
+    })
+  }
+
+  const failedToSend = note !== undefined && note.tone === 'err'
+  const toneColor = note === undefined
+    ? 'var(--awu-ink-mute)'
+    : note.tone === 'err' ? 'var(--awu-danger)' : note.tone === 'warn' ? 'var(--awu-gold)' : 'var(--awu-teal)'
+
   return (
-    <Overlay label={t('new.title')} onClose={onCancel}>
+    <Overlay label={t('new.title')} onClose={close}>
       <div className="awu-dialogHead">
         <IconMask size={16} />
         <span>{t('new.title')}</span>
       </div>
+
       <div className="awu-dialogBody">
-        <label className="awu-label" htmlFor="awu-new-name">{t('new.name')}</label>
-        <input
-          id="awu-new-name"
-          ref={inputRef}
-          className="awu-input"
-          value={name}
-          maxLength={24}
-          placeholder={t('new.namePlaceholder')}
-          onChange={event => setName(event.target.value)}
-          onKeyDown={onKey}
-        />
-        <label className="awu-label" htmlFor="awu-new-role">{t('new.role')}</label>
-        <input
-          id="awu-new-role"
-          className="awu-input"
-          value={role}
-          maxLength={40}
-          placeholder={t('new.rolePlaceholder')}
-          onChange={event => setRole(event.target.value)}
-          onKeyDown={onKey}
-        />
-        <label className="awu-label" htmlFor="awu-new-blurb">{t('new.blurb')}</label>
-        <input
-          id="awu-new-blurb"
-          className="awu-input"
-          value={blurb}
-          maxLength={80}
-          placeholder={t('new.blurbPlaceholder')}
-          onChange={event => setBlurb(event.target.value)}
-          onKeyDown={onKey}
-        />
-        {name.trim() !== '' && (
-          <div className="awu-previewName">
-            {t('new.preview')}
-            <b>{name.trim()}</b>
-            {role.trim() !== '' && <span> · {role.trim()}</span>}
-          </div>
+        {step === 'form' ? (
+          <>
+            <label className="awu-label" htmlFor="awu-new-name">{t('new.name')}</label>
+            <input
+              id="awu-new-name"
+              ref={inputRef}
+              className="awu-input"
+              value={name}
+              maxLength={24}
+              placeholder={t('new.namePlaceholder')}
+              onChange={event => setName(event.target.value)}
+              onKeyDown={onKey}
+            />
+            <label className="awu-label" htmlFor="awu-new-role">{t('new.role')}</label>
+            <input
+              id="awu-new-role"
+              className="awu-input"
+              value={role}
+              maxLength={40}
+              placeholder={t('new.rolePlaceholder')}
+              onChange={event => setRole(event.target.value)}
+              onKeyDown={onKey}
+            />
+            <label className="awu-label" htmlFor="awu-new-blurb">{t('new.blurb')}</label>
+            <input
+              id="awu-new-blurb"
+              className="awu-input"
+              value={blurb}
+              maxLength={80}
+              placeholder={t('new.blurbPlaceholder')}
+              onChange={event => setBlurb(event.target.value)}
+              onKeyDown={onKey}
+            />
+            {name.trim() !== '' && (
+              <div className="awu-previewName">
+                {t('new.preview')}
+                <b>{name.trim()}</b>
+                {role.trim() !== '' && <span> · {role.trim()}</span>}
+              </div>
+            )}
+
+            {/* 可选：让 AI 把这张骨架卡补全（走与蒸馏同一条发送通道，kind='create'） */}
+            <label className="awu-check">
+              <input
+                type="checkbox"
+                checked={aiFill}
+                disabled={locked}
+                onChange={event => setAiFill(event.target.checked)}
+              />
+              <span>
+                <b>{t('new.aiFill')}</b>
+                <span className="awu-newAiHint">{t('new.aiFillHint')}</span>
+              </span>
+            </label>
+            {aiFill && !composerReady && (
+              <div className="awu-hint" style={{ color: 'var(--awu-gold)', marginTop: 8 }}>{t('distill.noDock')}</div>
+            )}
+
+            {error !== '' && <div className="awu-hint" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
+          </>
+        ) : (
+          <>
+            {created !== '' && (
+              <div className="awu-previewName" style={{ marginTop: 0 }}>
+                {t('new.createdTag')}
+                <b>{created}</b>
+              </div>
+            )}
+            {note !== undefined && (
+              <div className="awu-hint" role="status" aria-live="polite" style={{ color: toneColor, marginTop: 8, whiteSpace: 'pre-wrap' }}>
+                {note.text}
+              </div>
+            )}
+            {warnings.length > 0 && (
+              <>
+                <div className="awu-importWarnHead" style={{ marginTop: 12 }}>{t('new.saveWarnHead', { name: created })}</div>
+                <ul className="awu-importWarns">
+                  {warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+                </ul>
+              </>
+            )}
+            {failedToSend && manual !== '' && (
+              <>
+                <label className="awu-label" htmlFor="awu-new-manual">{t('distill.copy')}</label>
+                <textarea
+                  id="awu-new-manual"
+                  className="awu-distill-paste"
+                  style={{ minHeight: 88 }}
+                  readOnly
+                  value={manual}
+                  onFocus={event => event.currentTarget.select()}
+                />
+              </>
+            )}
+          </>
         )}
-        {error !== '' && <div className="awu-hint" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
       </div>
+
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('new.cancel')}</button>
-        <button type="button" className="awu-btn" data-kind="primary" onClick={submit} disabled={busy}>
-          {busy ? t('common.busy') : t('new.confirm')}
-        </button>
+        {step === 'form' ? (
+          <>
+            <button type="button" className="awu-btn" onClick={close} disabled={locked}>
+              {t('new.cancel')}
+            </button>
+            <button
+              type="button"
+              className="awu-btn"
+              data-kind="primary"
+              onClick={submit}
+              disabled={locked || (aiFill && !composerReady)}
+              title={aiFill && !composerReady ? t('distill.noDock') : t('new.confirm')}
+            >
+              {busy ? t('common.busy') : (aiFill ? t('new.confirmAi') : t('new.confirm'))}
+            </button>
+          </>
+        ) : (
+          <>
+            {failedToSend && manual !== '' && (
+              <button type="button" className="awu-btn" onClick={copyInstruction}>
+                {t('distill.copy')}
+              </button>
+            )}
+            <button type="button" className="awu-btn" data-kind="primary" onClick={close} disabled={locked}>
+              {t('common.close')}
+            </button>
+          </>
+        )}
       </div>
     </Overlay>
   )
 }
+
 
 // ---------------------------------------------------------------- 导入角色卡弹层
 
@@ -493,7 +758,8 @@ function ImportDialog(props: {
   /** 面板级忙碌（别的动作在跑时，别让导入也挤进来） */
   panelBusy: boolean
   onCancel: () => void
-  onImported: (name: string) => void
+  /** 确认保存后的收尾：`warnings` 是后端软提示（世界书超限等），面板用警示色展示 */
+  onImported: (name: string, warnings: string[]) => void
   t: Translate
 }): JSX.Element {
   const { panelBusy, onCancel, onImported, t } = props
@@ -504,6 +770,8 @@ function ImportDialog(props: {
   const [parsed, setParsed] = useState<ImportCharacterResult | undefined>(undefined)
   const [error, setError] = useState('')
   const [confirmOverwrite, setConfirmOverwrite] = useState(false)
+  /** 拖到虚线框外时的提示：不静默吞掉，用户得知道该往哪放 */
+  const [dropHint, setDropHint] = useState('')
 
   const inputRef = useRef<HTMLInputElement | null>(null)
   const aliveRef = useRef(true)
@@ -522,6 +790,7 @@ function ImportDialog(props: {
     setParsed(undefined)
     setError('')
     setConfirmOverwrite(false)
+    setDropHint('')
     // <input type=file> 的值不清掉，重选同一个文件不会触发 change
     if (inputRef.current !== null) inputRef.current.value = ''
   }, [])
@@ -579,7 +848,7 @@ function ImportDialog(props: {
     setError('')
     void (async () => {
       try {
-        await saveCharacterCcv3(parsed.name, parsed.ccv3)
+        const saved = await saveCharacterCcv3(parsed.name, parsed.ccv3)
         const fresh = await fetchCharacter(parsed.name)
         if (!aliveRef.current) return
         if (fresh.name !== parsed.name) {
@@ -588,7 +857,8 @@ function ImportDialog(props: {
         const expect = toLoreDraftFromCard(parsed.ccv3).entries.length
         const actual = toLoreDraftFromCard(fresh.ccv3).entries.length
         if (expect !== actual) throw new Error(t('lore.saveMismatch', { expect, actual }))
-        onImported(parsed.name)
+        // 保存阶段的软警告（世界书超限等）交给面板用警示色展示：保存本身是成功的
+        onImported(parsed.name, saved.warnings ?? [])
       } catch (e) {
         if (!aliveRef.current) return
         setError(errorText(e))
@@ -599,7 +869,11 @@ function ImportDialog(props: {
   }
 
   const onDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+    // 内层拖放区自己接住：preventDefault 允许 drop，stopPropagation 保证事件
+    // 不会冒到弹层遮罩 / 面板 / 宿主 composer（真机上曾把卡当附件发出去）
     event.preventDefault()
+    event.stopPropagation()
+    setDropHint('')
     if (locked) return
     const picked = event.dataTransfer.files[0]
     if (picked !== undefined) accept(picked)
@@ -611,7 +885,7 @@ function ImportDialog(props: {
   }
 
   return (
-    <Overlay label={t('import.title')} onClose={close}>
+    <Overlay label={t('import.title')} onClose={close} onFilesDropped={() => setDropHint(t('import.dropHint'))}>
       <div className="awu-dialogHead">
         <IconImport size={16} />
         <span>{t('import.title')}</span>
@@ -624,7 +898,7 @@ function ImportDialog(props: {
           <div
             className="awu-importDrop"
             data-busy={locked ? 'true' : 'false'}
-            onDragOver={event => { event.preventDefault() }}
+            onDragOver={event => { event.preventDefault(); event.stopPropagation() }}
             onDrop={onDrop}
           >
             <IconImport size={24} />
@@ -647,6 +921,9 @@ function ImportDialog(props: {
               onChange={onPickFile}
             />
             <div className="awu-hint">{t('import.limit', { max: formatSize(IMPORT_LIMITS.fileBytes) })}</div>
+            {dropHint !== '' && (
+              <div className="awu-importDropHint" role="status" aria-live="polite">{dropHint}</div>
+            )}
           </div>
         ) : (
           <div className="awu-importView" aria-live="polite">
@@ -655,6 +932,11 @@ function ImportDialog(props: {
               <span className="awu-path">{file?.name ?? ''}</span>
               {file !== undefined && <span className="awu-importFileSize">{formatSize(file.size)}</span>}
             </div>
+
+            {/* 预览阶段再把文件拖进来：告诉他先点「重选文件」，别指望它静默替换 */}
+            {dropHint !== '' && (
+              <div className="awu-importDropHint" role="status" aria-live="polite">{dropHint}</div>
+            )}
 
             {busy && parsed === undefined && error === '' && (
               <div className="awu-hint" role="status">{t('import.parsing')}</div>
@@ -1145,6 +1427,120 @@ function CharacterDetailView(props: {
   )
 }
 
+// ---------------------------------------------------------------- 日记页
+
+/**
+ * 日记页内容。
+ *
+ * 抽出来是因为「空」有**三种**，之前混成一种：没选角色 / 选了但没日记 / 加载失败。
+ * 真机上「选了卡没启用」被错显示成「先启用或选择一位角色」，根因是上游 `viewName` 只认启用角色；
+ * 这里按名字渲染，并把「没日记」单独给一句话，别让用户以为选错了卡。
+ */
+function DiaryView(props: {
+  entry: CharacterDetail
+  /**
+   * 已经格式化好的关系条（`undefined` = 这条不显示）。
+   *
+   * 由面板按「看谁的日记显示谁的关系」算好再传进来：`tag` 是「名字（当前档）」，
+   * `meta` 是「N 轮 · 几天前」。这里不碰 `RelationState`，省得又拿启用角色的数据贴错人。
+   */
+  relation: { tag: string; meta: string } | undefined
+  busy: boolean
+  t: Translate
+  onForget: () => void
+  onEdit: (target: DiaryTarget) => void
+  onReset: (scope: 'session' | 'all') => void
+}): JSX.Element {
+  const { entry, relation, busy, t, onForget, onEdit, onReset } = props
+  const empty = entry.diary.length === 0
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+      {/*
+        关系条：当前档在左、轮数/最近在右。数据来自「这张卡自己」——GET /character 会按卡
+        带回 relation（current 是落盘当前档，baseline 才是起点），面板那份实时 relation
+        只在快照缺失时兜底。
+      */}
+      {relation !== undefined && (
+        <div className="awu-relation">
+          <span className="awu-relationLabel">{t('relation.title')}</span>
+          <span className="awu-relationTag">
+            {relation.tag !== '' ? relation.tag : t('relation.none')}
+          </span>
+          {relation.meta !== '' && <span className="awu-relationMeta">{relation.meta}</span>}
+        </div>
+      )}
+
+      <div className="awu-diaryHead">
+        <span className="awu-sectionLabel">{entry.name}</span>
+        <span className="awu-count">{entry.diary.length}</span>
+        <button
+          type="button"
+          className="awu-btn"
+          data-size="sm"
+          data-kind="ghost"
+          style={{ marginLeft: 'auto' }}
+          onClick={onForget}
+          disabled={busy}
+        >
+          <IconQuill size={12} />
+          {t('forget.title')}
+        </button>
+      </div>
+
+      {empty ? (
+        <div className="awu-empty" data-kind="diary">
+          <span className="awu-emptyMark"><IconQuill size={20} /></span>
+          <span className="awu-emptyTitle">{t('diary.emptyFor', { name: entry.name })}</span>
+          <span className="awu-emptyHint">{t('diary.emptyForHint')}</span>
+        </div>
+      ) : (
+        <DiaryList
+          entries={entry.diary}
+          t={t}
+          onEdit={onEdit}
+        />
+      )}
+
+      {/* 维护：全新开始 / 彻底重置 */}
+      <div className="awu-dangerZone">
+        <div className="awu-sectionHead">{t('reset.title')}</div>
+        <div className="awu-dangerRow">
+          <div className="awu-dangerText">
+            <b>{t('reset.session')}</b>
+            <span>{t('reset.sessionHint')}</span>
+          </div>
+          <button
+            type="button"
+            className="awu-btn"
+            data-size="sm"
+            onClick={() => onReset('session')}
+            disabled={busy}
+          >
+            {t('reset.session')}
+          </button>
+        </div>
+        <div className="awu-dangerRow">
+          <div className="awu-dangerText">
+            <b data-danger="true">{t('reset.all')}</b>
+            <span>{t('reset.allHint')}</span>
+          </div>
+          <button
+            type="button"
+            className="awu-btn"
+            data-size="sm"
+            data-kind="danger"
+            onClick={() => onReset('all')}
+            disabled={busy}
+          >
+            {t('reset.all')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- 主组件
 
 /**
@@ -1229,7 +1625,22 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  /**
+   * 提示条。
+   *
+   * `ok` 类 5 秒后自动消失（还得能手动关）；`warn` 类（保存时的软警告）**留到用户手动关**
+   * ——把「世界书超限」这种要人处理的提示卷走，比常驻更难查。错误走 `ErrorBar`，不吃这条路径。
+   */
+  const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'warn' } | undefined>(undefined)
+  const noticeTimer = useRef<number | undefined>(undefined)
+
+  /**
+   * 交互模式。
+   *
+   * `modePref` 是「本地的临时选择」：没有启用角色时宿主只写全局兜底（scope='global'），
+   * 面板拿不到会话状态，只能自己记住这次选择，等启用角色后立刻补一次 `/mode`。
+   */
+  const [modePref, setModePref] = useState<InteractionMode | undefined>(undefined)
 
   const [detailName, setDetailName] = useState('')
   const [detail, setDetail] = useState<CharacterDetail | undefined>(undefined)
@@ -1282,6 +1693,42 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     aliveRef.current = true
     return () => { aliveRef.current = false }
   }, [])
+
+  // -------------------------------------------------------- 提示条（成功自动走，警告留给人看）
+
+  const clearNoticeTimer = useCallback((): void => {
+    if (noticeTimer.current !== undefined) {
+      window.clearTimeout(noticeTimer.current)
+      noticeTimer.current = undefined
+    }
+  }, [])
+
+  const dismissNotice = useCallback((): void => {
+    clearNoticeTimer()
+    setNotice(undefined)
+  }, [clearNoticeTimer])
+
+  const showNotice = useCallback((text: string, tone: 'ok' | 'warn' = 'ok'): void => {
+    if (text === '') return
+    // 新提示覆盖旧提示：先把旧计时器清掉，否则旧计时器会提前把新提示卷走
+    clearNoticeTimer()
+    setNotice({ text, tone })
+    if (tone === 'ok') {
+      noticeTimer.current = window.setTimeout(() => {
+        noticeTimer.current = undefined
+        setNotice(undefined)
+      }, NOTICE_TTL_MS)
+    }
+  }, [clearNoticeTimer])
+
+  // 卸载时把计时器收掉，别让它去 setState 一个已经死掉的组件
+  useEffect(() => () => { clearNoticeTimer() }, [clearNoticeTimer])
+
+  /** 带软警告的「保存成功」：有警告整条转警示色并附逐条明细（不拦保存，也不是红条）。 */
+  const notifySaved = useCallback((base: string, warnings: string[]): void => {
+    if (warnings.length === 0) { showNotice(base, 'ok'); return }
+    showNotice(composeSavedNotice(base, warnings, t), 'warn')
+  }, [showNotice, t])
 
   // -------------------------------------------------------- 数据
   const reload = useCallback(async (): Promise<void> => {
@@ -1347,8 +1794,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     }
   }, [])
 
-  // 详情页看「选中的角色」，日记页看「当前启用角色的日记」——两者共用一个加载通道
-  const viewName = tab === 'diary' ? (active.enabled ? (active.character ?? '') : '') : detailName
+  // 详情页看「选中的角色」，日记页看「选中的角色 → 否则当前启用角色」
+  // （原来日记页只看启用角色，「选了卡但没启用」就会错显示成空态——真机反馈 #1）
+  const viewName = tab === 'diary'
+    ? (detailName !== '' ? detailName : (active.enabled ? (active.character ?? '') : ''))
+    : detailName
+  /** 日记页真正要展示的角色名（空串 = 既没选也没启用）。 */
+  const diaryTarget = tab === 'diary' ? viewName : ''
   useEffect(() => {
     if (viewName === '') { setDetail(undefined); return }
     void loadDetail(viewName)
@@ -1387,7 +1839,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   const run = useCallback(async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
-    setNotice('')
+    // 新动作开始时把上一条提示收掉，免得「上一个操作的结果」挂在新动作头上
+    dismissNotice()
     try {
       await fn()
       await reload()
@@ -1398,7 +1851,33 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     } finally {
       if (aliveRef.current) setBusy(false)
     }
-  }, [reload])
+  }, [reload, dismissNotice])
+
+  // -------------------------------------------------------- 拖放兜底
+  //
+  // 弹层打开期间，整页任何一处的文件拖放都要被我们接管：宿主 composer 有 document 级
+  // drop 处理，一张卡拖到面板上会被当成附件发进对话（真机踩过）。
+  //
+  // 只在**文件类**拖拽上动手，且目标不在 `.awu-scrim / .awu-panel` 里才拦
+  // —— 我们自己的拖放区与面板根节点各有自己的处理（都会 stopPropagation），
+  // 一刀切会把面板内的文字拖拽、滚动条拖拽一并废掉。弹层关掉立刻卸载监听。
+  useEffect(() => {
+    if (dialog === '') return undefined
+    const ours = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('.awu-scrim, .awu-panel') !== null
+    const swallow = (event: DragEvent): void => {
+      if (!dragHasFiles(event)) return
+      if (ours(event.target)) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    document.addEventListener('dragover', swallow, true)
+    document.addEventListener('drop', swallow, true)
+    return () => {
+      document.removeEventListener('dragover', swallow, true)
+      document.removeEventListener('drop', swallow, true)
+    }
+  }, [dialog])
 
   // -------------------------------------------------------- 定位
   // 面板已改成「居中大窗 + 遮罩」（对齐 dsh-context 的 .lc-modal-card 形态），
@@ -1439,7 +1918,14 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [open, dialog, editing, editorDirty])
 
   // -------------------------------------------------------- 动作
-  const onActivate = (name: string): void => { void run(() => activateCharacter(name)) }
+  const onActivate = (name: string): void => {
+    // 没有启用角色时点过模式胶囊 → 这次启用后立刻把偏好补写到该角色的会话上
+    const pref = modePref
+    void run(async () => {
+      await activateCharacter(name)
+      if (pref !== undefined) await setInteractionMode(pref, name)
+    }).then(ok => { if (ok && pref !== undefined) setModePref(undefined) })
+  }
   const onDeactivate = (): void => { void run(() => deactivateCharacter()) }
   const onDeleteConfirmed = (withMemory: boolean): void => {
     const target = deleteTarget
@@ -1447,22 +1933,56 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     void run(async () => {
       await deleteCharacter(target, withMemory)
       if (detailName === target) { setDetailName(''); setDetail(undefined) }
-      setNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'))
+      showNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'), 'ok')
     })
   }
-  const onCreate = (name: string, role: string, blurb: string): void => {
-    void run(async () => {
-      await saveCharacter(name, draftCard(name, role, blurb))
-    }).then(ok => {
-      if (!ok) return
-      setDialog('')
-      setDetailName(name)
-      setTab('roster')
-    })
+
+  /**
+   * 自创卡落档后的收尾（弹层自己负责保存/发送，这里只做面板动作）。
+   *
+   * 提示文案由弹层组织（它知道骨架卡存了没有、指令发出去没有、有没有软警告），
+   * 面板只管关层、刷新、打开新卡、把提示显示出来。
+   */
+  const onCardCreated = (info: CreatedCardInfo): void => {
+    setDialog('')
+    setTab('roster')
+    setDetailName(info.name)
+    showNotice(info.notice, info.tone)
+    void reload()
   }
-  const onModePick = (mode: 'text' | 'text+action'): void => {
-    void run(() => setInteractionMode(mode)).then(ok => { if (ok) setDialog('') })
+
+  /**
+   * 切交互模式。
+   *
+   * 不要求先启用角色：有选中卡片就把 `name` 一起发（写进那张卡的会话），
+   * 都没有时宿主只写全局兜底并回 `scope: 'global'`，面板据此换提示语气。
+   * 成功后在本地记一份 `modePref`，等启用角色时立刻补发一次 `/mode`。
+   */
+  const applyMode = (next: InteractionMode, after?: () => void): void => {
+    if (busy) return
+    const targetName = detailName !== '' ? detailName : undefined
+    const liveTarget = live && (targetName === undefined || targetName === liveName)
+    setBusy(true)
+    dismissNotice()
+    void setInteractionMode(next, targetName)
+      .then(result => {
+        const scope = result.scope ?? 'session'
+        if (scope === 'global') {
+          setModePref(next)
+          showNotice(t('mode.pending'), 'ok')
+        } else {
+          // 写的是「当前启用角色」时以后端为准；写的是选中的非启用卡时保留本地回显
+          setModePref(liveTarget ? undefined : next)
+          showNotice(t('mode.picked', { mode: next === 'text' ? t('mode.text') : t('mode.action') }), 'ok')
+        }
+        after?.()
+        return reload()
+      })
+      .catch((e: unknown) => { setError(errorText(e)) })
+      .finally(() => { if (aliveRef.current) setBusy(false) })
   }
+
+  const onModePick = (next: InteractionMode): void => { applyMode(next, () => setDialog('')) }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
   const openDialog = (which: 'new' | 'import' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
@@ -1471,14 +1991,15 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     if (editTarget === undefined) return
     setBusy(true)
     setDialogError('')
-    void editDiary(liveName, {
+    // 改的是「正在看的那位」的日记，不是启用角色的（看别人的日记时别改错人）
+    void editDiary(viewName, {
       text,
       date: editTarget.date,
       section: editTarget.section,
       index: editTarget.index,
     }).then(() => {
       setDialog('')
-      setNotice('')
+      dismissNotice()
       return reload()
     }).catch((error: unknown) => {
       setDialogError(errorText(error))
@@ -1488,9 +2009,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const onForget = (keyword: string): void => {
     setBusy(true)
     setDialogError('')
-    void forgetKeyword(keyword).then(result => {
+    // 同理：显式带上正在看的那位，否则「忘记」会落到启用角色身上（改错人）
+    void forgetKeyword(keyword, viewName === '' ? undefined : viewName).then(result => {
       setDialog('')
-      setNotice(
+      showNotice(
         result.changed
           ? t('forget.done', {
             diary: result.diary.removedTimeline.length + result.diary.removedNotes.length,
@@ -1498,6 +2020,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             card: result.card.removed.length,
           })
           : t('forget.none'),
+        'ok',
       )
       return reload()
     }).catch((error: unknown) => {
@@ -1510,8 +2033,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     setDialogError('')
     void resetSession(scope).then(result => {
       setDialog('')
-      if (scope === 'session') setNotice(t('reset.sessionDone', { n: result.diaryKept ?? 0 }))
-      else setNotice(t('reset.allDone', { n: result.diaryRemoved ?? 0 }))
+      if (scope === 'session') showNotice(t('reset.sessionDone', { n: result.diaryKept ?? 0 }), 'ok')
+      else showNotice(t('reset.allDone', { n: result.diaryRemoved ?? 0 }), 'ok')
       return reload()
     }).catch((error: unknown) => {
       setDialogError(errorText(error))
@@ -1542,16 +2065,20 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     setBusy(true)
     setEditError('')
     void (async () => {
+      // 两条链路都会回 warnings（世界书超限等）：收集起来一并展示，不拦保存
+      const warnings: string[] = []
       try {
         // 世界书改了却没带上整卡：宁可不存也不造出「假成功」
         if (payload.loreChanged && payload.ccv3 === undefined) {
           throw new Error(t('lore.unsupported'))
         }
         if (payload.loreChanged && payload.ccv3 !== undefined) {
-          await saveCharacterCcv3(targetName, payload.ccv3)
+          const saved = await saveCharacterCcv3(targetName, payload.ccv3)
+          warnings.push(...(saved.warnings ?? []))
         }
         if (payload.structureChanged || !payload.loreChanged) {
-          await saveCharacter(targetName, payload.view)
+          const saved = await saveCharacter(targetName, payload.view)
+          warnings.push(...(saved.warnings ?? []))
         }
         // 回读校验：以后端实际落盘的内容为准
         const fresh = await fetchCharacter(targetName)
@@ -1564,7 +2091,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         }
         setDetail(fresh)
         setEditing(false)
-        setNotice(payload.loreChanged && !payload.structureChanged ? t('lore.saved') : t('edit.saved'))
+        notifySaved(payload.loreChanged && !payload.structureChanged ? t('lore.saved') : t('edit.saved'), warnings)
         await reload()
       } catch (error) {
         if (!aliveRef.current) return
@@ -1575,12 +2102,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     })()
   }
 
-  /** 导入完成：关层 → 刷新列表 → 直接打开这张新卡 → 提示。 */
-  const onImported = (name: string): void => {
+  /** 导入完成：关层 → 刷新列表 → 直接打开这张新卡 → 提示（软警告用警示色，不红条）。 */
+  const onImported = (name: string, warnings: string[]): void => {
     setDialog('')
-    setNotice(t('import.done', { name }))
     setTab('roster')
     setDetailName(name)
+    notifySaved(t('import.done', { name }), warnings)
     void reload()
   }
 
@@ -1620,8 +2147,43 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [liveName])
 
   const currentDetail = detailName !== '' && detailName === detail?.name ? detail : undefined
-  // 日记页用的是 viewName 加载来的那一份，只要名字对得上就认
-  const liveDetail = live && detail !== undefined && detail.name === liveName ? detail : undefined
+  // 日记页用的是 viewName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
+  const diaryDetail = diaryTarget !== '' && detail !== undefined && detail.name === diaryTarget ? detail : undefined
+
+  /**
+   * 日记页的关系条：**看谁的日记就显示谁的关系**。
+   *
+   * 优先级：`GET /character` 带回来的该卡快照（`current` = 当前档，`baseline` = 起点）→
+   * 快照里的 `tag` → 该卡 `baseline` → （仅当它就是启用角色时）面板那份 `/relation` 实时状态。
+   * 轮数 / 最近互动统一取这张卡的 session，绝不把启用角色的数字贴上去。
+   */
+  const diaryRelation = useMemo(() => {
+    const entry = diaryDetail
+    if (entry === undefined) return undefined
+    const snapshot = entry.relation
+    const current = typeof snapshot?.current === 'string' ? snapshot.current.trim() : ''
+    const baseline = typeof snapshot?.baseline === 'string' ? snapshot.baseline.trim() : ''
+    const snapshotTag = typeof snapshot?.tag === 'string' ? snapshot.tag.trim() : ''
+
+    let tag = ''
+    if (current !== '') tag = `${entry.name}（${current}）`
+    else if (snapshotTag !== '') tag = snapshotTag
+    else if (baseline !== '') tag = `${entry.name}（${baseline}）`
+    else if (entry.name === liveName && relation !== undefined) tag = relation.tag ?? relation.baseline
+
+    // 快照与实时状态都没有：宁可不显示这条，也不编一个档位出来
+    if (tag === '') return undefined
+
+    const turns = Number(entry.session?.turn_count ?? 0) || 0
+    const when = relativeDay(String(entry.session?.last_ts ?? ''), t)
+    const meta = [t('relation.turns', { n: turns }), when].filter(part => part !== '').join(' · ')
+    return { tag, meta }
+  }, [diaryDetail, liveName, relation, t])
+
+  /** 胶囊当前高亮哪个：启用角色以后端为准，否则用本地偏好（默认「文本+动作」）。 */
+  const mode: InteractionMode = live
+    ? (active.mode ?? 'text+action')
+    : (modePref ?? 'text+action')
 
   const badgeName = (() => {
     if (busy) return t('badge.busy')
@@ -1723,6 +2285,19 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           aria-modal="false"
           aria-label={t('panel.title')}
           {...{ [SCOPED_ATTR]: '' }}
+          /* 面板自己也吞掉文件拖放：不吞的话，卡文件会冒到宿主 composer 被当附件发出去 */
+          onDragOver={event => {
+            if (!dragHasFiles(event)) return
+            event.preventDefault()
+            event.stopPropagation()
+          }}
+          onDrop={event => {
+            if (!dragHasFiles(event)) return
+            event.preventDefault()
+            event.stopPropagation()
+            // 吞掉之后必须给一句反馈：不然用户拖了半天，界面一点动静都没有（qa 复核提的口子）
+            showNotice(t('panel.dropCard'), 'ok')
+          }}
         >
           {/*
             编辑态：编辑器整块接管面板内容区（头部牌子保留）。
@@ -1862,10 +2437,25 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
 
           {error !== '' && <ErrorBar message={error} onRetry={() => { void reload() }} t={t} />}
-          {notice !== '' && (
-            <div className="awu-status awu-idle" data-status="info" role="status" style={{ marginTop: -4 }}>
-              <span className="awu-idleDot" aria-hidden="true" style={{ background: 'var(--awu-teal)' }} />
-              <span>{notice}</span>
+          {notice !== undefined && (
+            <div
+              className="awu-status awu-idle"
+              data-status={notice.tone === 'warn' ? 'warn' : 'info'}
+              role="status"
+              aria-live="polite"
+              style={{ marginTop: -4 }}
+            >
+              <span className="awu-idleDot" aria-hidden="true" />
+              <span className="awu-noticeText">{notice.text}</span>
+              <button
+                type="button"
+                className="awu-noticeClose"
+                aria-label={t('notice.close')}
+                title={t('notice.close')}
+                onClick={dismissNotice}
+              >
+                <IconClose size={12} />
+              </button>
             </div>
           )}
 
@@ -1877,14 +2467,33 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           <div className="awu-workspace">
             <aside className="awu-rail">
               {/*
-                左栏头部（自带内边距的容器）：蒸馏 CTA → 分段器 → 计数与「新建角色卡」。
+                左栏头部（自带内边距的容器）：两张卡的入口 → 分段器 → 计数 / 模式 / 导入。
                 这些块必须包在有 gutter 的容器里 —— `.awu-rail` 自身没有 padding，
                 直接放子元素会贴着边框（实测「共 3 位」被面板左沿切掉）。
-                「新建角色卡」按主人口味放在分段器下方、列表顶部。
               */}
               <div className="awu-railHead">
-                {/* 蒸馏：从作品/设定里做一张新卡；动作在会话里跑，面板只负责把指令发过去 */}
-                <DistillEntry t={t} />
+                {/*
+                  两张卡同级并排：蒸馏（从作品里做）/ 自创（从零写）。
+                  主人真机反馈「原来一大一小」——所以两者共用同一套按钮类与尺寸，扶手都撑满半栏。
+                */}
+                <div className="awu-ctaRow">
+                  <DistillEntry t={t} label={t('cta.distill')} hint={t('cta.distillHint')} />
+                  <div className="awu-distill-entry">
+                    <button
+                      type="button"
+                      className="awu-btn awu-distill-cta"
+                      data-kind="primary"
+                      title={t('new.title')}
+                      aria-haspopup="dialog"
+                      onClick={() => openDialog('new')}
+                      disabled={busy}
+                    >
+                      <IconPlus size={14} />
+                      {t('cta.selfCreate')}
+                    </button>
+                    <div className="awu-distill-entryHint">{t('cta.selfCreateHint')}</div>
+                  </div>
+                </div>
 
                 <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
                   {TAB_IDS.map(item => (
@@ -1905,34 +2514,47 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   ))}
                 </div>
 
-                <div className="awu-toolbar">
+                <div className="awu-toolbar" data-wrap="true">
                   <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
                     {t('roster.count', { n: roster.length })}
                   </span>
-                  {/* 导入与新建同区：一个是从文件拿卡，一个是从零建卡 */}
-                  <button
-                    type="button"
-                    className="awu-btn"
-                    data-size="sm"
-                    data-kind="ghost"
-                    style={{ marginLeft: 'auto' }}
-                    onClick={() => openDialog('import')}
-                    disabled={busy}
-                    title={t('import.title')}
-                  >
-                    <IconImport size={12} />
-                    {t('import.entry')}
-                  </button>
-                  <button
-                    type="button"
-                    className="awu-btn"
-                    data-size="sm"
-                    data-kind="primary"
-                    onClick={() => openDialog('new')}
-                  >
-                    <IconPlus size={12} />
-                    {t('roster.new')}
-                  </button>
+
+                  {/*
+                    模式胶囊：主人反馈「改模式的地方藏在启用状态条的小图标里，没启用就看不见」。
+                    这里显式摆出来，**不要求先启用角色**：有选中卡片就写进那张卡，
+                    都没有时宿主只写全局兜底（scope='global'），启用后由 onActivate 补一次。
+                  */}
+                  <div className="awu-modePills" role="group" aria-label={t('mode.title')}>
+                    {MODE_OPTIONS.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className="awu-modePill"
+                        data-on={mode === option.value ? 'true' : 'false'}
+                        aria-pressed={mode === option.value}
+                        title={t(option.hintKey)}
+                        onClick={() => applyMode(option.value)}
+                        disabled={busy}
+                      >
+                        {t(option.labelKey)}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="awu-toolbarActions">
+                    <button
+                      type="button"
+                      className="awu-btn"
+                      data-size="sm"
+                      data-kind="ghost"
+                      onClick={() => openDialog('import')}
+                      disabled={busy}
+                      title={t('import.title')}
+                    >
+                      <IconImport size={12} />
+                      {t('import.entry')}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1999,90 +2621,46 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   </div>
                 ))}
 
-            {tab === 'diary' && (liveDetail !== undefined ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-                {/* 关系标签：只显示起点锚定，不做进度条（实际档位由模型现算） */}
-                <div className="awu-relation">
-                  <span className="awu-relationLabel">{t('relation.title')}</span>
-                  <span className="awu-relationTag">
-                    {relation?.tag !== undefined && relation.tag !== ''
-                      ? relation.tag
-                      : relation?.baseline ?? t('relation.none')}
-                  </span>
-                  <span className="awu-relationMeta">
-                    {relation !== undefined ? t('relation.turns', { n: relation.turnCount }) : ''}
-                    {relation !== undefined && relation.lastActive !== ''
-                      ? ` · ${relativeDay(relation.lastActive, t)}`
-                      : ''}
-                  </span>
-                </div>
-
-                <div className="awu-diaryHead">
-                  <span className="awu-sectionLabel">{t('panel.tab.diary')}</span>
-                  <span className="awu-count">{liveDetail.diary.length}</span>
-                  <button
-                    type="button"
-                    className="awu-btn"
-                    data-size="sm"
-                    data-kind="ghost"
-                    style={{ marginLeft: 'auto' }}
-                    onClick={() => openDialog('forget')}
-                    disabled={busy}
-                  >
-                    <IconQuill size={12} />
-                    {t('forget.title')}
-                  </button>
-                </div>
-
-                <DiaryList
-                  entries={liveDetail.diary}
-                  t={t}
-                  onEdit={target => { setEditTarget(target); setDialogError(''); setDialog('editDiary') }}
-                />
-
-                {/* 维护：全新开始 / 彻底重置 */}
-                <div className="awu-dangerZone">
-                  <div className="awu-sectionHead">{t('reset.title')}</div>
-                  <div className="awu-dangerRow">
-                    <div className="awu-dangerText">
-                      <b>{t('reset.session')}</b>
-                      <span>{t('reset.sessionHint')}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="awu-btn"
-                      data-size="sm"
-                      onClick={() => openDialog('resetSession')}
-                      disabled={busy}
-                    >
-                      {t('reset.session')}
-                    </button>
-                  </div>
-                  <div className="awu-dangerRow">
-                    <div className="awu-dangerText">
-                      <b data-danger="true">{t('reset.all')}</b>
-                      <span>{t('reset.allHint')}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="awu-btn"
-                      data-size="sm"
-                      data-kind="danger"
-                      onClick={() => openDialog('resetAll')}
-                      disabled={busy}
-                    >
-                      {t('reset.all')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : (
+            {tab === 'diary' && (diaryTarget === '' ? (
+              /* ① 既没选也没启用：告诉他去哪挑卡 */
               <div className="awu-empty" data-kind="diary">
                 <span className="awu-emptyMark"><IconQuill size={20} /></span>
                 <span className="awu-emptyHint">{t('diary.pick')}</span>
               </div>
+            ) : diaryDetail !== undefined ? (
+              /* ② 选中了（无论启用与否）就走正常日记页；「没日记」由 DiaryView 自己给空态 */
+              <DiaryView
+                entry={diaryDetail}
+                relation={diaryRelation}
+                busy={busy}
+                t={t}
+                onForget={() => openDialog('forget')}
+                onEdit={target => { setEditTarget(target); setDialogError(''); setDialog('editDiary') }}
+                onReset={scope => openDialog(scope === 'session' ? 'resetSession' : 'resetAll')}
+              />
+            ) : detailLoading ? (
+              <Skeleton label={t('common.loading')} />
+            ) : detailError !== '' ? (
+              /* ③ 加载失败：给错误原文 + 重试，别伪装成「没有日记」 */
+              <div className="awu-empty" data-kind="error">
+                <span className="awu-emptyMark"><IconAlert size={20} /></span>
+                <span className="awu-emptyTitle">{t('diary.loadFailed')}</span>
+                <span className="awu-emptyHint">{detailError}</span>
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="awu-btn"
+                    data-size="sm"
+                    onClick={() => { void loadDetail(diaryTarget) }}
+                    disabled={busy}
+                  >
+                    {t('common.retry')}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <Skeleton />
             ))}
-
             {tab === 'stats' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
                 <Section title={t('stats.title')}>
@@ -2130,9 +2708,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           {dialog === 'new' && (
             <NewCharacterDialog
               existing={list.map(item => item.name)}
-              busy={busy}
+              panelBusy={busy}
               onCancel={() => setDialog('')}
-              onCreate={onCreate}
+              onCreated={onCardCreated}
               t={t}
             />
           )}
@@ -2155,7 +2733,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
           {dialog === 'mode' && (
             <ModeDialog
-              current={active.mode ?? 'text+action'}
+              current={mode}
               busy={busy}
               onCancel={() => setDialog('')}
               onPick={onModePick}

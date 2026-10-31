@@ -4,7 +4,7 @@
  * 为什么需要它：`tsc` 只查「类型对不对」，不查「有没有人调用」。
  * 一段 17 KB 的 `client/lorebook-schema.ts` 可以零 import 地躺在仓库里，
  * 一个 `POST /character/import` 路由可以在 `src/web.ts` 注册完就没下文——
- * 这两种状态下类型检查、打包、七套自检**全是绿的**，但用户打开面板
+ * 这两种状态下类型检查、打包、其余自检**全是绿的**，但用户打开面板
  * 看不到「导入角色卡」，也改不了世界书。
  * （2026-10-31 开工时的真实状态：导入接口已实现但面板零入口；lorebook-schema 全项目无引用）
  *
@@ -15,7 +15,8 @@
  * 约定：
  *  - 失败文案写两件事：**缺什么** + **该找谁**（宿主侧 = host-core / 客户端 = client-ui）；
  *  - 静态启发式拿不准时**宁可 [skip] 也不误报**——红点必须都是真问题，否则没人看；
- *  - 这是「体检表」不是「构建步」：不串进 `npm run build`，手动跑。
+ *  - 断言只认「文案 key + 结构特征」，**不写死行号**：客户端文件一直在动，行号断言活不过一天；
+ *  - 这是「体检表」：已串进 `npm run build`（`verify-bundle` 之后），也可 `npm run verify:wiring` 单跑。
  *
  * 跑法：`node scripts/verify-wiring.mjs`；退出码非 0 即有问题。
  */
@@ -96,6 +97,18 @@ function sliceBalanced(text, start) {
     }
   }
   return undefined
+}
+
+/**
+ * 取 `src/web.ts` 里某条路由的处理块：从 `` path: `${ROUTE_PREFIX}/xxx` `` 到下一个 `path:` 为止。
+ * 拿不到返回 undefined（调用方自己决定判红还是 skip）。
+ */
+function sliceRoute(source, fragment) {
+  const needle = '${ROUTE_PREFIX}' + fragment + '`'
+  const at = source.indexOf(needle)
+  if (at < 0) return undefined
+  const next = source.indexOf('path:', at + needle.length)
+  return source.slice(at, next < 0 ? Math.min(source.length, at + 3000) : next)
 }
 
 /**
@@ -568,6 +581,330 @@ head('[8] 产物 · lib/prompt.js 里的纪律包与源码一致（build 漂移�
             + '差的这一段会直接说话，必须先对齐产物再发版。该找 host-core / 重跑 npm run build')
         }
       }
+    }
+  }
+}
+
+// ================================================================ 9. 自创卡 AI 补全
+head('[9] 自创角色卡 · AI 补全接线（client arm kind=create → web.ts 读 kind → flow-create.md）')
+{
+  // 客户端：得有一处真发 kind:'create' 的 arm 调用
+  let createFile
+  for (const file of clientFiles) {
+    const src = await readSource(file)
+    if (src !== undefined && /kind\s*:\s*['"]create['"]/u.test(src)) { createFile = file; break }
+  }
+  if (createFile === undefined) {
+    bad('client 里有 kind: \'create\' 的 arm 调用',
+      '「让 AI 补全人设」没接线：新建弹层落完骨架卡就结束了，宿主那条 create 通道没人调用，'
+      + '用户勾了「AI 补全」也只会得到一张空卡。该找 client-ui（勾选后 POST /distill/arm {kind:\'create\'}）')
+  } else {
+    const src = (await readSource(createFile)) ?? ''
+    if (/armDistill|distillArm|distill\/arm/u.test(src)) {
+      ok('client 里有 kind: \'create\' 的 arm 调用', createFile)
+    } else {
+      bad('client 里有 kind: \'create\' 的 arm 调用',
+        `${createFile} 出现了 kind:'create' 但同文件看不到对 arm 的调用（armDistill / ROUTES.distillArm / distill/arm）——`
+        + '像是只写了类型或常量，没真发请求。该找 client-ui')
+    }
+  }
+
+  // 宿主：arm 路由得读 kind
+  const web = await readSource('src/web.ts')
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const block = sliceRoute(web, '/distill/arm')
+    if (block === undefined) {
+      bad('web.ts 的 arm 路由读 kind', '找不到 POST /distill/arm 路由块 —— 该找 host-core')
+    } else if (!/\bkind\b/u.test(block)) {
+      bad('web.ts 的 arm 路由读 kind',
+        'arm 路由不读 kind 参数：前端传 kind:\'create\' 会被忽略，仍然武装成蒸馏模式，'
+        + 'AI 拿到的还是 flow.md（「从作品蒸馏」手册），补全流程会跑偏。该找 host-core')
+    } else {
+      // kind 的取值校验可能落在 web.ts，也可能落在 distill.ts（arm(ttl, kind)），两处都认
+      const distill = (await readSource('src/distill.ts')) ?? ''
+      const knowsCreate = /create/u.test(web) || /['"]create['"]/u.test(distill)
+      if (!knowsCreate) {
+        bad('web.ts 的 arm 路由读 kind',
+          'arm 路由提到了 kind，但全项目（src/web.ts 与 src/distill.ts）都没有 create 这个取值 —— '
+          + 'kind 可能只透传了 distill，create 分支没实现。该找 host-core')
+      } else {
+        ok('web.ts 的 arm 路由读 kind')
+      }
+    }
+  }
+
+  // 执行手册：flow-create.md
+  let flowSize
+  try {
+    flowSize = (await stat(join(root, 'distill', 'flow-create.md'))).size
+  } catch {
+    flowSize = undefined
+  }
+  if (flowSize === undefined) {
+    bad('distill/flow-create.md 存在',
+      '没有这份执行手册：create 模式下 AI 没有可执行的流程说明，只能瞎编。'
+      + '该找 host-core（照着 distill/flow.md 的结构写「骨架卡补全」手册：先问 3-5 个问题 → 按 CCv3 补字段 → 不编造标 [待补] → awu_card_save overwrite:true）')
+  } else if (flowSize <= 2000) {
+    bad('distill/flow-create.md 大于 2000 字节',
+      `实际 ${flowSize} 字节：太短，装不下一份能约束住模型的执行手册（flow.md 是它的同构参照）。该找 host-core`)
+  } else {
+    ok('distill/flow-create.md 大于 2000 字节', `${(flowSize / 1024).toFixed(1)} KB`)
+  }
+}
+
+// ================================================================ 10. 世界书软警告
+head('[10] 世界书超限改软警告（tavern 不抛错 → web save 返回 warnings → client 类型收 warnings）')
+{
+  const tavern = await readSource('src/tavern.ts')
+  if (tavern === undefined) {
+    bad('src/tavern.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const hasCollect = /export\s+function\s+collectCardWarnings|const\s+collectCardWarnings/u.test(tavern)
+    // 逐段看：bookEntry / bookTotal 的上限判断里还有没有 throw
+    const throwsOnBook = []
+    for (const m of tavern.matchAll(/CARD_HARD_LIMITS\.(bookEntry|bookTotal)/gu)) {
+      const window = tavern.slice(Math.max(0, m.index - 400), m.index + 600)
+      if (/throw\s+new Error/u.test(window)) throwsOnBook.push(m[1])
+    }
+    if (throwsOnBook.length > 0) {
+      bad('tavern 对世界书超限不再抛错',
+        `CARD_HARD_LIMITS.${[...new Set(throwsOnBook)].join(' / ')} 附近仍有 throw —— 大卡还是会被硬拦在门外`
+        + '（主人那条「世界书总字数超限（98869，上限 20000）：请精简后再保存」就是这么来的）。'
+        + '技术依据：世界书注入本来就有预算（12 条 / 6000 字），超大书不会撑爆提示词；'
+        + '该改成 collectCardWarnings 产出的软警告，五个原生字段（description 等）继续硬拦。该找 host-core')
+    } else {
+      ok('tavern 对世界书超限不再抛错', hasCollect ? '已有 collectCardWarnings' : '未见 book 相关 throw')
+      if (!hasCollect) note('没看到 collectCardWarnings：警告文案可能写在别处，确认它是单一真源即可')
+    }
+  }
+
+  const web = await readSource('src/web.ts')
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const saveBlock = sliceRoute(web, '/character/save')
+    if (saveBlock === undefined) {
+      bad('save 响应含 warnings', '找不到 POST /character/save 路由块 —— 该找 host-core')
+    } else if (!/warnings/u.test(saveBlock)) {
+      bad('save 响应含 warnings',
+        '/character/save 的响应里没有 warnings：世界书超限即便不再拦，用户也看不到任何提示，'
+        + '导入时「保存成功但设定被截」会变成无声的事故。该找 host-core')
+    } else {
+      ok('save 响应含 warnings')
+    }
+  }
+
+  const api = (await readSource('client/api.ts')) ?? ''
+  if (api === '') {
+    bad('client/api.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    // 保存函数的返回类型里要带上 warnings（可以直接写，也可以引用一个含 warnings 的结果类型）
+    const sig = [...api.matchAll(/export\s+function\s+saveCharacter[A-Za-z0-9_]*\s*\(/gu)]
+      .map(m => api.slice(m.index, api.indexOf('{', m.index + m[0].length)))
+    const typeWithWarnings = /interface\s+Save[A-Za-z0-9_]*Result[^{]*\{[\s\S]{0,400}?warnings/u.test(api)
+      || /type\s+Save[A-Za-z0-9_]*Result\s*=[\s\S]{0,400}?warnings/u.test(api)
+    if (sig.length === 0) {
+      bad('client 保存返回类型含 warnings', 'client/api.ts 里找不到 saveCharacter* 函数 —— 该找 client-ui 确认保存入口改了什么')
+    } else if (sig.some(text => /warnings/u.test(text)) || typeWithWarnings) {
+      ok('client 保存返回类型含 warnings')
+    } else {
+      bad('client 保存返回类型含 warnings',
+        'saveCharacter* 的返回类型没有 warnings：面板拿不到警告就没法展示「设定超出预算」这类提示，'
+        + 'TS 还会把后端多出来的字段当不存在。该找 client-ui')
+    }
+  }
+}
+
+// ================================================================ 11. 提示条自动消失
+head('[11] 提示条自动消失（notice 计时器 + 清理 + 可关闭）')
+{
+  const src = await readSource('client/index.tsx')
+  const text = (await readSource('client/text.ts')) ?? ''
+  if (src === undefined) {
+    bad('client/index.tsx 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    // 计时器：某个 setTimeout 的上下文里得提到 notice
+    let timer = false
+    for (const m of src.matchAll(/setTimeout\s*\(/gu)) {
+      const window = src.slice(Math.max(0, m.index - 400), m.index + 600)
+      if (/setNotice|notice/iu.test(window)) { timer = true; break }
+    }
+    const clears = /clearTimeout\s*\(/u.test(src)
+    if (!timer) {
+      bad('notice 有自动消失计时器',
+        '提示条没有计时器：设了就一直在（主人原文「提示条常驻不消失」）。'
+        + '该找 client-ui（成功类 5 秒自动消失；错误类留待手动关；新提示覆盖旧计时器）')
+    } else if (!clears) {
+      bad('notice 有自动消失计时器',
+        '有 setTimeout 但全文件没有 clearTimeout：新提示覆盖旧提示时旧计时器还在跑，会把新提示提前清掉。该找 client-ui')
+    } else {
+      ok('notice 有自动消失计时器', 'setTimeout + clearTimeout 都在')
+    }
+
+    // 可关闭：notice 专属文案 key，或一个直接 setNotice('') 的按钮
+    // （通用 `common.close` 不算：仓库里本来就有，用它判绿等于没判）
+    const hasKey = /['"`]notice\.(close|dismiss|hide)[A-Za-z0-9_.]*['"`]/u.test(text)
+    const hasButton = /onClick=\{\(\)\s*=>\s*setNotice\(['"]{2}\)\}/u.test(src)
+    if (hasKey || hasButton) {
+      ok('提示条有可关闭入口')
+    } else {
+      bad('提示条有可关闭入口',
+        '提示条没有专门的可关闭入口（既没有 notice.close 之类的文案 key，也没有直接 setNotice(\'\') 的按钮）：'
+        + '自动消失失效时用户只能刷新页面。该找 client-ui')
+    }
+  }
+}
+
+// ================================================================ 12. 按钮文案与同级
+head('[12] 「自创角色卡」文案与同级（中英各一 + 与「蒸馏角色卡」同一工具栏）')
+{
+  const text = await readSource('client/text.ts')
+  if (text === undefined) {
+    bad('client/text.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    // 中文文案：找到「自创角色卡」所在的 key，再去英文字典里看同名 key 的值是不是英文
+    const zhHit = /['"]([A-Za-z0-9_.]+)['"]\s*:\s*['"]自创角色卡['"]/u.exec(text)
+    if (zhHit === null) {
+      const stillOld = /['"]roster\.new['"]\s*:\s*['"]新建角色['"]/u.test(text)
+      bad('中文文案「自创角色卡」',
+        '没有「自创角色卡」这条文案'
+        + (stillOld ? '（`roster.new` 还是「新建角色」）' : '')
+        + '：主人要的是和「蒸馏角色卡」对仗的名字。该找 client-ui（连同英文一起改）')
+    } else {
+      const key = zhHit[1]
+      const occurrences = [...text.matchAll(new RegExp(`['"]${key.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}['"]\\s*:\\s*['"]([^'"]*)['"]`, 'gu'))]
+      const english = occurrences.map(m => m[1]).find(value => !/[\u4e00-\u9fff]/u.test(value))
+      if (english === undefined) {
+        bad('英文文案与中文对齐',
+          `key \`${key}\` 只有中文值：英文界面会裸显 key 或回落到中文。该找 client-ui（中英双字典都补）`)
+      } else {
+        ok('中英文案齐全', `「自创角色卡」/「${english}」= ${key}`)
+      }
+    }
+
+    // 同级：两个按钮得在同一段 JSX / 同一工具栏容器里
+    const index = await readSource('client/index.tsx')
+    if (index === undefined) {
+      bad('client/index.tsx 可读', '文件不存在或读不到 —— 该找 client-ui')
+    } else {
+      const createKey = zhHit?.[1]
+      if (createKey === undefined) {
+        // 文案还没改就别判同级：拿旧 key 顶上去只会得到一个假的绿点
+        skipped('与「蒸馏角色卡」同级', '「自创角色卡」文案还不存在（见上一条），同级关系等文案落地后再判')
+      } else {
+        const createPattern = new RegExp(`t\\(\\s*['"]${createKey.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}['"]`, 'u')
+        const at = (re) => { const m = re.exec(index); return m === null ? undefined : m.index }
+        const createAt = at(createPattern)
+        // 「蒸馏角色卡」按钮在 distill.tsx 的 DistillEntry 里，index.tsx 只负责挂载它 —— 两种写法都认
+        const distillAt = at(/<DistillEntry|t\(\s*['"]distill\.entry['"]/u)
+        if (createAt === undefined) {
+          bad('「自创角色卡」按钮在面板里',
+            'index.tsx 里找不到引用「自创角色卡」文案的按钮 —— 文案加了但界面还在用旧 key。该找 client-ui')
+        } else if (distillAt === undefined) {
+          bad('与「蒸馏角色卡」同级',
+            'index.tsx 里既找不到 <DistillEntry> 也找不到 t(\'distill.entry\') —— 同级判断没有参照物。'
+            + '该找 client-ui 确认蒸馏入口是否被挪走或改名')
+        } else {
+          const from = Math.min(createAt, distillAt)
+          const to = Math.max(createAt, distillAt)
+          const between = index.slice(from, to)
+          const sameContainer = between.length <= 2500 || /awu-toolbar|awu-railActions|awu-btnRow/u.test(between)
+          if (sameContainer) {
+            ok('与「蒸馏角色卡」同级', `两者相距 ${between.length} 字符`)
+          } else {
+            bad('与「蒸馏角色卡」同级',
+              `「自创角色卡」与「蒸馏角色卡」相距 ${between.length} 字符，中间还夹着别的区块 —— `
+              + '主人要的是同一行同级并排（原来一大一小）。该找 client-ui')
+          }
+          // 尺寸一致：只记提醒，不判红（JSX 结构可能用数据属性从父级继承）
+          const createBtn = index.slice(createAt, createAt + 400)
+          const distillBtn = index.slice(distillAt, distillAt + 400)
+          const sizeOf = (chunk) => (/(data-size="(sm|md)")/u.exec(chunk)?.[1] ?? '未标')
+          const [a, b] = [sizeOf(createBtn), sizeOf(distillBtn)]
+          if (a !== b) note(`尺寸可能不一致：「自创角色卡」${a} vs 「蒸馏角色卡」${b}（人眼过一遍真机）`)
+        }
+      }
+    }
+  }
+}
+
+// ================================================================ 13. mode 三段契约
+head('[13] 对话模式无目标不报错（POST /mode 三段：有启用→session / 带 name→该角色 / 都没有→全局兜底）')
+{
+  const web = await readSource('src/web.ts')
+  const block = web === undefined ? undefined : sliceRoute(web, '/mode')
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else if (block === undefined) {
+    bad('POST /mode 路由定位', '找不到 `${ROUTE_PREFIX}/mode` 路由块 —— 模式接口改名了？该找 host-core')
+  } else {
+    // ① 不能再走会抛错的硬解析：resolveName 在没有 name 且没启用角色时直接 throw
+    const hardResolve = /resolveName\s*\(/u.test(block)
+    const throwOnMissing = /缺少角色名|没有启用角色/u.test(block)
+    if (hardResolve || throwOnMissing) {
+      bad('mode 无目标时不抛错',
+        (hardResolve ? '路由仍在用 resolveName(body)：' : '路由里还有「缺少角色名 / 没有启用角色」的报错：')
+        + '没启用角色、也没指定 name 时会直接 400。面板工具栏的模式胶囊正是这种场景'
+        + '（主人第 4 条验收：不启用角色也要能切模式），点下去就报错 = 看着修了、实际没修。'
+        + '契约：都没有目标时只写全局兜底 `_active.mode`，不写 session、不报错。该找 host-core')
+    } else {
+      ok('mode 无目标时不抛错', '没有走 resolveName 的硬解析')
+    }
+
+    // ② 返回值要能区分作用域
+    const hasScope = /\bscope\b/u.test(block) && /global/u.test(block)
+    if (hasScope) {
+      ok('mode 返回 scope 区分作用域', '含 global 分支')
+    } else {
+      bad('mode 返回 scope 区分作用域',
+        '响应里没有 scope 字段（契约：都要写全局兜底时返回 {ok, mode, scope:\'global\'}）—— '
+        + '面板无法区分「真切了这张卡」还是「只改了全局偏好」，提示文案只能瞎猜。该找 host-core')
+    }
+
+    // ③ 全局兜底得真的写下去
+    if (/prompt\.setMode\s*\(|setMode\s*\(\s*mode/u.test(block)) {
+      ok('mode 无目标时写全局兜底', 'prompt.setMode 在路由块里')
+    } else {
+      bad('mode 无目标时写全局兜底',
+        '路由块里看不到 prompt.setMode(mode)：没有目标角色时模式偏好就落不了盘，胶囊点了等于没点。该找 host-core')
+    }
+  }
+}
+
+// ================================================================ 14. 补全按名覆盖
+head('[14] 补全手册的名字约束（flow-create.md 必须钉死「按给定名字 + overwrite 覆盖」）')
+{
+  let flow
+  try {
+    flow = await readFile(join(root, 'distill', 'flow-create.md'), 'utf8')
+  } catch {
+    flow = undefined
+  }
+  if (flow === undefined) {
+    skipped('flow-create.md 钉死按给定名字保存', '文件还不存在（见 [9]），建好后再判')
+  } else {
+    // ① 名字一致性口径：别让模型按自己推断的名字落盘
+    const namesPinned = /以[^\n]{0,14}名字[^\n]{0,8}为准|保持原名|不要改名|禁止改名|别改名|卡名[^\n]{0,10}为准/u.test(flow)
+      || (/骨架卡名字|指令里给的名字|给定的名字/u.test(flow) && /名字/u.test(flow))
+    if (namesPinned) {
+      ok('flow-create.md 钉死按给定名字保存')
+    } else {
+      bad('flow-create.md 钉死按给定名字保存',
+        '手册里没有「卡名以给定/面板名字为准、不许改名」这类硬约束：AI 很容易按自己推断的更好听的名字落盘，'
+        + '`awu_card_save` 的 overwrite 按名字匹配 → 结果是**多出一张壳卡**，而原来那张骨架卡还是空的。'
+        + '该找 host-core（在流程开头写死「必须用指令里给的骨架卡名字」）')
+    }
+
+    // ② 覆盖而非新建
+    const overwritePinned = /overwrite["'\s:]{0,8}true/u.test(flow) && /覆盖同名|覆盖[^\n]{0,8}骨架|不是新建/u.test(flow)
+    if (overwritePinned) {
+      ok('flow-create.md 要求 overwrite:true 覆盖同名骨架卡')
+    } else {
+      bad('flow-create.md 要求 overwrite:true 覆盖同名骨架卡',
+        '没有把「带 overwrite:true 覆盖同名骨架卡（不是新建）」写清楚：不带会被工具拒成 name-conflict，'
+        + '或者模型退回新建，收尾就变成「角色簿里两张同名卡」。该找 host-core')
     }
   }
 }

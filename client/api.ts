@@ -188,9 +188,27 @@ export interface CharacterDetail {
   fields?: Card
   diary: DiaryEntry[]
   session: { turn_count?: number; last_ts?: string; [key: string]: unknown }
-  /** 后端增强字段（老版本可能没有）：关系锚定与开场三态 */
-  relation?: RelationState
+  /**
+   * `GET /character` 顺手带回的**这张卡自己的**关系快照（老版本可能没有）。
+   *
+   * 比 `RelationState` 窄：只有面板要显示的那几个字段，没有 `startText` / `note` 这些详情。
+   * `current` 是落盘的当前档（宿主新加），缺失时只能退回 `tag` / `baseline`（起点锚定）。
+   */
+  relation?: DetailRelation
   openingState?: OpeningState
+}
+
+/** 单卡详情里的关系快照：够面板显示「谁 · 当前档」，不含模型侧的解释文本。 */
+export interface DetailRelation {
+  /** 展示标签，形如「虞照（亲近）」 */
+  tag?: string
+  bands?: readonly string[]
+  /** 起点锚定档（卡片文字推断） */
+  baseline?: string
+  /** 当前档（会话落盘值）；老后端没有这个字段 */
+  current?: string
+  /** 档位变更留痕（可选） */
+  log?: Array<{ at?: string; from?: string; to?: string; why?: string }>
 }
 
 /** 关系：`baseline` 只是卡片文字推断出的「起点锚定」，实际档位由模型现算、不落盘。 */
@@ -293,21 +311,49 @@ export function deactivateCharacter(): Promise<{ active: ActiveState }> {
   return post<{ active: ActiveState }>(ROUTES.deactivate)
 }
 
-/** 切换交互模式：text = 纯文本，text+action = 文本+动作。 */
-export function setInteractionMode(mode: 'text' | 'text+action'): Promise<{ active: ActiveState }> {
-  return post<{ active: ActiveState }>(ROUTES.setMode, { mode })
+/** 交互模式。 */
+export type InteractionMode = 'text' | 'text+action'
+
+/**
+ * `POST /mode` 的返回。
+ *
+ * `scope` 是宿主告诉我们「这次写到哪了」：
+ *  - `session`：写进了某个角色的会话状态（有启用角色或显式给了 name）；
+ *  - `global`：既没启用角色也没给 name，只写了全局兜底，等启用角色后再生效。
+ *
+ * 老宿主没有这个字段，调用方按 `session` 兜底（见 `mode.scope` 的用法）。
+ */
+export interface SetModeResult {
+  active: ActiveState
+  scope?: 'session' | 'global'
 }
 
-/** 新建 / 覆盖角色卡。 */
+/**
+ * 切换交互模式：text = 纯文本，text+action = 文本+动作。
+ *
+ * `name` 用于「还没启用角色、但用户在角色簿里选了一张卡」的情况：带上它就写进那张卡的会话，
+ * 不带且没有启用角色时宿主会退化成全局兜底（`scope: 'global'`），面板据此换提示文案。
+ */
+export function setInteractionMode(mode: InteractionMode, name?: string): Promise<SetModeResult> {
+  return post<SetModeResult>(ROUTES.setMode, name === undefined || name === '' ? { mode } : { mode, name })
+}
+
+/** 保存角色卡的结果。warnings 是后端软提示（世界书超限等）：**不拦截保存**，只是要展示给用户。 */
+export interface SaveCharacterResult {
+  name: string
+  /** 软警告（世界书条目/总字数超预算之类）。老后端没有这个字段，调用方按空数组兜底。 */
+  warnings?: string[]
+}
+
 /**
  * 保存角色卡。
  *
  * 三键并存（架构稿 C7）：card 是结构视图（编辑面），ccv3 是完整对象（世界书 / 未知键）。
- * 只发 card 时后端走纯结构合并（romLegacyView）；带 ccv3 时以它为底再合并。
+ * 只发 card 时后端走纯结构合并（fromLegacyView）；带 ccv3 时以它为底再合并。
  * 不传 ccv3 就不塞这个键，避免用空对象覆盖掉后端的完整数据。
  */
-export function saveCharacter(name: string, card: Card, ccv3?: Card): Promise<{ name: string }> {
-  return post<{ name: string }>(ROUTES.saveCharacter, ccv3 === undefined ? { name, card } : { name, card, ccv3 })
+export function saveCharacter(name: string, card: Card, ccv3?: Card): Promise<SaveCharacterResult> {
+  return post<SaveCharacterResult>(ROUTES.saveCharacter, ccv3 === undefined ? { name, card } : { name, card, ccv3 })
 }
 
 /**
@@ -321,8 +367,8 @@ export function saveCharacter(name: string, card: Card, ccv3?: Card): Promise<{ 
  *
  * 结构字段的保存仍走 `saveCharacter(name, card)`（不带 ccv3），两条链路互不越界。
  */
-export function saveCharacterCcv3(name: string, ccv3: Card): Promise<{ name: string }> {
-  return post<{ name: string }>(ROUTES.saveCharacter, { name, ccv3 })
+export function saveCharacterCcv3(name: string, ccv3: Card): Promise<SaveCharacterResult> {
+  return post<SaveCharacterResult>(ROUTES.saveCharacter, { name, ccv3 })
 }
 
 // ---------------------------------------------------------------- 导入酒馆卡
@@ -417,6 +463,16 @@ export function fetchDistillFlow(): Promise<DistillFlowInfo> {
 //   arm（拿指令 + 开启这次蒸馏窗口）→ 把指令发进会话 → AI 自己跑完并调用 awu_card_save 落盘。
 // 面板不再接收/校验卡片，只负责「开始」与「看到新卡」（后者由面板轮询 /characters）。
 
+/**
+ * 一次「让 AI 干活」的窗口类型。
+ *
+ * - `distill`：从作品蒸馏一张**新卡**（宿主发 flow.md 手册）；
+ * - `create`：给一张**已存在的骨架卡**补全人设（宿主发 flow-create.md 手册）。
+ *
+ * 两条流程共用 `/distill/arm`、`awu_card_save` 与同一套发送通道，只靠这个 kind 分流手册。
+ */
+export type DistillKind = 'distill' | 'create'
+
 /** `GET /distill/state`：这次蒸馏窗口的状态。 */
 export interface DistillState {
   ok: true
@@ -424,6 +480,8 @@ export interface DistillState {
   armed: boolean
   /** 窗口到期时间（ISO）；没有窗口时为 undefined */
   expiresAt?: string
+  /** 当前窗口是哪种流程（老宿主可能没有这个字段）。 */
+  kind?: DistillKind
   /** 最近一次由 AI 保存成功的卡（用于「刚才存了一张：xxx」） */
   lastSaved?: { name: string; at: string }
 }
@@ -437,6 +495,8 @@ export interface DistillArmResult {
   path?: string
   /** 窗口到期时间（ISO） */
   expiresAt?: string
+  /** 这次窗口的流程类型；老宿主不回这个字段，调用方按请求时的 kind 兜底。 */
+  kind?: DistillKind
 }
 
 /** 读这次蒸馏窗口的状态（打不开也不该影响主流程，调用方自己吞错）。 */
@@ -445,13 +505,18 @@ export function fetchDistillState(): Promise<DistillState> {
 }
 
 /**
- * 开一次蒸馏窗口。
+ * 开一次蒸馏窗口（`kind` 决定宿主发哪份手册）。
+ *
+ * `name` 只对 `create` 有意义：宿主用它把「要补全哪张骨架卡」钉进指令里
+ * （补全完成后 AI 会按这个名字 + overwrite 覆盖同一张卡）。
  *
  * 宿主侧会给这次会话盖一个带过期的「允许 AI 落盘」标记——AI 的 `awu_card_save` 只在窗口内可用，
  * 过期自动失效，所以这个函数**总是先调**，再发送指令。
  */
-export function armDistill(): Promise<DistillArmResult> {
-  return post<DistillArmResult>(ROUTES.distillArm)
+export function armDistill(kind: DistillKind = 'distill', name?: string): Promise<DistillArmResult> {
+  const body: Record<string, unknown> = { kind }
+  if (name !== undefined && name.trim() !== '') body['name'] = name.trim()
+  return post<DistillArmResult>(ROUTES.distillArm, body)
 }
 
 /** 收掉窗口（用户取消 / 关弹层但没发出去时调用）。幂等。 */

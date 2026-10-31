@@ -26,28 +26,48 @@ import {
   type LegacyCardView,
 } from './tavern.js'
 
+/**
+ * 流程文件种类。
+ *
+ *   - `distill`：从作品蒸馏一张卡（`distill/flow.md`）；
+ *   - `create`：给面板里建好的**骨架卡**做 AI 补全（`distill/flow-create.md`）。
+ *
+ * 两条通道共用同一套「武装 + 发指令到当前会话 + `awu_card_save` 落盘」的机械结构，
+ * 区别只在于读哪份手册、指令怎么写。
+ */
+export type DistillKind = 'distill' | 'create'
+export const DISTILL_KINDS: readonly DistillKind[] = ['distill', 'create']
+
 /** 流程文件名（放在包根的 `distill/` 下，随 `package.json` 的 files 发布）。 */
-export const DISTILL_FLOW_FILE = 'flow.md'
+export const DISTILL_FLOW_FILES: Record<DistillKind, string> = {
+  distill: 'flow.md',
+  create: 'flow-create.md',
+}
+
+/** 向后兼容的别名（蒸馏通道的文件名）。 */
+export const DISTILL_FLOW_FILE = DISTILL_FLOW_FILES.distill
 
 /**
- * `distill/flow.md` 的绝对路径。
+ * `distill/<kind>` 的绝对路径。
  *
  * 与 `src/index.ts:152` 定位 `presets/` 的写法一致：本文件编译到 `lib/distill.js`，
  * 所以 `dirname(import.meta.url)/..` 就是包根。
  */
-export function distillFlowPath(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), '..', 'distill', DISTILL_FLOW_FILE)
+export function distillFlowPath(kind: DistillKind = 'distill'): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'distill', DISTILL_FLOW_FILES[kind])
 }
 
 export interface DistillFlowFile {
+  kind: DistillKind
   path: string
   text: string
   chars: number
 }
 
-/** 读流程文件全文。缺失或空白都用「可操作」的中文报错，不吞异常。 */
-export async function readDistillFlow(): Promise<DistillFlowFile> {
-  const path = distillFlowPath()
+/** 读流程文件全文（缺省蒸馏手册）。缺失或空白都用「可操作」的中文报错，不吞异常。 */
+export async function readDistillFlow(kind: DistillKind = 'distill'): Promise<DistillFlowFile> {
+  const path = distillFlowPath(kind)
+  const fileName = DISTILL_FLOW_FILES[kind]
   let text: string
   try {
     text = await readFile(path, 'utf8')
@@ -55,12 +75,12 @@ export async function readDistillFlow(): Promise<DistillFlowFile> {
     const code = (error as NodeJS.ErrnoException)?.code
     const reason = error instanceof Error ? error.message : String(error)
     if (code === 'ENOENT') {
-      throw new Error(`找不到蒸馏流程文件：${path}（插件安装不完整：distill/flow.md 应随包发布）`)
+      throw new Error(`找不到流程文件：${path}（插件安装不完整：distill/${fileName} 应随包发布）`)
     }
-    throw new Error(`读取蒸馏流程文件失败：${path}（${reason}）`)
+    throw new Error(`读取流程文件失败：${path}（${reason}）`)
   }
-  if (text.trim() === '') throw new Error(`蒸馏流程文件是空的：${path}`)
-  return { path, text, chars: text.length }
+  if (text.trim() === '') throw new Error(`流程文件是空的：${path}`)
+  return { kind, path, text, chars: text.length }
 }
 
 /**
@@ -69,8 +89,12 @@ export async function readDistillFlow(): Promise<DistillFlowFile> {
  * 设计约束（L2 铁律）：指令里**只有**绝对路径 + 行为要求，**不放**任何字段契约正文。
  * 契约正文由模型自己去读 md —— 这样这段指令即使被贴进会话，也只是一句「去读这个文件」。
  * 卡片格式（CCv3）最终也写在 md 里，这段指令**不需要跟着改**。
+ *
+ * `kind='create'` 时换一份口径：这次不是蒸馏，而是**给骨架卡补全字段**，
+ * 并把要补全的卡名带上（`name` 缺省时让模型先问用户是哪张）。
  */
-export function buildDistillInstruction(flowPath: string): string {
+export function buildDistillInstruction(flowPath: string, kind: DistillKind = 'distill', name?: string): string {
+  if (kind === 'create') return buildCreateInstruction(flowPath, name)
   return [
     '请帮我从作品里蒸馏一张角色卡。',
     '',
@@ -92,18 +116,55 @@ export function buildDistillInstruction(flowPath: string): string {
   ].join('\n')
 }
 
+/** `kind='create'` 的指令文本：给骨架卡做 AI 补全。 */
+function buildCreateInstruction(flowPath: string, name?: string): string {
+  const trimmed = typeof name === 'string' ? name.trim() : ''
+  const target = trimmed !== ''
+    // 名字是**强约束**：awu_card_save 的 overwrite 按名字覆盖，改了名就等于新建一张空壳卡
+    ? [
+      `本次要补全的骨架卡：**${trimmed}**（已在角色簿里，目前只有姓名 / 身份 / 一句话背景）`,
+      '',
+      `**保存时必须用这个卡名**：\`name\` 与 \`data.name\` 都写「${trimmed}」，一个字都不要改`,
+      `（按你自己的推断取名 = 目录里多出一张空壳卡，原来那张不会被补全）。`,
+    ].join('\n')
+    : '本次要补全的骨架卡：我还没说是哪一张——先问我是哪张卡，问到之后**用我给的原文名字保存**，不要自己改名。'
+  return [
+    '请帮我用 AI 补全一张自创角色卡的其余字段。',
+    '',
+    '第一步：完整读取这份流程文件，按它执行：',
+    flowPath,
+    '',
+    target,
+    '',
+    '要求：',
+    '1. 读完先只回一句「流程已读，先看看这张卡」，不要提前开讲、不要直接动笔。',
+    '2. 先读现有卡（awu_whoami）；看不到的字段就如实说明能力边界，**不要假装读到了**。',
+    '3. 一次问完 3-5 个关键问题（声线 / 关系 / 雷区 / 称呼），不要挤牙膏式一个个问。',
+    '4. **不编造**：用户没说、也推不出来的标 `[待补]` 并在汇报里列出来；凭印象补的标 `[AI推断]`，用户确认后去掉标记。',
+    '5. 补全后先给我**摘要**（不贴 JSON），我点头再调 awu_card_save({ name, data, overwrite: true }) 覆盖同名骨架卡。',
+    '6. 工具若返回 `name-conflict`：说明同名骨架卡就在那儿——**那就是这张卡，不是撞车**，带 `overwrite: true` 再调一次；',
+    '   **绝不改名绕过**（改名 = 新建空壳卡，原来那张等于没补）。',
+    '7. 保存成功后一句话确认（「想调哪块直接说」），**不要开聊、不要演角色、不要给示例台词**。',
+    '8. 只动 awu_card_save 这一个写工具；其它 awu_* 工具不要动。',
+  ].join('\n')
+}
+
 export interface DistillFlowInfo {
+  kind: DistillKind
   path: string
   instruction: string
   chars: number
   flowChars: number
+  /** create 模式下要补全的骨架卡名（没给时为空串）。 */
+  name: string
 }
 
 /** `GET /distill/flow` 的返回体（不含信封里的 ok）。 */
-export async function distillFlowInfo(): Promise<DistillFlowInfo> {
-  const flow = await readDistillFlow()
-  const instruction = buildDistillInstruction(flow.path)
-  return { path: flow.path, instruction, chars: instruction.length, flowChars: flow.chars }
+export async function distillFlowInfo(kind: DistillKind = 'distill', name?: string): Promise<DistillFlowInfo> {
+  const flow = await readDistillFlow(kind)
+  const target = kind === 'create' && typeof name === 'string' ? name.trim() : ''
+  const instruction = buildDistillInstruction(flow.path, kind, target)
+  return { kind, path: flow.path, instruction, chars: instruction.length, flowChars: flow.chars, name: target }
 }
 
 // ============================================================================ v3：全自动蒸馏（时间窗门控 + 常驻 awu_card_save）
@@ -131,6 +192,8 @@ export interface DistillArmHooks {
 
 export interface DistillArmSnapshot {
   armed: boolean
+  /** 这次时间窗是哪条通道开的（`distill` 蒸馏 / `create` 骨架卡补全）。窗口关闭后回到缺省 `distill`。 */
+  kind: DistillKind
   /** 到期时刻（本地时区 ISO）；未武装时不出现。 */
   expiresAt?: string
   /** 最近一次通过 `awu_card_save` 落盘的结果（面板用来显示"新卡已保存"）。 */
@@ -161,6 +224,8 @@ export class DistillArm {
   private expiresAtMs: number | undefined
   private mounted = false
   private saved: { name: string; at: string } | undefined
+  /** 本次时间窗的通道种类；未武装时恒为缺省 `distill`。 */
+  private kind: DistillKind = 'distill'
 
   constructor(
     private readonly hooks: DistillArmHooks,
@@ -178,21 +243,27 @@ export class DistillArm {
     return true
   }
 
-  /** 武装（重复调用等于续期）。工具挂不上就抛错——不允许"看起来武装了但模型没有工具"。 */
-  arm(ttlMs: number = DISTILL_ARM_TTL_MS): DistillArmSnapshot {
+  /**
+   * 武装（重复调用等于续期 + 切换通道）。工具挂不上就抛错——不允许"看起来武装了但模型没有工具"。
+   *
+   * `kind` 缺省 `distill`（向后兼容旧调用），`create` 是「自创角色 AI 补全」通道。
+   */
+  arm(ttlMs: number = DISTILL_ARM_TTL_MS, kind: DistillKind = 'distill'): DistillArmSnapshot {
     if (!this.mounted) {
       const ok = this.hooks.mount()
-      if (!ok) throw new Error('宿主未提供工具服务，无法武装 awu_card_save（蒸馏工具挂不上去）')
+      if (!ok) throw new Error('宿主未提供工具服务，无法武装 awu_card_save（写卡工具挂不上去）')
       this.mounted = true
     }
     const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? Math.max(1000, Math.floor(ttlMs)) : DISTILL_ARM_TTL_MS
+    this.kind = DISTILL_KINDS.includes(kind) ? kind : 'distill'
     this.expiresAtMs = this.now() + ttl
     return this.snapshot()
   }
 
-  /** 手动收：卸工具 + 清 TTL（保存完成后也走这里）。 */
+  /** 手动收：清 TTL 并回到缺省通道（保存完成后也走这里）。 */
   disarm(): void {
     this.expiresAtMs = undefined
+    this.kind = 'distill'
     if (!this.mounted) return
     this.mounted = false
     try {
@@ -211,7 +282,7 @@ export class DistillArm {
 
   snapshot(): DistillArmSnapshot {
     const armed = this.armed
-    const snap: DistillArmSnapshot = { armed }
+    const snap: DistillArmSnapshot = { armed, kind: this.kind }
     if (armed && this.expiresAtMs !== undefined) snap.expiresAt = isoNow(new Date(this.expiresAtMs))
     if (this.saved !== undefined) snap.lastSaved = { ...this.saved }
     return snap

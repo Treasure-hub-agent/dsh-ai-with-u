@@ -868,10 +868,12 @@ function buildPostHistoryText(aiwu: AiwuExtension): string {
 }
 
 /**
- * 角色卡硬上限：只防「外部巨型卡把每轮 system prompt 撑爆」（请求失败 / 费用爆炸）。
+ * 角色卡**硬上限**：只防「无预算直进提示词」的那五个原生位。
  *
- * 超限**直接拒绝保存**并给出中文原因，不做静默截断——截断会让用户以为卡坏了，
- * 而拒绝保存至少数据还在、原因清楚。
+ * 为什么世界书不在这一组：注入侧本来就有预算（`LORE_DEFAULTS` maxEntries=12 / budgetChars=6000），
+ * 一本十万字的世界书不会把提示词撑爆——命中才注入。把它硬拦下来等于「用户导入大卡直接被拒绝」，
+ * 把本来能用的卡挡在门外（2026-10-31 真机验收报的问题）。世界书超限改走
+ * {@link collectCardWarnings} 的软警告：**保存成功 + 提示，一个字都不截断**。
  */
 export const CARD_HARD_LIMITS = {
   description: 2000,
@@ -879,11 +881,21 @@ export const CARD_HARD_LIMITS = {
   scenario: 4000,
   system_prompt: 4000,
   post_history_instructions: 4000,
+} as const
+
+/**
+ * 世界书**软上限**：只做提示，绝不阻断保存、绝不截断。
+ *
+ * 数值是建议值不是墙：单条 4000 字、全本 20000 字。
+ * 留这两个数是因为——单条过长时一次命中的 token 会突然变大，全本过大时命中率会下降，
+ * 但这两件事都不影响「卡能不能用」，所以只提醒。
+ */
+export const CARD_SOFT_LIMITS = {
   bookEntry: 4000,
   bookTotal: 20000,
 } as const
 
-/** 校验角色卡体量；超限抛错（调用方负责变成 400 给前端）。 */
+/** 校验角色卡**硬上限**；超限抛错（调用方负责变成 400 给前端）。世界书不在硬拦范围，见 {@link CARD_SOFT_LIMITS}。 */
 export function assertCardLimits(card: CharacterCardV3): void {
   const data = card.data
   const record = data as unknown as Record<string, unknown>
@@ -900,22 +912,48 @@ export function assertCardLimits(card: CharacterCardV3): void {
       throw new Error(`${label}太长（${text.length} 字，上限 ${limit}）：请精简后再保存`)
     }
   }
+}
 
-  const book = data.character_book
-  if (book === undefined) return
+/** 单次最多列几条「世界书条目偏长」——再多就聚合成一条，免得导入预览被刷屏。 */
+const BOOK_WARNING_SAMPLE = 3
+
+/**
+ * 世界书超限的**软警告**（保存/导入共用这一份文案，单一真源）。
+ *
+ * 语义：卡片照常保存、世界书一个字都不改，只是把「超出建议预算」这件事如实告诉用户。
+ * 文案里必须带**实际字数与上限**，并说明「按需注入、超出预算的部分不会进提示词」——
+ * 否则用户会以为卡坏了。
+ */
+export function collectCardWarnings(card: CharacterCardV3): string[] {
+  const book = card.data.character_book
+  if (book === undefined) return []
   const entries = Array.isArray(book.entries) ? book.entries : []
+  const warnings: string[] = []
+  const longEntries: string[] = []
   let total = 0
   for (const entry of entries) {
     const content = str(entry.content)
     total += content.length
-    if (content.length > CARD_HARD_LIMITS.bookEntry) {
-      const label = str(entry.name).trim() !== '' ? str(entry.name).trim() : str(entry.id).trim()
-      throw new Error(`世界书条目「${label === '' ? '未命名' : label}」太长（${content.length} 字，上限 ${CARD_HARD_LIMITS.bookEntry}）`)
-    }
+    if (content.length <= CARD_SOFT_LIMITS.bookEntry) continue
+    const label = str(entry.name).trim() !== '' ? str(entry.name).trim() : str(entry.id).trim()
+    longEntries.push(`「${label === '' ? '未命名' : label}」${content.length} 字`)
   }
-  if (total > CARD_HARD_LIMITS.bookTotal) {
-    throw new Error(`世界书总字数超限（${total}，上限 ${CARD_HARD_LIMITS.bookTotal}）：请精简后再保存`)
+  if (longEntries.length > 0) {
+    const shown = longEntries.slice(0, BOOK_WARNING_SAMPLE).join('、')
+    const rest = longEntries.length - BOOK_WARNING_SAMPLE
+    warnings.push(
+      `世界书有 ${longEntries.length} 条偏长（建议单条 ${CARD_SOFT_LIMITS.bookEntry} 字以内）：${shown}`
+      + `${rest > 0 ? `，另有 ${rest} 条同样偏长` : ''}。`
+      + '世界书按需注入，超出预算的部分不会进提示词，卡片本身功能不受影响；想让命中更稳可以拆成多条。',
+    )
   }
+  if (total > CARD_SOFT_LIMITS.bookTotal) {
+    warnings.push(
+      `世界书总字数 ${total} 字，超过建议上限 ${CARD_SOFT_LIMITS.bookTotal}：`
+      + '世界书按需注入，超出预算的部分不会进提示词，卡片照常可用；想命中更准可以合并或精简条目。',
+    )
+  }
+  return warnings
 }
 
 export function stampCardTimes(card: CharacterCardV3, now: Date): void {

@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-641%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-720%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -111,7 +111,13 @@ flowchart LR
 - **统计** — 角色数、记忆条数、对话轮次
 - **指南** — 首次打开时的使用说明
 
-角色簿左栏有「导入角色卡」，吃酒馆卡的三种形态：带立绘的 `.png`、`.charx` 压缩包、裸 `.json`。选完文件先出预览（识别到的名字、格式、全部 warnings），同名卡会提醒冲突并要二次确认；确认后才写盘，取消不落任何文件。文件上限 11 MB——base64 会膨胀 4/3，11 MB 传到宿主正好还在 16 MB 收包线内；带立绘的 PNG 卡常见 3–10 MB。
+角色簿左栏顶部并排两枚同级按钮：**蒸馏角色卡**（从作品里蒸一张）和 **自创角色卡**（从零写一张）。旁边是对话模式的胶囊「纯文本 / 文本 + 动作」，当前值高亮，点一下立刻生效——不需要先启用角色，因为模式是偏好不是角色属性。
+
+自创角色卡填三格（名字 / 身份 / 一句话背景）就能落档。想省事就勾「让 AI 补全人设」：插件先把这张骨架卡存好，再把补全指令发到当前会话，AI 会先问你 3–5 个关键问题（声线、关系、雷区、称呼），然后按酒馆卡格式补齐人设、开场白和世界书。合理推断标 `[AI推断]`，推不出来的标 `[待补]`，不编造。
+
+角色簿左栏还有「导入角色卡」，吃酒馆卡的三种形态：带立绘的 `.png`、`.charx` 压缩包、裸 `.json`。选完文件先出预览（识别到的名字、格式、全部 warnings），同名卡会提醒冲突并要二次确认；确认后才写盘，取消不落任何文件。文件上限 11 MB——base64 会膨胀 4/3，11 MB 传到宿主正好还在 16 MB 收包线内；带立绘的 PNG 卡常见 3–10 MB。
+
+「世界书太大」不再拦导入，只给警告：世界书是**按需注入**的（12 条 / 6000 字预算），超大书不会把提示词撑爆，只是超出预算的条目进不去当轮上下文。真正没有预算、直进提示词的那五个原生字段（描述 / 性格 / 场景 / 系统提示 / 历史后指令）仍然有硬上限。
 
 角色卡编辑器是 10 组 34 字段，第 11 个分区是**世界书**：条目名、关键词 / 副关键词（逗号分隔）、内容长文本（可全屏写）、常驻、优先级、插入顺序、逐条启用与上移下移。高级项里有位置（角色设定前 / 后）、大小写敏感、`selective`、正则。顶部体检标红五种情况：没有关键词、`selective` 缺副关键词、内容为空或超长（单条 800 字）、关键词重复、插入顺序撞车；整本还有条数 30 / 总字数 20000 的预算提醒。体检只提示，不拦保存。
 
@@ -187,12 +193,15 @@ New-Item -ItemType Junction `
 3. 开个新会话，像给老朋友发消息一样聊
 4. 不想玩了点「退出」
 
+想换说话方式（要不要带 `（动作）`）不用回面板：角色簿左栏工具栏有「纯文本 / 文本 + 动作」两枚胶囊，点一下 `POST /mode` 立刻切；也可以在对话里让模型切（`awu_mode`）。
+
 开箱自带三张范例卡（丰川祥子 / 阿米娅 / 昔涟，都由插件自己的蒸馏流程产出）。首次启用时幂等种入：`characters/` 已存在就跳过，不会复活你删掉的卡。
 
 ### 兼容旧卡与酒馆卡
 
 - **旧 34 字段卡**：直接放进 `characters/<名>/card.json`，读时自动归一成 CCv3，首次保存时才落成新格式并留下 `card.v1.bak.json`
 - **酒馆卡导入**：支持 `.png`（`tEXt` / `iTXt` 的 `ccv3`、`chara` 段）、`.charx`（zip 里的 `card.json`）、裸 `.json`（CCv2 自动升到 V3）
+- **世界书超限**：不再拒绝导入或保存，改为返回 warnings（实际字数 + 上限）并在预览里逐条列出。世界书按需注入，超出 12 条 / 6000 字预算的部分不会进提示词——书是完整的，只是这一轮用不到那么多
 
 ---
 
@@ -274,8 +283,10 @@ distill/flow  distill/arm  distill/disarm  distill/state
 
 ### 面板与提示词
 
-- **导入角色卡** —— 角色簿左栏入口，吃 PNG / CHARX / JSON，先预览后落盘
+- **导入角色卡** —— 角色簿左栏入口，吃 PNG / CHARX / JSON，先预览后落盘；世界书超限只警告不拦
+- **自创角色卡** —— 三格表单落骨架卡，可选「让 AI 补全人设」（走当前会话，AI 先问 3–5 个问题）
 - **世界书编辑** —— 角色卡编辑器第 11 分区，条目增删改 + 体检
+- **对话模式** —— 角色簿工具栏的「纯文本 / 文本 + 动作」胶囊，点了立刻生效，不需要启用角色
 - **纪律包 L0.5** —— `off` / `lite` / `full` 三档，默认 lite，偏好落盘、退出角色也保留
 - **`awu_mode`** —— 对话里直接切纯文本 / 文本 + 动作，不需要回面板
 
@@ -284,12 +295,12 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 八套自检（合计 641 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 720 项）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：后端做了、前端没接（18 项）
-npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 忘却（218 项）
-npm run verify:distill   # 蒸馏武装与 TTL（93 项）
+npm run verify:wiring    # 接线体检：14 组契约（33 项；后端做了前端没接 / 验收项回归）
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书 / 软警告（254 项）
+npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
 npm run verify:import    # PNG / CHARX / JSON 导入解析（49 项）
 npm run verify:session   # 会话、指令、纪律包与关系落盘（184 项）
 npm run verify:host      # 真实 cordis 宿主装配（55 项）
@@ -298,7 +309,7 @@ npm run typecheck:client # 只查浏览器侧类型
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 641 = 上面八套自检通过项之和，失败项必须为 0。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的 720 = 上面九套自检通过项之和，失败项必须为 0（`bundle 9 + wiring 33 + verify 15 + tavern 254 + distill 121 + import 49 + session 184 + host 55`；`verify-wiring` 里还含 0 项 skip 才算全绿）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 
@@ -353,6 +364,17 @@ desktop profile 由 Electron 独占管理，CLI 会直接报 `managed exclusivel
 <summary>提示词到底占多少 token？</summary>
 
 启用态约 2.8–3.3 KB 字符量级（中文按字计），未启用 0。实测：丰川祥子的卡 + lite 档，整段渲染 3286 字符。默认 lite 档的纪律包占 555 字符；切 `off` 全省，切 `full` 多 181 字符。世界书常态只注入一两百字符。重内容（卡里的详细设定、长日记）不会无条件进提示词。
+
+</details>
+
+<details>
+<summary>为什么我的大卡能导入了，但设定只用得上一部分？</summary>
+
+因为世界书是**按需注入**的，不是整本塞进提示词。命中预算默认 12 条 / 6000 字（`LORE_DEFAULTS`），超出预算的条目这一轮就不进上下文——卡本身一个字都没被改，磁盘上仍是完整的世界书，你在编辑器里能看到全部条目。
+
+这是刻意的：一张 9.8 万字的世界书全量注入，要么撑爆上下文、要么每轮烧掉一大笔费用，而真正用得上的往往只有当轮提到的那几条。想提高命中率就把关键词写准、把常驻条目留给「必须一直生效」的设定。
+
+现在导入/保存这类大书只会出警告（附实际字数与上限），不再拦你——v0.3.0 之前这里是硬拦，属于过严。
 
 </details>
 

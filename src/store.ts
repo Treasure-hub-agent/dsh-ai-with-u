@@ -35,6 +35,7 @@ import {
   fromLegacyView,
   cardName,
   cardSource,
+  collectCardWarnings,
   forgetCardText,
   relationBaseline,
   removeSentences,
@@ -362,6 +363,18 @@ export interface SaveCardInput {
   ccv3?: unknown
 }
 
+/**
+ * `saveCard` 的返回：落盘的卡 + **软警告**（当前只有世界书超限这一类）。
+ *
+ * 警告是「保存成功但想让你知道」的信息，调用方可以直接丢掉（`writeCard` / 预置卡种入就不看它），
+ * 面板/导入预览则应该透给用户 —— 文案与判定都在 `tavern.collectCardWarnings`（单一真源）。
+ */
+export interface SaveCardResult {
+  name: string
+  card: CharacterCardV3
+  warnings: string[]
+}
+
 /** 列表项：`card` 是旧视图（面板读它），`ccv3` 是完整对象（世界书等原生字段从这走）。 */
 export interface CharacterListItem {
   name: string
@@ -624,8 +637,11 @@ export class Store {
    *
    * 首次把旧格式卡写成 CCv3 之前，先落一份 `card.v1.bak.json`（不覆盖已有备份）；
    * 备份失败则整体失败（宁可不迁移，也不留半截）。
+   *
+   * 返回值带 `warnings`：五个原生位超限仍抛错（无预算直进提示词），世界书超限只警告不拦
+   * （注入有预算，见 `tavern.collectCardWarnings`）。**绝不静默截断**。
    */
-  async saveCard(input: SaveCardInput): Promise<{ name: string; card: CharacterCardV3 }> {
+  async saveCard(input: SaveCardInput): Promise<SaveCardResult> {
     const safe = normalizeName(input.name)
     return this.locked(safe, async () => {
       // Windows 文件系统大小写不敏感：`Alice` 与 `alice` 会写进同一目录、互相覆盖日记。
@@ -646,11 +662,12 @@ export class Store {
       // 目录名是主键：卡内名字跟目录名走（改卡名不在本轮范围，见设计文档 M3）
       next.data.name = safe
       if (!Array.isArray(next.data.tags)) next.data.tags = []
-      // 巨型卡会把每轮 system prompt 撑爆（请求失败 / 费用爆炸）：保存前硬拦
+      // 只有「无预算直进提示词」的五个原生位是硬拦；世界书超限走软警告（不拦、不截断）
       assertCardLimits(next)
+      const warnings = collectCardWarnings(next)
       stampCardTimes(next, new Date())
       await this.writeCardUnlocked(safe, next, existingRaw)
-      return { name: safe, card: next }
+      return { name: safe, card: next, warnings }
     })
   }
 

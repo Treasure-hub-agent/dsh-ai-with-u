@@ -42,7 +42,7 @@ process.env['AIWU_STORAGE_ROOT'] = sandbox
 console.log(`沙箱存储根：${sandbox}`)
 
 const { Store } = await import(lib('store.js'))
-const { DistillArm, DISTILL_ARM_TTL_MS, saveCardFromModel } = await import(lib('distill.js'))
+const { DistillArm, DISTILL_ARM_TTL_MS, saveCardFromModel, distillFlowInfo } = await import(lib('distill.js'))
 const { createCardSaveTool } = await import(lib('tools.js'))
 const { buildRoutes } = await import(lib('web.js'))
 
@@ -435,6 +435,133 @@ section('11. P0-8：蒸馏落盘的 CCv3 必须带齐五处原生投影（否则
   // 结构性内容不能被投影顺手洗掉
   check(d.extensions?.aiwu?.voice?.catchphrases?.[0] === '不必了，谢谢。', '投影后结构里的声线原样还在')
   check(d.extensions?.aiwu?.imported === undefined, '自制卡不该产生 imported.raw（否则 L1 会走原文保真分支）')
+}
+
+// ================================================================ 12. 通道 kind
+
+section('12. 时间窗通道 kind：distill（缺省）/ create（骨架卡 AI 补全）')
+{
+  // ---- 1) DistillArm：kind 缺省 distill、arm 可切、snapshot 带 kind
+  const { arm } = makeArm()
+  check(arm.snapshot().kind === 'distill' && arm.snapshot().armed === false,
+    `未武装时 kind 缺省 distill（实际 ${arm.snapshot().kind}）`)
+  const armedDistill = arm.arm()
+  check(armedDistill.kind === 'distill', `arm() 缺省 kind=distill（实际 ${armedDistill.kind}）`)
+  const armedCreate = arm.arm(undefined, 'create')
+  check(armedCreate.kind === 'create' && armedCreate.armed === true,
+    `arm(undefined,'create') → kind=create（实际 ${armedCreate.kind}）`)
+  check(typeof armedCreate.expiresAt === 'string' && armedCreate.expiresAt !== '', 'create 通道也给 expiresAt')
+  arm.disarm()
+  check(arm.snapshot().kind === 'distill', '窗口关闭后 kind 回到缺省 distill')
+
+  // ---- 2) 流程文件：两条通道各读各的，指令里带对应路径
+  const createFlow = await distillFlowInfo('create')
+  check(createFlow.kind === 'create', `distillFlowInfo('create').kind = ${createFlow.kind}`)
+  check(createFlow.path.endsWith(`flow-create.md`) && createFlow.path.includes('distill'),
+    `create 读的是 distill/flow-create.md（${createFlow.path}）`)
+  check(createFlow.flowChars > 3000, `flow-create.md 非空且够用（${createFlow.flowChars} 字）`)
+  check(createFlow.instruction.includes('flow-create.md'), 'create 指令里含 flow-create.md 路径')
+  check(createFlow.instruction.includes('骨架卡') && createFlow.instruction.includes('overwrite: true'),
+    'create 指令说明这是骨架卡补全、且要带 overwrite: true')
+
+  const distillFlow = await distillFlowInfo()
+  check(distillFlow.kind === 'distill', `缺省仍是蒸馏通道（kind=${distillFlow.kind}）`)
+  check(distillFlow.path.endsWith('flow.md') && !distillFlow.path.includes('flow-create'),
+    '缺省读的是 distill/flow.md（向后兼容）')
+  check(distillFlow.instruction.includes('蒸馏') || distillFlow.instruction.includes('flow.md'),
+    '蒸馏指令内容没变口径')
+
+  // ---- 3) 名字是强约束：指令里必须点名 + 禁止改名
+  const named = await distillFlowInfo('create', '林晚')
+  check(named.name === '林晚', `create 指令带上骨架卡名（name=${named.name}）`)
+  check(named.instruction.includes('林晚'), '指令正文出现骨架卡名')
+  check(named.instruction.includes('一个字都不要改') || named.instruction.includes('不要自己改名'),
+    '指令把名字写成强约束（不许按推断改名）')
+  check(named.instruction.includes('name-conflict') && named.instruction.includes('overwrite: true'),
+    '指令写清 name-conflict 的处置（就是那张卡，带 overwrite 覆盖）')
+  const unnamed = await distillFlowInfo('create')
+  check(unnamed.instruction.includes('先问我') || unnamed.instruction.includes('先问我是哪张卡'),
+    '没给名字时要求先问用户是哪张卡')
+
+  // ---- 4) flow-create.md 自身：行数与要点（任务书要求 300-500 行）
+  const createText = await readFile(join(root, 'distill', 'flow-create.md'), 'utf8')
+  const lineCount = createText.split(/\r?\n/u).length
+  check(lineCount >= 300 && lineCount <= 500, `flow-create.md 行数 ${lineCount}（要求 300-500）`)
+  const mustHave = [
+    ['awu_card_save', '保存入口'],
+    ['overwrite: true', '覆盖逻辑'],
+    ['name-conflict', '重名处置'],
+    ['[待补]', '待补标记'],
+    ['[AI推断]', '推断标记'],
+    ['3-5', '一次问完 3-5 个问题'],
+    ['voice.pace', '键名对照（禁止自创键）'],
+    ['不给角色改名', '名字强约束'],
+  ]
+  const missing = mustHave.filter(([kw]) => !createText.includes(kw)).map(([, label]) => label)
+  check(missing.length === 0, `flow-create.md 含全部要点${missing.length === 0 ? '' : '，缺：' + missing.join('、')}`)
+
+  // ---- 5) 路由：arm 带 kind / state 带 kind / flow 带 ?kind
+  const { arm: routeArm } = makeArm()
+  const fakePrompt = {
+    characterName: undefined,
+    snapshot: () => ({ enabled: false }),
+    relationTag: () => '',
+    invalidate: () => {},
+    refresh: async () => {},
+    activate: async () => ({ enabled: false }),
+  }
+  const routes = buildRoutes(store, fakePrompt, routeArm)
+  const routeOf = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
+  const fakeRes = () => {
+    const out = { status: 0, body: undefined }
+    return {
+      out,
+      setHeader() {},
+      writeHead(status) { out.status = status },
+      end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
+    }
+  }
+  const fakeReq = (method, body, url = '/') => ({
+    method,
+    url,
+    headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
+    async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
+  })
+
+  let res = fakeRes()
+  await routeOf('/distill/arm').handler(fakeReq('POST', { kind: 'create', name: '林晚' }), res)
+  check(res.out.status === 200 && res.out.body?.kind === 'create',
+    `POST /distill/arm {kind:create} → kind=${String(res.out.body?.kind)}`)
+  check(res.out.body?.name === '林晚', `arm 响应回显 name=${String(res.out.body?.name)}`)
+  check(String(res.out.body?.instruction ?? '').includes('flow-create.md'), 'create 通道指令指向 flow-create.md')
+
+  res = fakeRes()
+  await routeOf('/distill/state').handler(fakeReq('GET'), res)
+  check(res.out.body?.armed === true && res.out.body?.kind === 'create',
+    `GET /distill/state 带 kind=${String(res.out.body?.kind)}`)
+
+  res = fakeRes()
+  await routeOf('/distill/flow').handler({
+    ...fakeReq('GET'),
+    url: '/?kind=create',
+  }, res)
+  check(res.out.body?.kind === 'create' && String(res.out.body?.instruction ?? '').includes('flow-create.md'),
+    'GET /distill/flow?kind=create 走补全通道')
+
+  res = fakeRes()
+  await routeOf('/distill/flow').handler(fakeReq('GET'), res)
+  check(res.out.body?.kind === 'distill' && String(res.out.body?.path ?? '').endsWith('flow.md'),
+    'GET /distill/flow 不带参数 → 蒸馏通道（向后兼容）')
+
+  res = fakeRes()
+  await routeOf('/distill/arm').handler(fakeReq('POST', { kind: '养卡' }), res)
+  check(res.out.status === 400 && String(res.out.body?.error).includes('distill'),
+    `非法 kind → 400（${res.out.status}）`)
+
+  res = fakeRes()
+  await routeOf('/distill/arm').handler(fakeReq('POST', undefined), res)
+  check(res.out.status === 200 && res.out.body?.kind === 'distill',
+    'POST /distill/arm 不带 body → 蒸馏通道（旧面板兼容）')
 }
 
 // ================================================================ 汇总

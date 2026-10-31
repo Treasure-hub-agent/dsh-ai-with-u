@@ -21,6 +21,7 @@ const zh = {
   'panel.title': '角色管理器',
   'panel.close': '收起面板',
   'panel.refresh': '刷新数据',
+  'panel.dropCard': '卡文件请从「导入角色卡」拖进虚线框。',
   'panel.tab.roster': '角色簿',
   'panel.tab.diary': '日记',
   'panel.tab.stats': '统计',
@@ -39,7 +40,6 @@ const zh = {
 
   'roster.empty.title': '角色簿还是空的',
   'roster.empty.hint': '新建一张角色卡就能开始；也可以把原 ai-with-u 的 characters 目录搬进插件目录。',
-  'roster.new': '新建角色',
   'roster.count': '共 {n} 位',
   'roster.memory': '{n} 条记忆',
   'roster.never': '从未互动',
@@ -51,11 +51,17 @@ const zh = {
   'roster.open': '打开 {name} 的角色页',
 
   // ---- 导入酒馆卡（PNG / CHARX / JSON）----
+  // ---- 两张卡的入口（同级并排：蒸馏 / 自创）----
+  'cta.distill': '蒸馏角色卡',
+  'cta.distillHint': '从作品或设定做一张新卡',
+  'cta.selfCreate': '自创角色卡',
+  'cta.selfCreateHint': '从零写一张，可让 AI 补全',
   'import.entry': '导入角色卡',
   'import.title': '导入角色卡',
   'import.hint': '支持酒馆 PNG 卡（tEXt / iTXt）、CHARX 压缩包和裸 JSON。解析这一步不写盘，确认后才落盘。',
   'import.pick': '选择文件',
   'import.pickHint': '或把 .png / .charx / .json 拖进这个框',
+  'import.dropHint': '把卡拖到虚线框里，或点「选择文件」。',
   'import.limit': '单文件上限 {max}（base64 会把体积放大 4/3，宿主请求体上限 16 MB 就是这么换算的）',
   'import.parsing': '正在解析卡片…',
   'import.tooLarge': '文件 {size} 超过上限 {max}：宿主导入接口走 base64（体积 ×4/3），16 MB 的请求体换算下来就是这个数。',
@@ -84,6 +90,10 @@ const zh = {
   'diary.empty': '还没有写下任何一天。你们聊过的内容会被自动记进来。',
   'diary.marker.timeline': '时',
   'diary.marker.notes': '记',
+  'diary.emptyFor': '{name} 还没有日记',
+  'diary.emptyForHint': '聊几句之后 TA 会开始记；日记会按天记在这里。',
+  'diary.loadFailed': '这段日记没能加载出来',
+
 
   'stats.title': '这一册的厚度',
   'stats.characters.full': '位角色',
@@ -111,7 +121,7 @@ const zh = {
   'detail.diaryEmpty': '这位角色还没有日记。',
   'detail.loadFailed': '这个角色没能加载出来',
 
-  'new.title': '新建角色',
+  'new.title': '自创角色卡',
   'new.name': '角色名',
   'new.namePlaceholder': '例如：虞照',
   'new.role': '身份',
@@ -120,9 +130,20 @@ const zh = {
   'new.blurbPlaceholder': '可选，一句话说清他/她是谁、和你什么关系',
   'new.preview': '会创建：',
   'new.confirm': '创建',
+  'new.confirmAi': '保存并发给 AI',
   'new.cancel': '取消',
   'new.nameRequired': '先给角色起个名字。',
   'new.nameTaken': '这个名字已经有人用了。',
+  'new.aiFill': '让 AI 补全人设',
+  'new.aiFillHint': '先存下这张骨架卡，再把补全指令发进当前会话：AI 会先问你几个问题，然后自己把卡补完。',
+  'new.aiFillSent': '骨架卡已保存，指令已发到当前会话——AI 会先问你几个问题。',
+  'new.aiFillFilled': '骨架卡已保存，指令已填进输入框：按回车发给 AI。',
+  'new.aiFillFilledBusy': '骨架卡已保存；会话正在生成，指令已填进输入框，等这一轮结束再按回车。',
+  'new.aiArmFailed': '骨架卡已保存，但没能开启补全通道：{reason}',
+  'new.saveFailed': '骨架卡保存失败：{reason}',
+  'new.done': '已创建「{name}」',
+  'new.createdTag': '这张卡：',
+  'new.saveWarnHead': '「{name}」已保存，但有几条提示：',
 
   'delete.title': '删除角色',
   'delete.body': '要删掉「{name}」吗？这一步不会自动备份。',
@@ -139,6 +160,8 @@ const zh = {
   'mode.textHint': '不输出动作神态，只靠语气与断句表达',
   'mode.action': '文本 + 动作',
   'mode.actionHint': '动作神态用括号包起来，与台词分清界限',
+  'mode.pending': '先记为默认：启用角色后会自动切到这个模式。',
+  'mode.picked': '已切到「{mode}」。',
 
   'common.loading': '载入中…',
   'time.today': '今天',
@@ -151,6 +174,8 @@ const zh = {
   'common.noMemory': '0 条记忆',
   'common.busy': '处理中…',
   'common.close': '关闭',
+  'notice.close': '关闭提示',
+  'notice.warnHead': '还有 {n} 条提示：',
 
   // ---- 记忆与剧情维护 ----
   'relation.title': '关系',
@@ -373,6 +398,7 @@ const en: Dict = {
   'panel.title': 'Character Manager',
   'panel.close': 'Close panel',
   'panel.refresh': 'Refresh',
+  'panel.dropCard': 'Drop card files into “Import card”.',
   'panel.tab.roster': 'Roster',
   'panel.tab.diary': 'Diary',
   'panel.tab.stats': 'Stats',
@@ -391,7 +417,6 @@ const en: Dict = {
 
   'roster.empty.title': 'Your roster is empty',
   'roster.empty.hint': 'Create a card to begin, or move an existing characters folder into the plugin directory.',
-  'roster.new': 'New character',
   'roster.count': '{n} total',
   'roster.memory': '{n} memories',
   'roster.never': 'Never used',
@@ -403,11 +428,17 @@ const en: Dict = {
   'roster.open': 'Open {name}',
 
   // ---- Importing a tavern card (PNG / CHARX / JSON) ----
+  // ---- Card entries (peers in one row: distill / self-create) ----
+  'cta.distill': 'Distill card',
+  'cta.distillHint': 'Make a new card from a story or a setup',
+  'cta.selfCreate': 'Create card',
+  'cta.selfCreateHint': 'Write one from scratch, optionally AI-filled',
   'import.entry': 'Import card',
   'import.title': 'Import character card',
   'import.hint': 'Tavern PNG cards (tEXt / iTXt), CHARX archives and plain JSON are supported. Parsing writes nothing — the card lands only after you confirm.',
   'import.pick': 'Choose a file',
   'import.pickHint': 'Or drag a .png / .charx / .json into this box',
+  'import.dropHint': 'Drop the card into the dashed box, or choose a file.',
   'import.limit': 'One file up to {max} (base64 inflates by 4/3 — that is how the 16 MB request cap translates).',
   'import.parsing': 'Parsing the card…',
   'import.tooLarge': 'This file is {size}, over the {max} limit: the host import route carries base64 (×4/3), so a 16 MB request body works out to that.',
@@ -436,6 +467,10 @@ const en: Dict = {
   'diary.empty': 'No days written yet. Conversations are recorded here automatically.',
   'diary.marker.timeline': 'T',
   'diary.marker.notes': 'N',
+  'diary.emptyFor': '{name} has no diary yet',
+  'diary.emptyForHint': 'Chat a little and TA will start keeping notes; days are recorded here.',
+  'diary.loadFailed': 'This diary could not be loaded',
+
 
   'stats.title': 'How thick this volume is',
   'stats.characters.full': 'characters',
@@ -463,7 +498,7 @@ const en: Dict = {
   'detail.diaryEmpty': 'This character has no diary yet.',
   'detail.loadFailed': 'This character could not be loaded',
 
-  'new.title': 'New character',
+  'new.title': 'Create a card',
   'new.name': 'Name',
   'new.namePlaceholder': 'e.g. Yuzhao',
   'new.role': 'Role',
@@ -472,9 +507,20 @@ const en: Dict = {
   'new.blurbPlaceholder': 'Optional, one line about who they are to you',
   'new.preview': 'Will create: ',
   'new.confirm': 'Create',
+  'new.confirmAi': 'Save and send to AI',
   'new.cancel': 'Cancel',
   'new.nameRequired': 'Give the character a name first.',
   'new.nameTaken': 'That name is already taken.',
+  'new.aiFill': 'Let the AI fill in the persona',
+  'new.aiFillHint': 'The skeleton card is saved first, then the fill-in prompt goes into the current chat: the AI asks a few questions and completes the card itself.',
+  'new.aiFillSent': 'Skeleton card saved and the prompt sent to the current chat — the AI will ask a few questions first.',
+  'new.aiFillFilled': 'Skeleton card saved and the prompt filled into the input: press Enter to send it to the AI.',
+  'new.aiFillFilledBusy': 'Skeleton card saved; the chat is generating, so the prompt sits in the input — press Enter once this turn ends.',
+  'new.aiArmFailed': 'Skeleton card saved, but the fill-in channel could not be opened: {reason}',
+  'new.saveFailed': 'Could not save the skeleton card: {reason}',
+  'new.done': 'Created “{name}”',
+  'new.createdTag': 'Card: ',
+  'new.saveWarnHead': '“{name}” saved, with a few notes:',
 
   'delete.title': 'Delete character',
   'delete.body': 'Delete “{name}”? This cannot be undone.',
@@ -491,6 +537,8 @@ const en: Dict = {
   'mode.textHint': 'No action beats; tone and pauses carry it',
   'mode.action': 'Text + action',
   'mode.actionHint': 'Action beats in parentheses, separate from speech',
+  'mode.pending': 'Saved as the default: it applies as soon as a character is enabled.',
+  'mode.picked': 'Mode set to {mode}.',
 
   'common.loading': 'Loading…',
   'time.today': 'Today',
@@ -503,6 +551,8 @@ const en: Dict = {
   'common.noMemory': '0 memories',
   'common.busy': 'Working…',
   'common.close': 'Close',
+  'notice.close': 'Dismiss notice',
+  'notice.warnHead': '{n} more note(s):',
 
   'relation.title': 'Relationship',
   'relation.baseline': 'Start',

@@ -44,6 +44,7 @@ const {
   migrateLegacyCard, normalizeCard, toLegacyView, fromLegacyView,
   renderL1, renderL1Static, selectLoreEntries, expandMacros, parseDecorators,
   forgetCardText, cardSource, cardName, awiuOf, lengthWarnings, cardLengthStats,
+  assertCardLimits, collectCardWarnings, CARD_SOFT_LIMITS, CARD_HARD_LIMITS,
   LORE_DEFAULTS, MES_EXAMPLE_BUDGET,
 } = T
 
@@ -1026,6 +1027,253 @@ section('V27 · 存储硬化：跨实例锁 / BOM / 旧卡备份 / 孤儿索引 
     const okBook = { entries: [{ id: 'ok', keys: ['^你好'], use_regex: true, content: '问候设定' }] }
     const okSel = selectLoreEntries(okBook, ['你好呀'])
     check(okSel.entries.length === 1, '正常的 use_regex 仍然命中')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
+  }
+}
+
+// ================================================================ 世界书软警告 V29
+
+section('V29 · 世界书超限改软警告（保存成功 + 提示，五个原生位仍硬拦）')
+{
+  const { Store } = await import(lib('store.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v29-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const store = new Store(sandbox)
+    const NAME = '大世界书卡'
+
+    // 1) 单条 5000 字 + 全本 23000 字：**保存成功**，两条软警告，正文一个字都不截断
+    const entries = [
+      entry({ id: 'huge', keys: ['核心设定'], content: '长'.repeat(5000) }),
+      ...Array.from({ length: 4 }, (_, i) =>
+        entry({ id: `mid${i}`, keys: [`关键词${i}`], content: '中'.repeat(4500) })),
+    ]
+    const ccv3 = normalizeCard({
+      spec: 'chara_card_v3',
+      spec_version: '3.0',
+      data: { name: NAME, description: '身份：世界书很大的角色', character_book: bookOf(entries) },
+    })
+    const saved = await store.saveCard({ name: NAME, ccv3 })
+
+    check(Array.isArray(saved.warnings) && saved.warnings.length === 2,
+      `保存成功并返回 2 条软警告（实际 ${saved.warnings?.length}）`)
+    check(saved.warnings.some(w => w.includes('5000') && w.includes(String(CARD_SOFT_LIMITS.bookEntry))),
+      `条目警告带实际字数 5000 与上限 ${CARD_SOFT_LIMITS.bookEntry}`)
+    check(saved.warnings.some(w => w.includes('23000') && w.includes(String(CARD_SOFT_LIMITS.bookTotal))),
+      `总量警告带实际字数 23000 与上限 ${CARD_SOFT_LIMITS.bookTotal}`)
+    check(saved.warnings.every(w => w.includes('按需注入') && w.includes('不会进提示词')),
+      '两条警告都说明「按需注入、超出预算的部分不会进提示词」')
+
+    const onDisk = await store.readCcV3(NAME)
+    check(onDisk?.data.character_book?.entries?.[0]?.content.length === 5000,
+      `落盘的世界书正文原样 5000 字（实际 ${onDisk?.data.character_book?.entries?.[0]?.content.length}）`)
+    const totalOnDisk = (onDisk?.data.character_book?.entries ?? [])
+      .reduce((n, e) => n + String(e.content ?? '').length, 0)
+    check(totalOnDisk === 23000, `世界书总量一个字都没被截断（实际 ${totalOnDisk}）`)
+
+    // 2) 超限卡正常进列表、能读能渲染（不是"半坏"状态）
+    check((await store.listCharacters()).some(c => c.name === NAME), '超限卡仍正常出现在角色簿里')
+    check(renderL1Static(onDisk).includes('世界书很大的角色'), '超限卡仍能渲染 L1')
+
+    // 3) 五个原生位仍**硬拦**（无预算直进提示词的那五个）
+    const hardFields = [
+      ['description', '角色描述', CARD_HARD_LIMITS.description],
+      ['personality', '性格描述', CARD_HARD_LIMITS.personality],
+      ['scenario', '场景描述', CARD_HARD_LIMITS.scenario],
+      ['system_prompt', '系统提示词', CARD_HARD_LIMITS.system_prompt],
+      ['post_history_instructions', '收尾提醒', CARD_HARD_LIMITS.post_history_instructions],
+    ]
+    for (const [key, label, limit] of hardFields) {
+      const bad = normalizeCard({
+        spec: 'chara_card_v3',
+        spec_version: '3.0',
+        data: { name: '超限卡', [key]: 'x'.repeat(limit + 1) },
+      })
+      let err = ''
+      try { assertCardLimits(bad) } catch (e) { err = e.message }
+      check(err.includes(label) && err.includes(String(limit + 1)),
+        `${label} 超限仍抛错（${err.slice(0, 34)}…）`)
+    }
+    // 走真实保存路径也要拦：不能"assert 抛了但 saveCard 忘了调"
+    let saveErr = ''
+    try {
+      await store.saveCard({
+        name: '超限保存',
+        ccv3: normalizeCard({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: '超限保存', personality: 'p'.repeat(CARD_HARD_LIMITS.personality + 1) } }),
+      })
+    } catch (e) { saveErr = e.message }
+    check(saveErr.includes('性格描述'), `saveCard 也会拦原生位超限（${saveErr.slice(0, 30)}…）`)
+    check((await store.readCcV3('超限保存')) === undefined, '被拦的卡没有写盘')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
+  }
+}
+
+// ================================================================ REST 软警告 V30
+
+section('V30 · REST 透出软警告（/character/save 与导入预览都带 warnings）')
+{
+  const { Store } = await import(lib('store.js'))
+  const { buildRoutes } = await import(lib('web.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v30-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const store = new Store(sandbox)
+    const routes = buildRoutes(store, {
+      characterName: undefined,
+      snapshot: () => ({ enabled: false }),
+      relationTag: () => '',
+      invalidate: () => {},
+      refresh: async () => {},
+      activate: async () => ({ enabled: false }),
+    })
+    const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
+    const fakeRes = () => {
+      const out = { status: 0, body: undefined }
+      return {
+        out,
+        setHeader() {},
+        writeHead(status) { out.status = status },
+        end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
+      }
+    }
+    const fakeReq = (body, url = '/') => ({
+      url,
+      method: 'POST',
+      headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
+      async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
+    })
+
+    const bigBook = bookOf([entry({ id: 'big', keys: ['设定'], content: '长'.repeat(5000) })])
+    const card = normalizeCard({
+      spec: 'chara_card_v3',
+      spec_version: '3.0',
+      data: { name: '警告卡', description: '身份：警告卡', character_book: bigBook },
+    })
+
+    const saveRes = fakeRes()
+    await route('/character/save').handler(fakeReq({ name: '警告卡', ccv3: card }), saveRes)
+    check(saveRes.out.status === 200, `POST /character/save 超限也成功（${saveRes.out.status}）`)
+    check(Array.isArray(saveRes.out.body?.warnings) && saveRes.out.body.warnings.length > 0,
+      `save 响应带 warnings: string[]（${saveRes.out.body?.warnings?.length} 条）`)
+    check(String(saveRes.out.body?.warnings?.[0] ?? '').includes('5000'), 'save 警告里带实际字数')
+
+    // 导入预览同样带（用户点"确认导入"之前就该看到）
+    const importRes = fakeRes()
+    await route('/character/import').handler(fakeReq({
+      fileName: 'big.json',
+      dataBase64: Buffer.from(JSON.stringify(card), 'utf8').toString('base64'),
+    }), importRes)
+    check(importRes.out.status === 200, `导入预览成功（${importRes.out.status}）`)
+    check((importRes.out.body?.warnings ?? []).some(w => String(w).includes('按需注入')),
+      `导入预览的 warnings 带世界书软警告（${(importRes.out.body?.warnings ?? []).length} 条）`)
+    check((importRes.out.body?.ccv3?.data?.character_book?.entries?.[0]?.content?.length === 5000),
+      '导入预览不截断世界书正文')
+
+    // 正常卡：warnings 是空数组（存在但为空，客户端不用判 undefined）
+    const okRes = fakeRes()
+    await route('/character/save').handler(fakeReq({
+      name: '正常卡',
+      ccv3: normalizeCard({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: '正常卡', description: '身份：正常' } }),
+    }), okRes)
+    check(okRes.out.status === 200 && Array.isArray(okRes.out.body?.warnings) && okRes.out.body.warnings.length === 0,
+      '正常卡保存：warnings 为空数组')
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+    process.env['AIWU_STORAGE_ROOT'] = ''
+  }
+}
+
+// ================================================================ 模式胶囊三段 V31
+
+section('V31 · POST /mode 三段口径（无启用角色也能点，只写全局兜底）')
+{
+  const { Store } = await import(lib('store.js'))
+  const { buildRoutes } = await import(lib('web.js'))
+  const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v31-'))
+  process.env['AIWU_STORAGE_ROOT'] = sandbox
+  try {
+    const store = new Store(sandbox)
+    const NAME = '模式角色'
+    const OTHER = '另一张卡'
+    await store.writeCard(NAME, { name: NAME, basic: { 姓名: NAME } })
+    await store.writeCard(OTHER, { name: OTHER, basic: { 姓名: OTHER } })
+    await store.commitTurn({ character: NAME, user: 'hi', turnId: 'mode-1' })
+    await store.commitTurn({ character: OTHER, user: 'hi', turnId: 'mode-2' })
+
+    const calls = []
+    let activeName = NAME
+    const fakePrompt = {
+      get characterName() { return activeName },
+      snapshot: () => ({ enabled: activeName !== undefined, character: activeName }),
+      relationTag: () => '',
+      invalidate: () => {},
+      refresh: async () => {},
+      async setMode(mode) {
+        calls.push(['global', mode])
+        return { enabled: activeName !== undefined, character: activeName, mode }
+      },
+      async applyInteractionMode(mode) {
+        calls.push(['session', mode])
+        const session = activeName === undefined ? undefined : await store.setMode(activeName, mode)
+        return { active: { enabled: true, character: activeName, mode }, session }
+      },
+    }
+    const routes = buildRoutes(store, fakePrompt)
+    const routeOf = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
+    const fakeRes = () => {
+      const out = { status: 0, body: undefined }
+      return {
+        out,
+        setHeader() {},
+        writeHead(status) { out.status = status },
+        end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
+      }
+    }
+    const fakeReq = (body) => ({
+      url: '/',
+      method: 'POST',
+      headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
+      async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
+    })
+
+    // ① 有启用角色、body 不带 name：写 session + 全局，scope=session
+    let res = fakeRes()
+    await routeOf('/mode').handler(fakeReq({ mode: 'text' }), res)
+    check(res.out.status === 200 && res.out.body?.scope === 'session',
+      `① 启用中 → scope=session（${res.out.status} / ${res.out.body?.scope}）`)
+    check((await store.readSession(NAME)).mode === 'text', '① 写进了该角色的 session.json')
+    check(calls.some(c => c[0] === 'session'), '① 走的是 session 权威入口')
+
+    // ② 有启用角色、body 指定另一张卡：只写那张卡的 session，全局兜底同步
+    calls.length = 0
+    res = fakeRes()
+    await routeOf('/mode').handler(fakeReq({ mode: 'text+action', name: OTHER }), res)
+    check(res.out.status === 200 && res.out.body?.scope === 'session', `② 指定别的卡 → scope=session（${res.out.status}）`)
+    check(res.out.body?.name === OTHER, `② 回显 name=${String(res.out.body?.name)}`)
+    check((await store.readSession(OTHER)).mode === 'text+action', '② 写进了指定角色的 session.json')
+    check(calls.some(c => c[0] === 'global'), '② 全局兜底也同步了')
+
+    // ③ 没启用角色、body 也没 name：**不报错**，只写全局兜底
+    activeName = undefined
+    calls.length = 0
+    res = fakeRes()
+    await routeOf('/mode').handler(fakeReq({ mode: 'text' }), res)
+    check(res.out.status === 200, `③ 空闲态不报错（${res.out.status}，修复前是 400）`)
+    check(res.out.body?.ok === true && res.out.body?.scope === 'global', `③ scope=global（${res.out.body?.scope}）`)
+    check(res.out.body?.mode === 'text', `③ 回显 mode=${String(res.out.body?.mode)}`)
+    check(calls.length === 1 && calls[0][0] === 'global', '③ 只写全局，不碰任何 session.json')
+    check((await store.readSession(NAME)).mode === 'text', '③ 没有改动已有角色的 session.mode')
+
+    // ④ 空闲态 + 指定 name：仍然写那张卡的 session（客户端选中卡片时走这条）
+    calls.length = 0
+    res = fakeRes()
+    await routeOf('/mode').handler(fakeReq({ mode: 'text', name: NAME }), res)
+    check(res.out.status === 200 && res.out.body?.scope === 'session', `④ 空闲态带 name → scope=session（${res.out.status}）`)
+    check((await store.readSession(NAME)).mode === 'text', '④ 写进了指定角色的 session.json')
   } finally {
     await rm(sandbox, { recursive: true, force: true })
     process.env['AIWU_STORAGE_ROOT'] = ''

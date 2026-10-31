@@ -889,6 +889,101 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-toolbarActions { margin-left: auto; display: flex; align-items: center; gap: var(--awu-gap-3); }
 
+/* ---- 两张卡的入口（同级并排：蒸馏 / 自创）----
+   主人反馈原来「蒸馏角色卡」是一大块、「新建角色」是工具行里的小字，一大一小。
+   现在两枚按钮共用 .awu-btn.awu-distill-cta（同尺寸同权重），各占半栏。 */
+.awu-ctaRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--awu-gap-4);
+  min-width: 0;
+}
+
+.awu-ctaRow > .awu-distill-entry { flex: 1 1 0; min-width: 0; margin: 0; }
+.awu-railHead > .awu-ctaRow { margin: 0; }
+
+/* ---- 模式胶囊（左栏工具栏；不要求先启用角色）---- */
+.awu-toolbar[data-wrap="true"] { flex-wrap: wrap; row-gap: var(--awu-gap-3); }
+
+.awu-modePills {
+  display: inline-flex;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border-radius: var(--awu-r-pill);
+  background: var(--awu-surface-3);
+}
+
+.awu-modePill {
+  min-height: 24px;
+  padding: 0 var(--awu-gap-4);
+  border: none;
+  border-radius: var(--awu-r-pill);
+  background: transparent;
+  color: var(--awu-ink-mute);
+  font: inherit;
+  font-size: var(--awu-fs-caption);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--awu-dur-2) var(--awu-ease), color var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-modePill:hover { color: var(--awu-ink); }
+.awu-modePill[data-on="true"] { background: var(--awu-glass-1); color: var(--awu-ink); box-shadow: var(--awu-specular); }
+.awu-modePill:disabled { opacity: .45; cursor: default; }
+.awu-modePill:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+
+/* ---- 提示条：成功（info）自动淡出，警告（warn）留给人手动关 ---- */
+.awu-status[data-status="warn"] {
+  background: color-mix(in srgb, var(--awu-gold) 12%, var(--awu-surface-2));
+  border-color: color-mix(in srgb, var(--awu-gold) 34%, transparent);
+  color: var(--awu-ink-dim);
+}
+
+.awu-status[data-status="info"] .awu-idleDot { background: var(--awu-teal); }
+.awu-status[data-status="warn"] .awu-idleDot { background: var(--awu-gold); }
+
+/* 软警告是多行文本（每条一行），必须保留换行 */
+.awu-noticeText {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--awu-fs-body);
+  line-height: var(--awu-lh-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.awu-noticeClose {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--awu-r-pill);
+  background: transparent;
+  color: var(--awu-ink-mute);
+  cursor: pointer;
+  transition: color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-noticeClose:hover { color: var(--awu-ink); background: var(--awu-surface-3); }
+.awu-noticeClose:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+
+/* ---- 自创卡弹层：AI 补全勾选的说明文字 ---- */
+.awu-newAiHint {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--awu-fs-label);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-mute);
+}
+
+/* ---- 导入弹层：拖到虚线框外时的提示 ---- */
+.awu-importDropHint { margin-top: var(--awu-gap-3); font-size: var(--awu-fs-label); color: var(--awu-gold); }
+
 /* 被 index.tsx 使用、曾长期没有定义的计数行 */
 .awu-statLabel {
   font-family: var(--awu-sans);
