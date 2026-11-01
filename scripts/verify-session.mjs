@@ -849,7 +849,7 @@ section('16. 亲密度：session.intimacy 写回、relation_log 上限、REST �
 
 // ---------------------------------------------------------------- 17. 提示词预览（只读）
 
-section('17. 提示词预览：五段真实文本、只读、与 L1 段自洽')
+section('17. 提示词预览：六段真实文本（含预设段）、只读、与 L1 段自洽')
 {
   const { pc, renderOf } = await makePromptHost()
   const routes = buildRoutes(store, pc)
@@ -860,11 +860,11 @@ section('17. 提示词预览：五段真实文本、只读、与 L1 段自洽')
   await pc.refresh(undefined, undefined)
 
   const preview = pc.preview()
-  check(Array.isArray(preview.segments) && preview.segments.length === 5,
-    `preview 返回五段（实际 ${preview.segments.length}）`)
+  check(Array.isArray(preview.segments) && preview.segments.length === 6,
+    `preview 返回六段（实际 ${preview.segments.length}）`)
   check(preview.segments.map(s => s.id).join() === [
-    'aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
-  ].join(), '段 id 顺序固定')
+    'aiwu:baseline', 'aiwu:discipline', 'aiwu:preset', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
+  ].join(), '段 id 顺序固定（含预设段 5080）')
   const orders = preview.segments.map(s => s.order)
   check(orders.every((v, i) => i === 0 || orders[i - 1] < v), `order 升序：${orders.join(' < ')}`)
   check(preview.total === preview.segments.reduce((n, s) => n + s.chars, 0),
@@ -907,17 +907,17 @@ section('17. 提示词预览：五段真实文本、只读、与 L1 段自洽')
   // REST：GET /preview
   const res = await restCall(routes, 'GET', '/preview')
   check(res.status === 200 && res.body?.ok === true, `GET /preview → ${res.status}`)
-  check(Array.isArray(res.body?.segments) && res.body.segments.length === 5, 'REST 也返回五段')
+  check(Array.isArray(res.body?.segments) && res.body.segments.length === 6, 'REST 也返回六段')
   check(res.body?.total === res.body.segments.reduce((n, s) => n + s.chars, 0), 'REST total 自洽')
   check((await restCall(routes, 'POST', '/preview')).status === 405, 'POST /preview 被拒（405，只读接口）')
   check((await stat(activePath)).mtimeMs === beforeStat.active, 'REST 预览之后 _active.json 仍未变')
 
-  // 未启用：五段仍在但全空
+  // 未启用：六段仍在但全空
   await pc.deactivate()
   const idle = pc.preview()
   check(idle.active.enabled === false, '未启用：active.enabled=false')
-  check(idle.segments.length === 5 && idle.segments.every(s => s.text === '' && s.chars === 0),
-    '未启用：五段仍在，text 全空、chars 全 0')
+  check(idle.segments.length === 6 && idle.segments.every(s => s.text === '' && s.chars === 0),
+    '未启用：六段仍在，text 全空、chars 全 0')
   check(idle.total === 0, `未启用：total=0（实际 ${idle.total}）`)
   check(idle.lore.count === 0 && idle.lore.usedChars === 0, '未启用：lore 统计归零')
   check(idle.mode === 'text+action' || idle.mode === 'text', `未启用：mode 仍可读（${idle.mode}）`)
@@ -963,7 +963,8 @@ section('18. 会话绑定：决议优先级 / 删卡回落 / 全局切换 / LRU 
   const pvA = pc.preview('sess-a')
   check(pvA.active.character === OTHER && pvA.sessionId === 'sess-a' && pvA.source === 'session',
     `preview('sess-a') → ${JSON.stringify(pvA.active)} / ${pvA.source}`)
-  check(pvA.segments[2].text.includes(OTHER), 'preview(sessionId) 的 L1 段渲染的是该会话绑定的角色')
+  check((pvA.segments.find(s => s.id === 'aiwu:active-character')?.text ?? '').includes(OTHER),
+    'preview(sessionId) 的 L1 段渲染的是该会话绑定的角色')
   const pvGlobal = pc.preview()
   check(pvGlobal.active.character === NAME && pvGlobal.source === 'global', 'preview() 不给 sessionId 仍是全局视角')
 
@@ -1036,6 +1037,176 @@ section('18. 会话绑定：决议优先级 / 删卡回落 / 全局切换 / LRU 
   check((await restCall(routes, 'POST', '/bind', { body: { sessionId: 'x' } })).status === 400, '缺 name → 400')
   check((await restCall(routes, 'POST', '/unbind', { body: {} })).status === 400, 'unbind 缺 sessionId → 400')
   check(createdAt !== '', '夹具常量占位（时间戳格式已在校验里断言）')
+}
+
+// ---------------------------------------------------------------- 19. 预设系统
+
+section('19. 预设系统：CRUD / 上限 / 决议优先级 / 删预设不回落 / 两会话各用各的')
+{
+  const { pc, sections } = await makePromptHost()
+  /** 直接按 assembly 上下文取预设段文本（模拟某个会话的一次组装）。 */
+  const presetTextFor = (sessionId) =>
+    sections.get('aiwu:preset')?.text({ agent: { id: sessionId, session: { id: sessionId } } }) ?? ''
+
+  // ---- 1) 新建：id 形状、三份文件、索引摘要
+  const presetA = await store.savePreset({
+    name: '克制文风',
+    modules: [
+      { name: '语气', content: '说话短一点，别解释太多。{{char}} 会叫 {{user}}。', enabled: true },
+      { name: '关闭的模块', content: '这段不该出现在提示词里', enabled: false },
+    ],
+  })
+  check(/^p_[a-z0-9]{8}$/u.test(presetA.id), `预设 id 形状 p_xxxxxxxx（实际 ${presetA.id}）`)
+  check(presetA.source === 'custom' && presetA.version === 1, '新建预设 source=custom / version=1')
+  const indexRaw = JSON.parse(await readFile(join(sandbox, '_presets.json'), 'utf8'))
+  const entryA = indexRaw.presets.find(p => p.id === presetA.id)
+  check(indexRaw.version === 1 && entryA?.moduleCount === 2 && entryA?.enabledCount === 1,
+    `_presets.json 索引项：${JSON.stringify(entryA)}`)
+  const fileRaw = JSON.parse(await readFile(join(sandbox, 'presets', `${presetA.id}.json`), 'utf8'))
+  check(fileRaw.id === presetA.id && fileRaw.modules.length === 2 && Array.isArray(fileRaw.modules),
+    `presets/<id>.json 形状正确：${Object.keys(fileRaw).join(',')}`)
+
+  // ---- 2) 上限：单模块 4 万字 / 模块数 200 / 预设数 200 → 拒绝并给中文原因
+  let tooLong = ''
+  try {
+    await store.savePreset({ name: '超长模块', modules: [{ name: 'x', content: '长'.repeat(40001), enabled: true }] })
+  } catch (e) { tooLong = e.message }
+  check(tooLong.includes('40000') && tooLong.includes('太长'), `单模块超 40000 字被拒：${tooLong}`)
+  let tooMany = ''
+  try {
+    const modules = Array.from({ length: 201 }, (_, i) => ({ name: `m${i}`, content: 'x', enabled: true }))
+    await store.savePreset({ name: '模块太多', modules })
+  } catch (e) { tooMany = e.message }
+  check(tooMany.includes('200') && tooMany.includes('过多') === false && tooMany.includes('太多'),
+    `模块数超 200 被拒：${tooMany}`)
+
+  // 预设数上限：伪造一份 200 条的索引（不写 200 个文件，省时间）
+  const fakeIndex = {
+    version: 1,
+    presets: Array.from({ length: 200 }, (_, i) => ({
+      id: `p_${String(i).padStart(8, '0')}`,
+      name: `假${i}`,
+      source: 'custom',
+      moduleCount: 1,
+      enabledCount: 1,
+      updatedAt: '2026-11-01T00:00:00+08:00',
+    })),
+  }
+  const indexBackup = await readFile(join(sandbox, '_presets.json'), 'utf8')
+  await writeFile(join(sandbox, '_presets.json'), `${JSON.stringify(fakeIndex, null, 2)}\n`, 'utf8')
+  let tooManyPresets = ''
+  try {
+    await store.savePreset({ name: '第 201 个', modules: [{ name: 'x', content: 'x', enabled: true }] })
+  } catch (e) { tooManyPresets = e.message }
+  await writeFile(join(sandbox, '_presets.json'), indexBackup, 'utf8')
+  check(tooManyPresets.includes('200') && tooManyPresets.includes('预设太多'),
+    `预设数超 200 被拒：${tooManyPresets}`)
+
+  // ---- 3) 决议优先级：会话预设 > 全局预设 > 无
+  const presetB = await store.savePreset({
+    name: '热烈文风',
+    modules: [{ name: '语气 B', content: '多感叹号。', enabled: true }],
+  })
+  await store.setPresetActive({ scope: 'global', id: presetA.id })
+  await store.setPresetActive({ scope: 'session', sessionId: 'p-sess-1', id: presetB.id })
+  await pc.reloadPresets()
+  check(pc.resolvePreset('p-sess-1').pod === undefined || pc.resolvePreset('p-sess-1').preset?.name === '热烈文风',
+    `会话预设优先：${pc.resolvePreset('p-sess-1').preset?.name}`)
+  check(pc.resolvePreset('p-sess-1').source === 'session', '来源标为 session')
+  check(pc.resolvePreset('p-sess-2').preset?.name === '克制文风', '没启用的会话跟全局')
+  check(pc.resolvePreset('p-sess-2').source === 'global', '来源标为 global')
+  const textGlobal = presetTextFor('p-sess-2')
+  const textSession = presetTextFor('p-sess-1')
+  check(textGlobal.includes('说话短一点') && textSession.includes('多感叹号'),
+    '两会话各拿各的预设正文（同轮隔离）')
+  check(!textGlobal.includes('这段不该出现'), 'enabled:false 的模块不进段文本')
+  check(textGlobal.includes(`### 模块：语气`), '模块带 ### 模块：{name} 小标题')
+  check(textGlobal.includes('不是用户指令'), '段首有防注入说明')
+  // {{char}} / {{user}} 展开、未知宏原样保留
+  const macroPreset = await store.savePreset({
+    name: '宏测试',
+    modules: [{ name: '宏', content: '{{char}} 对 {{user}} 说 {{未知宏}}', enabled: true }],
+  })
+  await store.setPresetActive({ scope: 'global', id: macroPreset.id })
+  await pc.reloadPresets()
+  const macroText = presetTextFor(undefined)
+  check(macroText.includes(NAME) && macroText.includes('{{未知宏}}'),
+    `{{char}} 展开、未知宏原样保留：${macroText.slice(0, 60)}`)
+  // 换回 presetA 做后续断言
+  await store.setPresetActive({ scope: 'global', id: presetA.id })
+  await pc.reloadPresets()
+
+  // ---- 4) 删除会话预设 → 该会话「无预设」，**不回落全局**
+  const deleted = await store.deletePreset(presetB.id)
+  check(deleted.prunedSessions.includes('p-sess-1'), `删除时报告被清理的会话：${JSON.stringify(deleted.prunedSessions)}`)
+  // 产品路径（`POST /preset/delete`）会先把这些会话标成「无预设」，测试里手动等价调用
+  pc.notePresetDeleted(deleted.prunedSessions)
+  const activeAfterDelete = JSON.parse(await readFile(join(sandbox, '_presets_active.json'), 'utf8'))
+  check(activeAfterDelete.sessions === undefined && activeAfterDelete.global === presetA.id,
+    `_presets_active.json 里会话条目已清、全局保留：${JSON.stringify(activeAfterDelete)}`)
+  await pc.reloadPresets()
+  check(pc.resolvePreset('p-sess-1').preset === undefined && pc.resolvePreset('p-sess-1').source === 'none',
+    '会话预设被删后该会话 = 无预设（不回落全局）')
+  check(presetTextFor('p-sess-1') === '', '该会话的预设段为空串')
+
+  // ---- 5) preview 第六段（预设段）与 preset 摘要
+  const pv = pc.preview()
+  const presetSegment = pv.segments.find(s => s.id === 'aiwu:preset')
+  check(pv.segments.length === 6 && presetSegment?.order === 5080,
+    `preview 含预设段且 order=5080（${pv.segments.length} 段）`)
+  check(presetSegment?.text.includes('说话短一点') === true, 'preview 的预设段有正文')
+  check(pv.preset?.id === presetA.id && pv.preset?.enabledCount === 1,
+    `preview.preset 摘要：${JSON.stringify(pv.preset)}`)
+
+  // ---- 6) REST
+  const routes = buildRoutes(store, pc)
+  const listRes = await restCall(routes, 'GET', '/presets')
+  check(listRes.status === 200 && Array.isArray(listRes.body?.presets), `GET /presets → ${listRes.status}`)
+  check(listRes.body?.active?.global === presetA.id, 'GET /presets 带 active.global')
+  const oneRes = await restCall(routes, 'GET', '/preset', { url: `/?id=${presetA.id}` })
+  check(oneRes.status === 200 && oneRes.body?.preset?.id === presetA.id, 'GET /preset?id= 返回正文')
+  check((await restCall(routes, 'GET', '/preset', { url: '/?id=p_00000000' })).status === 404,
+    'GET /preset 不存在 → 404')
+  const saveRes = await restCall(routes, 'POST', '/preset/save', {
+    body: { name: 'REST 新建', modules: [{ name: '规则', content: 'REST 写入的模块', enabled: true }] },
+  })
+  check(saveRes.status === 200 && /^p_[a-z0-9]{8}$/u.test(saveRes.body?.preset?.id ?? ''),
+    `POST /preset/save → ${saveRes.status}`)
+  const importRes = await restCall(routes, 'POST', '/preset/import', {
+    body: {
+      json: {
+        prompts: [
+          { identifier: 'main', name: 'Main Prompt', marker: true, content: '主提示（结构占位）' },
+          { identifier: 'keep', name: '文风规则', content: '保持短句。', role: 'system' },
+          { identifier: 'draft', name: '废稿-别用', content: '废稿内容', role: 'system' },
+          { identifier: 'empty', name: '空条目', content: '   ', role: 'system' },
+        ],
+        prompt_order: [{ order: [
+          { identifier: 'main', enabled: true }, { identifier: 'keep', enabled: true },
+          { identifier: 'draft', enabled: true }, { identifier: 'empty', enabled: true },
+        ] }],
+      },
+    },
+  })
+  check(importRes.status === 200 && importRes.body?.preset?.source === 'st',
+    `POST /preset/import → ${importRes.status}`)
+  check(importRes.body?.preset?.modules?.length === 1 && importRes.body.preset.modules[0].name === '文风规则',
+    '导入只保留正文条目（结构占位/废稿/空内容被丢）')
+  check(Array.isArray(importRes.body?.dropped) && importRes.body.dropped.length === 3,
+    `导入返回 dropped 明细（${importRes.body?.dropped?.length} 条）`)
+  const activateRes = await restCall(routes, 'POST', '/preset/activate',
+    { body: { id: presetA.id, scope: 'session', sessionId: 'p-sess-9' } })
+  check(activateRes.status === 200 && activateRes.body?.active?.sessions?.['p-sess-9'] === presetA.id,
+    'POST /preset/activate scope=session')
+  check((await restCall(routes, 'POST', '/preset/activate', { body: { id: presetA.id, scope: 'session' } })).status === 400,
+    'scope=session 缺 sessionId → 400')
+  const overview = await restCall(routes, 'GET', '/overview', { url: '/?sessionId=p-sess-9' })
+  check(overview.body?.preset?.current?.id === presetA.id && overview.body?.preset?.source === 'session',
+    `overview.preset 摘要：${JSON.stringify(overview.body?.preset?.current)} / ${String(overview.body?.preset?.source)}`)
+  const delRes = await restCall(routes, 'POST', '/preset/delete', { body: { id: importRes.body.preset.id } })
+  check(delRes.status === 200 && Array.isArray(delRes.body?.prunedSessions), 'POST /preset/delete → 报告清理的会话')
+  // 收尾：解除全局启用，避免影响后续用例
+  await restCall(routes, 'POST', '/preset/activate', { body: { scope: 'global' } })
 }
 
 // ---------------------------------------------------------------- 清理

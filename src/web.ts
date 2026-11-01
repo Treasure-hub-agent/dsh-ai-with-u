@@ -19,6 +19,7 @@ import type { DistillArm, DistillKind } from './distill.js'
 import { distillFlowInfo } from './distill.js'
 import { parseCardBuffer } from './import-card.js'
 import { normalizeCard, cardName, collectCardWarnings, toLegacyView } from './tavern.js'
+import { convertStPreset } from './preset.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
 
@@ -236,6 +237,9 @@ export function buildRoutes(
         const bindings = prompt.bindingSnapshot()
         const currentBinding = querySessionId === '' ? undefined : bindings[querySessionId]
         const target = prompt.resolveTarget(querySessionId === '' ? undefined : querySessionId)
+        // 预设摘要：面板要能显示「当前生效的是哪套文风」
+        const presetTarget = prompt.resolvePreset(querySessionId === '' ? undefined : querySessionId)
+        const presetSnapshot = prompt.presetSnapshot()
         send(res, 200, {
           ok: true,
           root: store.root,
@@ -272,6 +276,14 @@ export function buildRoutes(
             bySource: sourceCount,
           },
           recent: list.slice(0, 5).map(i => ({ name: i.name, lastActive: i.lastActive, memoryCount: i.memoryCount })),
+          // 预设摘要（会话预设 > 全局预设 > 无）：面板据此显示"当前生效什么"
+          preset: {
+            active: presetSnapshot.active,
+            current: presetTarget.preset === undefined
+              ? null
+              : { id: presetTarget.preset.id, name: presetTarget.preset.name },
+            source: presetTarget.source,
+          },
         })
       }),
     },
@@ -330,6 +342,120 @@ export function buildRoutes(
           sessionId,
           effective,
         })
+      }),
+    },
+    // ------------------------------------------------------------ 预设（提示词模块组）
+    //
+    // 预设与角色卡**正交**：预设只描述「怎么说」（文风 / 语气 / 回复规则），不写角色事实。
+    // 启用决议与角色绑定同构：会话预设 > 全局预设 > 无（删掉不回落全局）。
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/presets`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'GET')
+        const snapshot = prompt.presetSnapshot()
+        send(res, 200, {
+          ok: true,
+          presets: snapshot.entries,
+          active: snapshot.active,
+        })
+      }),
+    },
+    {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/preset`,
+      handler: guard(async (req, res) => {
+        requireMethod(req, 'GET')
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const id = (url.searchParams.get('id') ?? '').trim()
+        if (id === '') throw new Error('缺少预设 id')
+        const preset = await store.readPreset(id)
+        if (preset === undefined) { send(res, 404, { ok: false, error: `找不到预设：${id}` }); return }
+        const snapshot = prompt.presetSnapshot()
+        send(res, 200, { ok: true, preset, active: snapshot.active })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/preset/save`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const id = typeof body['id'] === 'string' ? body['id'] : undefined
+        const preset = await store.savePreset({
+          ...(id === undefined ? {} : { id }),
+          name: String(body['name'] ?? ''),
+          modules: body['modules'],
+          ...(body['source'] === 'st' ? { source: 'st' as const } : {}),
+        })
+        await prompt.reloadPresets()
+        prompt.invalidate()
+        const stats = { moduleCount: preset.modules.length, enabledCount: preset.modules.filter(m => m.enabled !== false).length }
+        send(res, 200, {
+          ok: true,
+          preset,
+          warnings: stats.enabledCount === 0 ? ['这份预设的所有模块都是关闭状态，启用后不会注入任何内容'] : [],
+        })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/preset/delete`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const id = String(body['id'] ?? '').trim()
+        if (id === '') throw new Error('缺少预设 id')
+        const result = await store.deletePreset(id)
+        // 原本用它的会话要变成「无预设」（不回落全局）：只有删除方知道这个差别，先打标记
+        prompt.notePresetDeleted(result.prunedSessions)
+        await prompt.reloadPresets()
+        prompt.invalidate()
+        send(res, 200, { ok: true, prunedSessions: result.prunedSessions, wasGlobal: result.wasGlobal })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/preset/import`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const converted = convertStPreset(body['json'], {
+          ...(typeof body['name'] === 'string' ? { name: body['name'] } : {}),
+        })
+        if (!converted.ok) throw new Error(converted.error)
+        const preset = await store.savePreset({
+          name: converted.name,
+          modules: converted.modules,
+          source: 'st',
+        })
+        await prompt.reloadPresets()
+        prompt.invalidate()
+        send(res, 200, {
+          ok: true,
+          preset,
+          warnings: converted.warnings,
+          dropped: converted.dropped,
+        })
+      }),
+    },
+    {
+      method: 'POST',
+      path: `${ROUTE_PREFIX}/preset/activate`,
+      handler: guard(async (req, res) => {
+        const body = await readBody(req)
+        const scope = body['scope'] === 'session' ? 'session' : 'global'
+        const id = typeof body['id'] === 'string' ? body['id'].trim() : ''
+        const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'].trim() : ''
+        if (scope === 'session' && sessionId === '') {
+          throw new Error('scope=session 时必须给 sessionId')
+        }
+        const active = await store.setPresetActive({
+          scope,
+          ...(id === '' ? {} : { id }),
+          ...(scope === 'session' ? { sessionId } : {}),
+        })
+        await prompt.reloadPresets()
+        prompt.invalidate()
+        // 该会话的预览/面板会立刻反映；容器层的缓存不受影响（预设段本身不进 L1 缓存）
+        send(res, 200, { ok: true, active })
       }),
     },
     // ------------------------------------------------------------ 角色列表

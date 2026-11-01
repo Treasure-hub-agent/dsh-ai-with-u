@@ -1546,7 +1546,7 @@ section('V33 · 正则屏蔽可证明：脚本正文进不了任何提示文本�
     // 同一张卡名，先带脚本、再改成不带脚本：这样 L1 里的「身份」标题不会成为差异源
     const pvWith = await previewOf('正则屏蔽卡', withScripts)
     const allText = pvWith.segments.map(s => s.text).join('\n')
-    check(!allText.includes(MARK), 'preview 五段里都没有脚本正文')
+    check(!allText.includes(MARK), 'preview 六段里都没有脚本正文')
     check(!pvWith.segments[0].text.includes(MARK) && !pvWith.segments[1].text.includes(MARK),
       'preview 的 L0 / 纪律包段也没有脚本正文（不可能被拼进去）')
 

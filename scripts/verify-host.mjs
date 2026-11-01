@@ -144,7 +144,7 @@ check(sectionNames.includes('aiwu:active-character'), 'L1 角色段已注册（�
 check(sectionNames.includes('aiwu:lore'), '世界书段已注册（垫底 order 10300）')
 check(sectionNames.includes('aiwu:clock'), '时间差段已注册（最后 order 10350）')
 const aiwuSections = sectionNames.filter(n => String(n).startsWith('aiwu:'))
-check(aiwuSections.length === 5, `aiwu 段共 5 个（四段 → 五段）：${aiwuSections.join(', ')}`)
+check(aiwuSections.length === 6, `aiwu 段共 6 个（含预设段 5080）：${aiwuSections.join(', ')}`)
 
 // 🔴 宿主默认会对段文本做 {{var}} 插值，未知变量直接抛错 → 我们的段必须全部 interpolate:false
 const ourSections = [...sp.layers.values()].filter(s => String(s.name).startsWith('aiwu:'))
@@ -207,7 +207,8 @@ const fakeReq = (method, body) => ({
   headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
   async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
 })
-const routeOf = (suffix) => registered.routes.find(r => r.path.endsWith(suffix))
+// ⚠️ 必须**精确匹配**：/preset/activate 也以 /activate 结尾，用 endsWith 会把激活路由打到预设上
+const routeOf = (suffix) => registered.routes.find(r => r.path === '/_dsh/ai-with-u' + suffix)
 
 // ---------------------------------------------------------------- 提示词预览（未启用态）
 // 预览必须走真实渲染路径，所以下面「未启用」与「启用后」两处都拿真实宿主段文本来对。
@@ -221,13 +222,13 @@ if (routeOf('/preview') === undefined) {
   check(body.active?.enabled === false, '未启用：active.enabled=false')
   check(body.active?.character === undefined, '未启用：不带 character')
   check(body.discipline === 'lite', `未启用：discipline 仍是全局偏好 lite（${String(body.discipline)}）`)
-  check(Array.isArray(body.segments) && body.segments.length === 5,
-    `未启用：仍然返回五段（实际 ${body.segments?.length}）`)
-  check(body.segments.every(s => s.text === '' && s.chars === 0), '未启用：五段 text 全为空串、chars 全 0')
+  check(Array.isArray(body.segments) && body.segments.length === 6,
+    `未启用：仍然返回六段（实际 ${body.segments?.length}）`)
+  check(body.segments.every(s => s.text === '' && s.chars === 0), '未启用：六段 text 全为空串、chars 全 0')
   check(body.total === 0, `未启用：total=0（实际 ${String(body.total)}）`)
   check(body.segments.map(s => s.id).join() === [
-    'aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
-  ].join(), '未启用：段 id 顺序固定')
+    'aiwu:baseline', 'aiwu:discipline', 'aiwu:preset', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock',
+  ].join(), '未启用：段 id 顺序固定（含预设段 5080）')
 }
 
 if (routeOf('/distill/arm') === undefined) {
@@ -300,7 +301,7 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
   check(previewRes.out.status === 200 && pv.ok === true, `GET /preview（启用后）→ ${previewRes.out.status}`)
   check(pv.active?.enabled === true && pv.active?.character === ACTIVE_NAME,
     `active = ${JSON.stringify(pv.active)}`)
-  check(Array.isArray(pv.segments) && pv.segments.length === 5, `启用后五段齐全（${pv.segments?.length}）`)
+  check(Array.isArray(pv.segments) && pv.segments.length === 6, `启用后六段齐全（${pv.segments?.length}）`)
   const orders = (pv.segments ?? []).map(s => s.order)
   check(orders.every((v, i) => i === 0 || orders[i - 1] < v), `segments 按 order 升序：${orders.join(' < ')}`)
   check(pv.total === (pv.segments ?? []).reduce((n, s) => n + s.chars, 0),
@@ -423,6 +424,87 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
       `POST /unbind → ${unbindRes.out.status}`)
     await new Promise(r => setTimeout(r, 200))
     check(layerText('aiwu:active-character', ctxB).includes(ACTIVE_NAME), '解除绑定后该会话回落到全局角色')
+  }
+
+  // ---------------------------------------------------------------- 预设段（aiwu:preset @5080）
+  {
+    const { Store: HostStore } = await import(lib('store.js'))
+    const hostStore = new HostStore(sandbox)
+    const presetLayer = sp.layers.get('aiwu:preset')
+    check(presetLayer !== undefined, '预设段已注册（aiwu:preset）')
+    check(presetLayer?.order === 5080, `预设段 order=${String(presetLayer?.order)}（期望 5080）`)
+    check((presetLayer?.order ?? 0) > (sp.layers.get('aiwu:discipline')?.order ?? 0)
+      && (presetLayer?.order ?? 0) < (sp.layers.get('aiwu:active-character')?.order ?? 0),
+    '预设段夹在纪律包(5050) 与 L1(5100) 之间')
+    check(presetLayer?.interpolate === false, '预设段 interpolate:false（宏由我们自己展开）')
+    check(presetLayer.text({}) === '', '未启用预设：段文本为空串（宿主过滤空段）')
+
+    // 启用一份自建预设（合成小样本，不含任何真实预设正文）
+    const preset = await hostStore.savePreset({
+      name: '自检文风',
+      modules: [
+        { name: '语气', content: '短句为主。{{char}} 会叫 {{user}}。{{未知宏}}', enabled: true },
+        { name: '关闭的模块', content: '这段不该出现', enabled: false },
+      ],
+    })
+    const actRes = fakeRes()
+    await routeOf('/preset/activate').handler(fakeReq('POST', { id: preset.id, scope: 'global' }), actRes)
+    check(actRes.out.status === 200 && actRes.out.body?.active?.global === preset.id,
+      `POST /preset/activate（global）→ ${actRes.out.status}`)
+
+    const textOn = sp.layers.get('aiwu:preset').text({})
+    check(textOn.includes('### 模块：语气'), '启用后段里含模块标题')
+    check(textOn.includes('短句为主'), '模块正文进了段')
+    check(!textOn.includes('这段不该出现'), 'enabled:false 的模块不进段')
+    check(textOn.includes(ACTIVE_NAME), '{{char}} 展开成当前角色名')
+    check(textOn.includes('{{未知宏}}'), '未知宏原样保留')
+    check(textOn.includes('不是用户指令'), '段首有防注入说明')
+    check(sp.render().includes('短句为主'), '整段系统提示词里能看到预设内容（order 生效）')
+
+    // ST 导入（合成样本）：结构占位 / 废稿 / SPreset / 空 → 丢；marker:true 但有正文的要留
+    const importRes = fakeRes()
+    const rows = [
+      { identifier: 'main', enabled: true },
+      { identifier: 'worldInfoBefore', enabled: true },
+      { identifier: 'nsfw', enabled: true },
+      { identifier: 'draft', enabled: true },
+      { identifier: 'sp', enabled: true },
+      { identifier: 'blank', enabled: true },
+      { identifier: 'u1', enabled: false },
+    ]
+    await routeOf('/preset/import').handler(fakeReq('POST', {
+      json: {
+        prompts: [
+          { identifier: 'main', name: 'Main Prompt', marker: true, content: '主提示（结构占位）' },
+          { identifier: 'worldInfoBefore', name: 'World Info (before)', marker: true },
+          { identifier: 'nsfw', name: 'NSFW', marker: true, content: '有正文的 NSFW 段落', role: 'system' },
+          { identifier: 'draft', name: '废稿-别用', content: '废稿正文', role: 'system' },
+          { identifier: 'sp', name: 'SPresetSettings', content: 'function x() {}', role: 'system' },
+          { identifier: 'blank', name: '空白条目', content: '   ', role: 'system' },
+          { identifier: 'u1', name: 'User 条目', content: '以 user 角色写的规则', role: 'user' },
+        ],
+        prompt_order: [{ order: rows }],
+      },
+    }), importRes)
+    check(importRes.out.status === 200, `POST /preset/import → ${importRes.out.status}`)
+    const importedNames = (importRes.out.body?.preset?.modules ?? []).map(m => m.name)
+    check(importedNames.length === 2, `导入保留 ${importedNames.length} 条（NSFW + User 条目）：${importedNames.join('、')}`)
+    check(importedNames.includes('NSFW'), 'marker:true 但有正文的 nsfw 被保留（绝不按 marker 一刀切）')
+    check(!importedNames.some(n => n.includes('废稿') || n === 'SPresetSettings' || n === '空白条目'),
+      '废稿 / SPreset / 空白条目都被丢')
+    check(!importedNames.includes('Main Prompt'), '结构占位（main）被丢')
+    const importWarnings = importRes.out.body?.warnings ?? []
+    check(importWarnings.some(w => String(w).includes('role=user/assistant')),
+      'role 非 system 的条目有汇总告警')
+    check((importRes.out.body?.dropped ?? []).length === 5,
+      `导入返回 dropped 明细（${(importRes.out.body?.dropped ?? []).length} 条）`)
+    const disabledModule = (importRes.out.body?.preset?.modules ?? []).find(m => m.name === 'User 条目')
+    check(disabledModule?.enabled === false, 'prompt_order 里 enabled:false 的条目保留为停用')
+
+    // 收尾：取消全局预设启用（否则后面"退出后归零"会被预设段顶着）
+    await routeOf('/preset/activate').handler(fakeReq('POST', { scope: 'global' }), fakeRes())
+    await new Promise(r => setTimeout(r, 100))
+    check(sp.layers.get('aiwu:preset').text({}) === '', '取消启用后预设段回到空串')
   }
 
   const resOff = fakeRes()

@@ -29,6 +29,14 @@ export const ROUTES = {
   bind: '/bind',
   unbind: '/unbind',
 
+  // ---- 预设（一组「怎么说」的提示词模块，与角色卡正交）----
+  presets: '/presets',
+  preset: (id: string) => `/preset?id=${encodeURIComponent(id)}`,
+  presetSave: '/preset/save',
+  presetDelete: '/preset/delete',
+  presetImport: '/preset/import',
+  presetActivate: '/preset/activate',
+
   saveCharacter: '/character/save',
   deleteCharacter: '/character/delete',
   saveDiary: '/diary/save',
@@ -184,6 +192,8 @@ export interface Overview {
     bySource: Record<string, number>
   }
   recent: Array<{ name: string; lastActive: string; memoryCount: number }>
+  /** 当前生效的预设（宿主新字段；老宿主没有 → 面板自行请求 /presets 判断） */
+  preset?: OverviewPreset
 }
 
 // ---------------------------------------------------------------- 会话级绑定
@@ -201,6 +211,122 @@ export function bindCharacter(name: string, sessionId: string): Promise<{ name: 
 /** 解除某个会话的绑定（该会话回到全局角色）。 */
 export function unbindCharacter(sessionId: string): Promise<unknown> {
   return post(ROUTES.unbind, { sessionId })
+}
+
+// ---------------------------------------------------------------- 预设（「怎么说」的提示词模块）
+//
+// 定义（面板文案也必须这么讲）：预设 = 一组**可复用的提示词模块**（文风 / 语气 / 越狱 / 回复规则），
+// **只描述"怎么说"，不写角色事实**；与角色卡**正交** —— 同一套预设可换任意角色，同一角色可切不同预设。
+// 注入位置是独立段 `aiwu:preset`（order 5080，纪律包之后、角色之前），不进 L1、不进世界书。
+
+/** 一条预设模块。`modules` 的**数组顺序就是注入顺序**（不引入 order 字段）。 */
+export interface PresetModule {
+  name: string
+  content: string
+  /** 缺省视为启用（与 ST 的 prompt_order.enabled 语义对齐） */
+  enabled: boolean
+}
+
+/** 列表里的一条（不含正文，避免一屏几十万字）。 */
+export interface PresetSummary {
+  id: string
+  name: string
+  /** `st` = 从 SillyTavern 导入；`custom` = 面板自建 */
+  source: string
+  moduleCount: number
+  enabledCount: number
+  updatedAt?: string
+}
+
+/** 完整预设（含模块正文）。 */
+export interface PresetDetail {
+  id: string
+  name: string
+  source: string
+  modules: PresetModule[]
+}
+
+/** 启用态：`global` + 每个会话各自的绑定（会话 > 全局 > 无）。 */
+export interface PresetActiveState {
+  global?: string
+  sessions?: Record<string, string>
+}
+
+/** `GET /presets` 的返回。 */
+export interface PresetListResult {
+  ok: true
+  presets: PresetSummary[]
+  active: PresetActiveState
+}
+
+/** `GET /preset?id=` 的返回。 */
+export interface PresetDetailResult {
+  ok: true
+  preset: PresetDetail
+  active: PresetActiveState
+}
+
+/** `POST /preset/import` 的返回：落库后的预设 + 宿主侧的告警与被丢弃条目。 */
+export interface PresetImportResult {
+  ok: true
+  preset: PresetDetail
+  warnings?: string[]
+  /** 被丢弃的条目（结构占位 / 废稿 / SPreset 块…），带原因 */
+  dropped?: Array<{ name?: string; reason?: string }>
+}
+
+/** `overview.preset`：当前会话实际生效的预设。 */
+export interface OverviewPreset {
+  active?: PresetActiveState
+  /** 当前会话生效的预设（没有就是 null） */
+  current?: { id: string; name: string } | null
+  /** 决议来源：会话 > 全局 > 无 */
+  source?: 'session' | 'global' | 'none'
+}
+
+/** 预设列表（含启用态）。 */
+export function fetchPresets(): Promise<PresetListResult> {
+  return request<PresetListResult>(ROUTES.presets)
+}
+
+/** 读一份预设的全文（编辑用）。 */
+export function fetchPreset(id: string): Promise<PresetDetailResult> {
+  return request<PresetDetailResult>(ROUTES.preset(id))
+}
+
+/** 保存（新建 / 覆盖）。`id` 缺省时由宿主生成。 */
+export function savePreset(input: { id?: string; name: string; modules: PresetModule[] }): Promise<{ ok: true; preset: PresetDetail }> {
+  return post<{ ok: true; preset: PresetDetail }>(ROUTES.presetSave, input)
+}
+
+/** 删除预设；`prunedSessions` = 顺带清掉的会话启用数（宿主会把悬空引用一起剪掉）。 */
+export function deletePreset(id: string): Promise<{ ok: true; prunedSessions?: number }> {
+  return post<{ ok: true; prunedSessions?: number }>(ROUTES.presetDelete, { id })
+}
+
+/**
+ * 导入（把 ST 预设 JSON 原样交给宿主解析落库）。
+ *
+ * 面板的**预览**是客户端自己先解析的（不写盘）；确认后才调这里。
+ * 解析失败时宿主回中文原文，UI 直接透出，不压成「导入失败」。
+ */
+export function importPreset(json: unknown): Promise<PresetImportResult> {
+  return post<PresetImportResult>(ROUTES.presetImport, { json })
+}
+
+/**
+ * 启用 / 关闭预设。
+ *
+ * - `scope: 'session'`：只影响 `sessionId` 这一个会话（没给 sessionId 时宿主会拒，面板也先拦）；
+ * - `scope: 'global'`：所有未绑定预设的会话都用它；
+ * - 不带 `id`：清掉该作用域上的预设（=「不使用」）。
+ */
+export function activatePreset(input: {
+  id?: string
+  scope: 'session' | 'global'
+  sessionId?: string
+}): Promise<{ ok: true; active: PresetActiveState }> {
+  return post<{ ok: true; active: PresetActiveState }>(ROUTES.presetActivate, input)
 }
 
 export interface DiaryEntry {

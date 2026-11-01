@@ -48,6 +48,22 @@ import {
 export { relationBaseline, removeSentences, RELATION_BANDS }
 export type { RelationBand }
 
+import {
+  PRESET_LIMITS,
+  PRESET_VERSION,
+  isValidPresetId,
+  newPresetId,
+  presetStats,
+  validatePreset,
+  type Preset,
+  type PresetActive,
+  type PresetIndex,
+  type PresetIndexEntry,
+  type PresetModule,
+  type PresetSource,
+} from './preset.js'
+export type { Preset, PresetActive, PresetIndex, PresetIndexEntry, PresetModule, PresetSource }
+
 export const INDEX_FILE = '_index.json'
 export const ACTIVE_FILE = '_active.json'
 /**
@@ -59,6 +75,18 @@ export const ACTIVE_FILE = '_active.json'
 export const SESSIONS_FILE = '_sessions.json'
 /** 单个会话 id 的长度上限（它只是 JSON 的键，但要挡住异常长的垃圾输入）。 */
 export const SESSION_ID_MAX_CHARS = 200
+/**
+ * 预设（提示词模块组）的落盘位置。
+ *
+ *   `_presets.json`        索引（列表页只读它）
+ *   `presets/<id>.json`    单个预设正文
+ *   `_presets_active.json` 启用态（全局 + 每会话），决议优先级：会话 > 全局 > 无
+ *
+ * 与 `_sessions.json` 同级：**所有预设写盘走 `#presets` 一把跨进程锁**。
+ */
+export const PRESETS_INDEX_FILE = '_presets.json'
+export const PRESETS_DIR = 'presets'
+export const PRESETS_ACTIVE_FILE = '_presets_active.json'
 export const CHARACTERS_DIR = 'characters'
 /** 旧格式卡的原件备份（首次迁移写一次，回滚用）。 */
 export const BACKUP_FILE = 'card.v1.bak.json'
@@ -1467,6 +1495,234 @@ export class Store {
       for (const sessionId of pruned) delete bindings[sessionId]
       await this.writeBindingsUnlocked(bindings)
       return pruned
+    })
+  }
+
+  // ---------------------------------------------------------------- 预设（提示词模块组）
+
+  /** `presets/<id>.json` 的绝对路径。 */
+  presetPath(id: string): string {
+    return join(this.root, PRESETS_DIR, `${id}.json`)
+  }
+
+  /** `_presets.json` 索引（读时逐项校验，脏条目直接跳过；不静默造数据）。 */
+  async readPresetIndex(): Promise<PresetIndex> {
+    const raw = await readJson<Record<string, unknown>>(join(this.root, PRESETS_INDEX_FILE))
+    const list = isRecord(raw) && Array.isArray(raw['presets']) ? raw['presets'] : []
+    const presets: PresetIndexEntry[] = []
+    for (const item of list as unknown[]) {
+      if (!isRecord(item)) continue
+      const id = typeof item['id'] === 'string' ? item['id'].trim() : ''
+      const name = typeof item['name'] === 'string' ? item['name'].trim() : ''
+      if (!isValidPresetId(id) || name === '') continue
+      presets.push({
+        id,
+        name,
+        source: item['source'] === 'st' ? 'st' : 'custom',
+        moduleCount: Number(item['moduleCount'] ?? 0) || 0,
+        enabledCount: Number(item['enabledCount'] ?? 0) || 0,
+        updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : '',
+      })
+    }
+    return { version: PRESET_VERSION, presets }
+  }
+
+  /** 索引项列表（列表页只读它，不必打开每个预设文件）。 */
+  async listPresetEntries(): Promise<PresetIndexEntry[]> {
+    return (await this.readPresetIndex()).presets
+  }
+
+  /** 读单个预设正文；不存在 / id 非法 / 文件损坏都返回 undefined。 */
+  async readPreset(id: string): Promise<Preset | undefined> {
+    if (!isValidPresetId(id)) return undefined
+    const raw = await readJson<Record<string, unknown>>(this.presetPath(id))
+    if (!isRecord(raw)) return undefined
+    const modules: PresetModule[] = []
+    for (const item of (Array.isArray(raw['modules']) ? raw['modules'] : []) as unknown[]) {
+      if (!isRecord(item)) continue
+      const name = typeof item['name'] === 'string' ? item['name'].trim() : ''
+      if (name === '') continue
+      modules.push({
+        name,
+        content: typeof item['content'] === 'string' ? item['content'] : '',
+        enabled: item['enabled'] !== false,
+      })
+    }
+    const name = typeof raw['name'] === 'string' && raw['name'].trim() !== '' ? raw['name'].trim() : id
+    return {
+      version: PRESET_VERSION,
+      id,
+      name,
+      source: raw['source'] === 'st' ? 'st' : 'custom',
+      createdAt: typeof raw['createdAt'] === 'string' ? raw['createdAt'] : localIsoTimestamp(),
+      updatedAt: typeof raw['updatedAt'] === 'string' ? raw['updatedAt'] : localIsoTimestamp(),
+      modules,
+    }
+  }
+
+  /** `_presets_active.json`（启用态）。 */
+  async readPresetActive(): Promise<PresetActive> {
+    const raw = await readJson<Record<string, unknown>>(join(this.root, PRESETS_ACTIVE_FILE))
+    const active: PresetActive = { version: PRESET_VERSION }
+    if (!isRecord(raw)) return active
+    const global = typeof raw['global'] === 'string' ? raw['global'].trim() : ''
+    if (isValidPresetId(global)) active.global = global
+    const sessions = raw['sessions']
+    if (isRecord(sessions)) {
+      const out: Record<string, string> = {}
+      for (const [sessionId, value] of Object.entries(sessions)) {
+        if (typeof value === 'string' && isValidPresetId(value)) out[sessionId] = value
+      }
+      if (Object.keys(out).length > 0) active.sessions = out
+    }
+    return active
+  }
+
+  private async writePresetActiveUnlocked(active: PresetActive): Promise<void> {
+    const payload: PresetActive = { version: PRESET_VERSION }
+    if (active.global !== undefined) payload.global = active.global
+    if (active.sessions !== undefined && Object.keys(active.sessions).length > 0) payload.sessions = active.sessions
+    await atomicWrite(join(this.root, PRESETS_ACTIVE_FILE), `${JSON.stringify(payload, null, 2)}\n`)
+  }
+
+  /**
+   * 保存（新建 / 覆盖）一份预设。
+   *
+   * 校验顺序（全部过一遍再写盘，**任何一条不过都整体拒绝**）：
+   *   1. 名字非空、模块非空、单模块 ≤ 40000 字、模块数 ≤ 200（`validatePreset`）；
+   *   2. 新建时检查库总数 ≤ 200；
+   *   3. 带 `id` 时必须是已存在的预设（改现有的，不是偷偷新建）。
+   *
+   * 索引与正文在**同一个临界区**里写，避免出现「索引有、文件没」或反之。
+   */
+  async savePreset(input: { id?: string; name: string; modules: unknown; source?: PresetSource }): Promise<Preset> {
+    const valid = validatePreset(input.name, input.modules)
+    if (!valid.ok) throw new Error(valid.error)
+    const requestedId = typeof input.id === 'string' ? input.id.trim() : ''
+    return this.locked('#presets', async () => {
+      const index = await this.readPresetIndex()
+      const previous = requestedId === '' ? undefined : await this.readPreset(requestedId)
+      if (requestedId !== '' && previous === undefined) throw new Error(`找不到预设：${requestedId}`)
+      if (requestedId === '' && index.presets.length >= PRESET_LIMITS.presets) {
+        throw new Error(`预设太多（已有 ${index.presets.length} 个，上限 ${PRESET_LIMITS.presets} 个）：请先删掉不用的`)
+      }
+      const id = requestedId !== '' ? requestedId : newPresetId(index.presets.map(item => item.id))
+      const now = localIsoTimestamp()
+      const preset: Preset = {
+        version: PRESET_VERSION,
+        id,
+        name: valid.name,
+        source: input.source ?? previous?.source ?? 'custom',
+        createdAt: previous?.createdAt ?? now,
+        updatedAt: now,
+        modules: valid.modules,
+      }
+      const stats = presetStats(preset.modules)
+      const entry: PresetIndexEntry = {
+        id,
+        name: preset.name,
+        source: preset.source,
+        moduleCount: stats.moduleCount,
+        enabledCount: stats.enabledCount,
+        updatedAt: now,
+      }
+      await atomicWrite(this.presetPath(id), `${JSON.stringify(preset, null, 2)}\n`)
+      const presets = index.presets.filter(item => item.id !== id)
+      presets.push(entry)
+      presets.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      await atomicWrite(join(this.root, PRESETS_INDEX_FILE), `${JSON.stringify({ version: PRESET_VERSION, presets }, null, 2)}\n`)
+      return preset
+    })
+  }
+
+  /**
+   * 删除一份预设：**正文 + 索引 + 启用态三处一起清**（同一个临界区）。
+   *
+   * 返回被清掉的会话 id，让面板能提示「有 N 个会话原本用它」。
+   */
+  async deletePreset(id: string): Promise<{ prunedSessions: string[]; wasGlobal: boolean }> {
+    const presetId = String(id ?? '').trim()
+    if (!isValidPresetId(presetId)) throw new Error(`预设 id 不合法：${presetId}`)
+    return this.locked('#presets', async () => {
+      await rm(this.presetPath(presetId), { force: true })
+      const index = await this.readPresetIndex()
+      const presets = index.presets.filter(item => item.id !== presetId)
+      await atomicWrite(join(this.root, PRESETS_INDEX_FILE), `${JSON.stringify({ version: PRESET_VERSION, presets }, null, 2)}\n`)
+      const active = await this.readPresetActive()
+      const prunedSessions: string[] = []
+      if (active.sessions !== undefined) {
+        for (const [sessionId, value] of Object.entries(active.sessions)) {
+          if (value !== presetId) continue
+          delete active.sessions[sessionId]
+          prunedSessions.push(sessionId)
+        }
+      }
+      const wasGlobal = active.global === presetId
+      if (wasGlobal) delete active.global
+      if (wasGlobal || prunedSessions.length > 0) await this.writePresetActiveUnlocked(active)
+      return { prunedSessions, wasGlobal }
+    })
+  }
+
+  /**
+   * 启用 / 取消启用：`scope='global'` 改全局，`scope='session'` 改指定会话。
+   *
+   * `id` 缺省 = 取消启用（会话回落到全局；全局则回到"无预设"）。
+   */
+  async setPresetActive(input: { id?: string; scope: 'global' | 'session'; sessionId?: string }): Promise<PresetActive> {
+    const scope = input.scope === 'session' ? 'session' : 'global'
+    const sessionId = scope === 'session' ? normalizeSessionId(input.sessionId ?? '') : undefined
+    const id = typeof input.id === 'string' ? input.id.trim() : ''
+    if (id !== '' && !isValidPresetId(id)) throw new Error(`预设 id 不合法：${id}`)
+    if (id !== '' && (await this.readPreset(id)) === undefined) throw new Error(`找不到预设：${id}`)
+    return this.locked('#presets', async () => {
+      const active = await this.readPresetActive()
+      if (scope === 'global') {
+        if (id === '') delete active.global
+        else active.global = id
+      } else {
+        const sessions = { ...(active.sessions ?? {}) }
+        if (id === '') delete sessions[sessionId as string]
+        else sessions[sessionId as string] = id
+        if (Object.keys(sessions).length > 0) active.sessions = sessions
+        else delete active.sessions
+      }
+      await this.writePresetActiveUnlocked(active)
+      return active
+    })
+  }
+
+  /**
+   * 清理悬空引用：索引里文件已不存在的、启用态里指向不存在预设的。
+   *
+   * 启动时跑一次（用户手删文件 / 别的插件实例删过）；返回被清掉的东西供日志留痕。
+   */
+  async prunePresets(): Promise<{ presets: string[]; sessions: string[]; globalCleared: boolean }> {
+    return this.locked('#presets', async () => {
+      const index = await this.readPresetIndex()
+      const alive: PresetIndexEntry[] = []
+      const prunedPresets: string[] = []
+      for (const entry of index.presets) {
+        if (existsSync(this.presetPath(entry.id))) alive.push(entry)
+        else prunedPresets.push(entry.id)
+      }
+      if (prunedPresets.length > 0) {
+        await atomicWrite(join(this.root, PRESETS_INDEX_FILE), `${JSON.stringify({ version: PRESET_VERSION, presets: alive }, null, 2)}\n`)
+      }
+      const aliveIds = new Set(alive.map(entry => entry.id))
+      const active = await this.readPresetActive()
+      const prunedSessions: string[] = []
+      if (active.sessions !== undefined) {
+        for (const [sessionId, value] of Object.entries(active.sessions)) {
+          if (aliveIds.has(value)) continue
+          delete active.sessions[sessionId]
+          prunedSessions.push(sessionId)
+        }
+      }
+      const globalCleared = active.global !== undefined && !aliveIds.has(active.global)
+      if (globalCleared) delete active.global
+      if (prunedSessions.length > 0 || globalCleared) await this.writePresetActiveUnlocked(active)
+      return { presets: prunedPresets, sessions: prunedSessions, globalCleared }
     })
   }
 

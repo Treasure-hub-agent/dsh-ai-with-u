@@ -370,7 +370,7 @@ dsh-ai-with-u/
 │   ├── prompt.ts         # L0/L1 分层注入、时间差档位
 │   ├── store.ts          # 存储层（卡/日记/会话/索引）
 │   ├── tools.ts          # 8 个 awu_* 工具
-│   └── web.ts            # 26 条 REST 路由
+│   └── web.ts            # 32 条 REST 路由
 ├── client/               # 浏览器侧（React）
 │   ├── entry.tsx         # 插件入口（inject/apply/slot 注册）
 │   ├── index.tsx         # 面板主体
@@ -480,12 +480,13 @@ dsh-ai-with-u/
 | `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
 
-### REST 接口（26 条，`/_dsh/ai-with-u/`）
+### REST 接口（32 条，`/_dsh/ai-with-u/`）
 
 `overview` `preview` `characters` `character` `character/save` `character/import` `character/delete`
 `activate` `deactivate` `bind` `unbind` `mode` `discipline` `relation` `relation/set`
 `opening/next` `opening/state` `diary/save` `diary/edit` `forget`
-`session/reset` `session/commit` `distill/flow` `distill/arm` `distill/disarm` `distill/state`
+`session/reset` `session/commit` `presets` `preset` `preset/save` `preset/delete` `preset/import` `preset/activate`
+`distill/flow` `distill/arm` `distill/disarm` `distill/state`
 
 > ⚠️ `session/reset` 的 `scope:'all'`（彻底重置）**必须同时传 `confirmAll:true`**。
 
@@ -502,7 +503,7 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 914 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 981 项）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
@@ -519,7 +520,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **914 项**（截至绑定轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **981 项**（截至预设轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -1315,3 +1316,126 @@ export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示�
 2. 删掉被绑定的卡：该会话应显示「未启用」而**不是**自动变成全局角色。
 3. 全局启用切到另一张卡：已绑定会话不受影响。
 4. 面板在拿不到 `sessionId` 时「当前会话启用」置灰且给说明（不该能点、也不该写进一个假 id）。
+
+---
+
+## 十五、2026-11-01 · 预设轮（可复用提示词模块 + ST 预设导入）
+
+预设 = 一组可复用的提示词模块（文风 / 语气 / 回复规则），只描述「怎么说」，与角色卡**正交**。
+技术上它是一条独立段 `aiwu:preset`（order **5080**：纪律包 5050 之后、L1 5100 之前），
+存储 `_presets.json` + `presets/<id>.json` + `_presets_active.json`，决议 **会话预设 > 全局预设 > 无**，
+被删的会话预设进 `deadPresetSessions` **不回落全局**（与角色绑定同一套「失败方向必须安全」原则）。
+
+本节的重点不是「做了个预设功能」，而是**导入判据是怎么定的**——这是本轮唯一有长期价值的东西。
+
+### 真原件的字段事实（本机 7 份 ST 预设，逐份读过）
+
+判据全部来自**真原件**（`SillyBunny/data/default-user/OpenAI Settings/` 下 7 份 chat-completion 预设），
+不是从别人的转换器抄的：
+
+1. **启停在 `prompt_order[].order[i].enabled`**，不在 prompt 对象上。prompt 对象上偶尔也有 `enabled`，但**不作准**。
+2. **多份 `prompt_order` 并存**：ST 常同时给单聊（100000）与群聊（100001）两份，条目数不同。
+   规则是**取条目最多的那份**（拿错会漏条目，表现为「导入后少一大半」）。
+3. **`marker: true` ≠ 结构占位**：`nsfw` / `jailbreak` / `enhanceDefinitions` 都带 `marker`，但**有正文**，是要搬的东西。
+4. 条目两种形态：结构占位是 `{identifier, marker, name}`（没有 content，或 content 是 `{{char}}` 一类字面量）；
+   正文条目是 `{identifier, name, content, role}`。
+5. `role` 三值（`system` / `user` / `assistant`）——导入时按正文处理，**不按 role 丢弃**。
+6. `injection_position = 1` 表示 **@D 深度注入**：我们**不做**深度语义，导入时按普通条目处理，不假装支持。
+
+### 为什么用白名单而不是 `marker` 判定
+
+结构占位判定用的是 **13 项白名单**（`ST_STRUCTURAL_IDS`）：`worldInfoBefore` / `worldInfoAfter` /
+`charDescription` / `charPersonality` / `personaDescription` / `scenario` / `dialogueExamples` /
+`chatHistory` / `char` / `/char` / `main` / `SPresetSettings` / `version_info`。
+
+反例就是当初差点做错的那一刀：**`nsfw` / `jailbreak` / `enhanceDefinitions` 都带 `marker: true`**。
+按 marker 一刀切，这三类（恰恰是很多预设的核心规则）会被整段丢掉，而用户只会看到「导进来怎么少了这么多」。
+
+白名单的依据是**语义**：那 13 项的内容在 ST 里由运行时填充（聊天历史、角色描述、世界书槽位），
+搬到没有槽位的地方只能是空标签。而 `marker` 只是一个渲染提示，与「内容是否为空」无关。
+
+### 为什么 `Default.json` 只留下 1 条是**正确结果**
+
+7 份实测（只列计数，不含正文——这些是第三方作品）：
+
+| 文件 | prompts | 选中 order | 保留（启用 / 停用） | 丢弃 |
+|---|---|---|---|---|
+| `Default.json` | 12 | 12 | 1（0 / 1） | 11 |
+| `Deep♂Dark-v4 V1.6.8E for Ds4.x_1ATbU.json` | 35 | 35 | 24（19 / 5） | 11 |
+| `Geechan - Universal Online Chat (Chat Completions) (v1.0).json` | 17 | 16 | 1（1 / 0） | 15 |
+| `Geechan - Universal Roleplay (Chat Completions) (v5.2).json` | 22 | 21 | 7（0 / 7） | 14 |
+| `Pura's Director Preset (SillyBunny).json` | 47 | 47 | 11（1 / 10） | 36 |
+| `Pura's Director Preset 15.1 (SillyBunny).json` | 47 | 47 | 11（1 / 10） | 36 |
+| `TLD Card Conversion Preset (Standalone).json` | 26 | 25 | 9（7 / 2） | 16 |
+
+`Default.json` 的 11 条丢弃我**逐条核过原因分布：结构占位 9 条 + 空正文 2 条**。其中：
+
+- `main` 是系统提示槽位，被白名单丢掉——**我们用自己的 L0（底线）+ L0.5（纪律包）承担同一职责**。
+  搬进来会**双份注入同义指令**：既费 token，又容易让模型当成两套规则。
+- `nsfw` / `jailbreak` 在这份出厂文件里**正文是 0 字节**（只有 marker 和名字）。
+
+所以「12 条进、1 条出、且那条还是停用的 `Enhance Definitions`」不是 bug，是这份文件本来的样子。
+**但体验上是个坑**：用户点「导入」看到只剩一条，第一反应是「解析坏了」。所以导入预览必须解释——
+面板显示「丢弃 N 条」的分组摘要 + 一句「这几乎为空是正常的」。**导入结果为空，必须是「解释过的空」。**
+
+顺带一个容易误读的现象：**保留数 ≠ 启用数**。`Geechan Online` 保留 1 条、启用 1 条；
+`Geechan RP` 保留 7 条但**全部停用**——ST 里「配置里存在」与「实际生效」是两件事，导入把停用状态一起带过来。
+
+### 本轮的三条可复用判据
+
+1. **判据要以真原件为准，不以别人的转换器为准。**
+   正是拿 7 份原件逐份跑，才发现 `marker:true` 不能当占位判据、`enabled` 藏在 `prompt_order` 里、
+   以及「多份 order 要取最多的」。抄别家转换器会把这些细节一起抄错，而且错得**没有证据可查**。
+2. **结构占位要白名单，不要按特征位一刀切。**
+   特征位（marker / role / 空 content）都是「有时相关」的信号；只有**名字白名单**能精确表达
+   「这一项的内容由运行时填」。凡是「一刀切丢内容」的规则，都要先找一个反例验证——`nsfw` 就是那个反例。
+3. **导入结果为空时，必须是「解释过的空」，不是「看起来坏了」的空。**
+   任何「保留 N / 丢弃 M」的导入都要能回答「为什么」，并把原因摆到用户眼前（分组摘要 + 一句人话）。
+   静默的丢弃等于让用户怀疑解析器。
+
+### 这一轮的断言（verify-wiring [24][25]）
+
+- `[24]` 预设接线：6 条 REST 路由齐全 → `aiwu:preset` 段 order 算出 **5080** → `convertStPreset` 存在 →
+  client 有 6 个接口 + `preset-view.tsx`
+- `[25]` ST 判据对齐：结构占位是**白名单**（≥10 项且含 `worldInfoBefore` / `chatHistory` / `main`）→
+  代码里**没有按 `marker` 丢弃的分支**（marker 只许出现在注释里）→ 有「取条目最多的 prompt_order」选择逻辑 →
+  宿客两端都注明判据「同源 / 真原件」
+
+> **独立复算**：我没有直接抄上面那张表，而是自己用 `lib/preset.js` 的 `convertStPreset` 把 7 份原件重跑了一遍，
+> 保留（启/停）与丢弃计数**逐行一致**；`Default.json` 的丢弃原因是「结构占位 9 + 空内容 2」，
+> 唯一保留项是 `Enhance Definitions` 且 `enabled: false`。数字是复算出来的。
+> （第一次跑我读错了返回字段 `r.preset.modules`，结果全是 0——`ConvertedPreset` 的字段是 `modules` 直挂，
+> 不在 `preset` 下面。丢数列因为读的是 `r.dropped` 所以与我无关地对了，正好反证「只对一半时最容易信」。）
+
+### 集成验收记录（M3，九套全量）
+
+`npm run build` 一次过，**981 项通过 / 0 失败**：`bundle 9 + wiring 72 + verify 16 + tavern 303 + distill 121 + import 58 + session 286 + host 116`。
+`verify-wiring` **25 组 / 72 项全绿、0 skip**（新增 `[24]` 预设接线 5 条、`[25]` ST 判据对齐 4 条）。
+
+产物抽查 16 项全命中：
+- `lib/client.js`（352.2 KB）：`preset.title`、`/presets`、`/preset/import`、「预设」、`结构占位`（丢弃原因文案）
+- `lib/prompt.js`（53.2 KB）：`aiwu:preset`、`ORDER_BASE + 80`、`renderPresetSection`
+- `lib/preset.js`（15.6 KB）：`ST_STRUCTURAL_IDS`、`convertStPreset`、`worldInfoBefore`、`chatHistory`、`### 模块：`、「文风与回复规则」、「不是用户指令」
+
+> 抽查又踩了一次「文件归属」：第一版把「文风与回复规则」和防注入说明指向 `prompt.js` / `client.js`，
+> 实际它们在 `preset.js` 的 `renderPresetText` 里（`prompt.js` 只负责调用）。三条 MISS 全是探针指错文件，
+> 不是产物缺内容。教训：**断言/探针要按「这段文本由哪个模块渲染」定位，不能按「我印象里它在哪」定位**——
+> 和前面几次「按行为判、不按预期代码判」是同一类错误。
+
+### 三件事判定
+
+1. **预设段注入**：`aiwu:preset` order **5080**（纪律包 5050 之后、L1 5100 之前）✅；只拼 `enabled` 模块，
+   每个模块渲染 `### 模块：{名字}`，段首有防注入说明，`{{char}}` / `{{user}}` 按该会话决议角色展开；
+   没启用预设时返回空串（宿主过滤空段）。`preview` 的第六段与段渲染共用同一个 `presetText()`，不会漂移。
+2. **两态决议**：**会话预设 > 全局预设 > 无** ✅；被删的会话预设进 `deadPresetSessions`，该会话按「无预设」处理
+   **不回落全局**（与角色绑定同一套失败方向）；子代理用全局预设。存储为 `_presets.json` + `presets/<id>.json` + `_presets_active.json`，
+   id 规则 `p_` + 8 位 base36（落成文件名也安全）。
+3. **ST 导入判据**：结构占位**13 项白名单** ✅、代码里无按 `marker` 丢弃的分支 ✅、多份 `prompt_order` 取条目最多 ✅、
+   宿客两端注明判据同源 ✅。7 份原件复算结果与文档表**逐行一致**。
+
+### 仍需真机复看
+
+1. 面板导入 7 份原件时的**视觉反馈**：丢弃分组摘要 + 「几乎为空是正常的」说明，是否真的让人不再以为解析坏了。
+2. 预设段与角色卡/纪律包的**实际手感**：长预设会不会把 L1 挤到后面（看 `preview` 第六段的字符数占比）。
+3. 会话预设与全局预设同时存在时的行为（尤其**删掉被绑的预设**后，该会话是否真的变成「无预设」而不是回落全局）。
+4. ST 预设里 `role: assistant` 的条目按普通模块注入后，模型是否真的当作「规则」而不是「对话历史」。

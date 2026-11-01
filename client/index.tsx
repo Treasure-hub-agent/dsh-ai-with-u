@@ -96,6 +96,7 @@ import {
 import { hasDroppedLore, readLoreDroppedFromDetail, readLoreDroppedFromPreview } from './lore-diag'
 import type { LoreDroppedInfo } from './lore-diag'
 import { toLoreDraftFromCard } from './lorebook-schema'
+import { PresetPanel } from './preset-view'
 import { PromptPreview } from './preview'
 import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
 import {
@@ -1791,7 +1792,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
   const [detailError, setDetailError] = useState('')
 
-  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'preview' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
+  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'preview' | 'preset' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
   const [deleteTarget, setDeleteTarget] = useState('')
   const [editTarget, setEditTarget] = useState<DiaryTarget | undefined>(undefined)
   const [dialogError, setDialogError] = useState('')
@@ -2190,7 +2191,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   const onModePick = (next: InteractionMode): void => { applyMode(next, () => setDialog('')) }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
-  const openDialog = (which: 'new' | 'import' | 'preview' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
+  const openDialog = (which: 'new' | 'import' | 'preview' | 'preset' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
   // -------------------------------------------------------- 维护动作（新接口）
   const onEditDiary = (text: string): void => {
@@ -2822,7 +2823,23 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     ))}
                   </div>
 
+                  {/*
+                    工具行已经挤（计数 + 模式胶囊 + 三个入口）：三枚都压成小按钮，
+                    完整名字进 title，主操作仍然只有「蒸馏 / 自创」那两枚大 CTA。
+                  */}
                   <div className="awu-toolbarActions">
+                    <button
+                      type="button"
+                      className="awu-btn"
+                      data-size="sm"
+                      data-kind="ghost"
+                      onClick={() => openDialog('preset')}
+                      disabled={busy}
+                      title={t('preset.hint')}
+                    >
+                      <IconQuill size={12} />
+                      {t('preset.entry')}
+                    </button>
                     <button
                       type="button"
                       className="awu-btn"
@@ -2833,7 +2850,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                       title={t('preview.hint')}
                     >
                       <IconSpark size={12} />
-                      {t('preview.entry')}
+                      {t('preview.entryShort')}
                     </button>
                     <button
                       type="button"
@@ -2845,7 +2862,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                       title={t('import.title')}
                     >
                       <IconImport size={12} />
-                      {t('import.entry')}
+                      {t('import.entryShort')}
                     </button>
                   </div>
                 </div>
@@ -3023,6 +3040,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           {dialog === 'preview' && (
             <Overlay label={t('preview.title')} onClose={() => setDialog('')}>
               <PromptPreview t={t} onClose={() => setDialog('')} />
+            </Overlay>
+          )}
+          {/* 预设：列表 / 编辑 / 导入三态，内容本体在 preset-view.tsx */}
+          {dialog === 'preset' && (
+            <Overlay label={t('preset.title')} onClose={() => setDialog('')}>
+              <PresetPanel
+                t={t}
+                sessionId={sessionId}
+                onChanged={() => { void reload() }}
+                onClose={() => setDialog('')}
+              />
             </Overlay>
           )}
           {dialog === 'delete' && (

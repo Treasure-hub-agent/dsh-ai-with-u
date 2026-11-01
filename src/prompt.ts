@@ -30,6 +30,14 @@ import type { Store, ActiveState, DiaryEntry, SessionState, InteractionMode, Rel
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { RELATION_BANDS, intimacyOf, resolveInteractionMode } from './store.js'
 import {
+  PRESET_VERSION,
+  presetStats,
+  renderPresetText,
+  type Preset,
+  type PresetActive,
+  type PresetIndexEntry,
+} from './preset.js'
+import {
   type CharacterCardV3,
   type L1Extras,
   type LoreDroppedEntry,
@@ -64,6 +72,16 @@ export const SECTION_BASELINE = 'aiwu:baseline'
  * 放在 L1 之前能让「换个角色」不至于连带重算这段的全部 token。
  */
 export const SECTION_DISCIPLINE = 'aiwu:discipline'
+/**
+ * 预设段（文风 / 语气 / 回复规则，order 5080）。
+ *
+ * 位置：纪律包(5050) 之后、L1(5100) 之前——
+ *   · 排在纪律包之后：用户级负面约束优先级更高；
+ *   · 排在 L1 之前：预设只在**切换预设**时变，放在 L1 前可以让「换角色」不连带重算预设。
+ *
+ * 预设与角色卡**正交**：角色卡管「我是谁」，预设管「我怎么说话」。
+ */
+export const SECTION_PRESET = 'aiwu:preset'
 export const SECTION_ACTIVE = 'aiwu:active-character'
 /**
  * 世界书命中段（**垫底**，order 10300）。
@@ -198,6 +216,12 @@ export interface PreviewSnapshot {
   segments: PreviewSegment[]
   /** 各段 chars 之和（未启用时为 0）。 */
   total: number
+  /**
+   * 当前生效的预设摘要（无预设 / 被删了就是 null）。
+   *
+   * 预设与角色卡**正交**：换角色不换预设，换预设不动角色。
+   */
+  preset: { id: string; name: string; source: 'st' | 'custom'; moduleCount: number; enabledCount: number } | null
   /**
    * 世界书命中快照。
    *
@@ -429,6 +453,23 @@ export class PromptController {
   private readonly caches = new Map<string, L1Cache>()
   /** 会话绑定表（**内存镜像**：渲染路径只读它，绝不读盘）。 */
   private bindings: SessionBindings = {}
+  // ---------------------------------------------------------------- 预设（提示词模块组）
+  /**
+   * 预设启用态（`_presets_active.json` 的内存镜像）。
+   * 决议优先级：**会话预设 > 全局预设 > 无**（与角色绑定同构）。
+   */
+  private presetActive: PresetActive = { version: PRESET_VERSION }
+  /** 预设索引（列表摘要；面板读它）。 */
+  private presetIndex: PresetIndexEntry[] = []
+  /**
+   * **被引用的**预设正文镜像（`id → Preset`）。
+   *
+   * 只镜像「启用态里引用到的」那几份：渲染路径零读盘，又不会把 200 份预设全塞内存。
+   * 新增引用时（REST 启用 / 启动）会把正文读进来；不再引用时丢掉。
+   */
+  private readonly presetBodies = new Map<string, Preset>()
+  /** 会话启用的预设被删过的会话：视为**无预设**，连全局都不回退（与角色绑定的 deadSlots 同构）。 */
+  private readonly deadPresetSessions = new Set<string>()
   /** 正在排刷新的槽位：同一次组装里五段各调一次，不能排五次 refresh。 */
   private readonly refreshing = new Set<string>()
   /** 绑定指向的卡已被删的槽位：渲染直接空串，且**不再刷新**（避免每轮空转）。 */
@@ -504,6 +545,117 @@ export class PromptController {
     return this.bindingSnapshot()
   }
 
+  // ---------------------------------------------------------------- 预设决议（纯内存）
+
+  /**
+   * 载入预设镜像：索引 + 启用态 + **被引用到的正文**（渲染路径之后只读内存）。
+   *
+   * 顺序很重要：先 `prunePresets()`（清索引里文件已丢的、启用态里指向不存在预设的），
+   * 再灌内存——这样「预设被手删」不会变成每轮渲染时的空转。
+   */
+  async loadPresets(): Promise<void> {
+    try {
+      const pruned = await this.store.prunePresets()
+      const stuck = pruned.sessions
+      if (pruned.presets.length > 0 || stuck.length > 0 || pruned.globalCleared) {
+        this.host.logger.warn(
+          '预设清理：%d 个预设文件已不存在，%d 个会话的启用已失效%s',
+          pruned.presets.length,
+          stuck.length,
+          pruned.globalCleared ? '，全局预设已失效' : '',
+        )
+      }
+      // 这些会话原本启用的预设被删了：标记为「无预设」，**不回落全局**
+      for (const sessionId of stuck) this.deadPresetSessions.add(sessionId)
+    } catch (error) {
+      this.host.logger.warn('预设清理失败（继续载入）：%s', error instanceof Error ? error.message : String(error))
+    }
+    this.presetIndex = await this.store.listPresetEntries()
+    this.presetActive = await this.store.readPresetActive()
+    // 启用态里已不存在的会话条目（被 prune 掉后可能还留着活引用）保持现状
+    await this.warmPresetBodies()
+  }
+
+  /** 重新读启用态并补齐正文镜像（REST 写完后调用）。 */
+  async reloadPresets(): Promise<void> {
+    this.presetIndex = await this.store.listPresetEntries()
+    this.presetActive = await this.store.readPresetActive()
+    // 重新启用了某个预设的会话：解除「无预设」标记
+    for (const sessionId of [...this.deadPresetSessions]) {
+      if (this.presetActive.sessions?.[sessionId] !== undefined) this.deadPresetSessions.delete(sessionId)
+    }
+    await this.warmPresetBodies()
+  }
+
+  /**
+   * 预设被删除后，把「原本用它的会话」标成**无预设**（不回落全局）。
+   *
+   * 为什么不能只靠 `reloadPresets()`：删除时 `_presets_active.json` 里的会话条目已被清掉，
+   * 光看文件分不清「本来就没启用」和「启用的那份刚被删」——只有调用方（删除方）知道这个差别。
+   * 与角色绑定的 deadSlots 同构；该会话重新启用任意预设时会自动解除。
+   */
+  notePresetDeleted(sessionIds: readonly string[]): void {
+    for (const sessionId of sessionIds) {
+      if (typeof sessionId !== 'string' || sessionId.trim() === '') continue
+      this.deadPresetSessions.add(sessionId.trim())
+      const id = this.presetActive.sessions?.[sessionId]
+      if (id !== undefined) {
+        delete this.presetActive.sessions?.[sessionId]
+        this.presetBodies.delete(id)
+      }
+    }
+  }
+
+  /** 把启用态引用到的预设正文读进内存；不再引用的丢掉（避免 200 份正文常驻）。 */
+  private async warmPresetBodies(): Promise<void> {
+    const referenced = new Set<string>()
+    if (this.presetActive.global !== undefined) referenced.add(this.presetActive.global)
+    for (const id of Object.values(this.presetActive.sessions ?? {})) referenced.add(id)
+    for (const id of [...this.presetBodies.keys()]) {
+      if (!referenced.has(id)) this.presetBodies.delete(id)
+    }
+    for (const id of referenced) {
+      if (this.presetBodies.has(id)) continue
+      const preset = await this.store.readPreset(id)
+      if (preset !== undefined) this.presetBodies.set(id, preset)
+    }
+  }
+
+  /**
+   * 决议一个会话用哪份预设：**会话预设 > 全局预设 > 无**。
+   *
+   * 会话启用但预设已不存在 → **无预设**（`dead`），**不回落全局**（与角色绑定的 deadSlots 同构）。
+   * 子代理有自己的 agent/sessionId，查不到会话预设 → 用全局预设（**不继承父会话**，口径与角色绑定一致）。
+   */
+  resolvePreset(sessionId?: string): { id?: string; preset?: Preset; source: 'session' | 'global' | 'none'; dead?: boolean } {
+    if (sessionId !== undefined) {
+      const id = this.presetActive.sessions?.[sessionId]
+      if (id !== undefined) {
+        const preset = this.presetBodies.get(id)
+        if (preset === undefined) return { id, source: 'none', dead: true }
+        return { id, preset, source: 'session' }
+      }
+      if (this.deadPresetSessions.has(sessionId)) return { source: 'none', dead: true }
+    }
+    const globalId = this.presetActive.global
+    if (globalId === undefined) return { source: 'none' }
+    const preset = this.presetBodies.get(globalId)
+    if (preset === undefined) return { id: globalId, source: 'none', dead: true }
+    return { id: globalId, preset, source: 'global' }
+  }
+
+  /** 预设启用态快照（面板/自检用；含索引摘要）。 */
+  presetSnapshot(): { active: PresetActive; entries: PresetIndexEntry[]; loaded: string[] } {
+    const active: PresetActive = { version: PRESET_VERSION }
+    if (this.presetActive.global !== undefined) active.global = this.presetActive.global
+    if (this.presetActive.sessions !== undefined) active.sessions = { ...this.presetActive.sessions }
+    return {
+      active,
+      entries: this.presetIndex.map(entry => ({ ...entry })),
+      loaded: [...this.presetBodies.keys()].sort(),
+    }
+  }
+
   /** 从磁盘恢复上次的启用状态（宿主启动时调用）。 */
   async restore(): Promise<ActiveState> {
     // 启动先清掉「指向已删卡」的绑定：用户删卡重启后不该留悬空绑定
@@ -516,6 +668,12 @@ export class PromptController {
       this.host.logger.warn('清理会话绑定失败（继续启动）：%s', error instanceof Error ? error.message : String(error))
     }
     this.bindings = await this.store.readBindings()
+    // 预设镜像同批载入（含悬空引用清理）：渲染路径之后只读内存
+    try {
+      await this.loadPresets()
+    } catch (error) {
+      this.host.logger.warn('载入预设失败（继续启动）：%s', error instanceof Error ? error.message : String(error))
+    }
     const saved = await this.store.readActive()
     if (saved.enabled && saved.character !== undefined) {
       const card = await this.store.readCcV3(saved.character)
@@ -556,6 +714,8 @@ export class PromptController {
     section(SECTION_BASELINE, ORDER_BASE, (ctx: unknown) => this.renderBaselineSection(ctx))
     // L0.5 纪律包：order 5050，落在 baseline(5000) 之后、active(5100) 之前
     section(SECTION_DISCIPLINE, ORDER_BASE + 50, (ctx: unknown) => this.renderDisciplineSection(ctx))
+    // 预设段：order 5080，纪律包之后、L1 之前；没启用预设时返回空串（宿主过滤空段）
+    section(SECTION_PRESET, ORDER_BASE + 80, (ctx: unknown) => this.renderPresetSection(ctx))
     // 每次组装重新求值：切换角色 / 时间推移都能立刻反映，无需重注册
     section(SECTION_ACTIVE, ORDER_BASE + 100, (ctx: unknown) => this.renderActiveSection(ctx))
     section(SECTION_LORE, ORDER_BASE + 5300, (ctx: unknown) => this.renderLoreSection(ctx))
@@ -929,10 +1089,16 @@ export class PromptController {
     const segment = (id: string, order: number, label: string, text: string): PreviewSegment =>
       ({ id, order, label, chars: text.length, text })
     const discipline = this.disciplineLevel
+    const presetTarget = this.resolvePreset(sessionId)
+    const presetText = this.presetText(presetTarget, sessionId)
 
     const segments: PreviewSegment[] = [
       segment(SECTION_BASELINE, ORDER_BASE, '角色扮演底线', this.renderBaselineText(character !== undefined)),
       segment(SECTION_DISCIPLINE, ORDER_BASE + 50, `纪律包（${discipline}）`, this.renderDisciplineText(character !== undefined)),
+      // 预设段（order 5080）：纪律包之后、L1 之前；没启用预设时 chars 为 0、text 为空串
+      segment(SECTION_PRESET, ORDER_BASE + 80,
+        presetTarget.preset === undefined ? '文风预设（未启用）' : `文风预设（${presetTarget.preset.name}）`,
+        presetText),
       segment(SECTION_ACTIVE, ORDER_BASE + 100, '角色卡 L1',
         character === undefined
           ? ''
@@ -949,6 +1115,15 @@ export class PromptController {
       // 与 L1 段实际渲染用的是同一个值：cache.mode 就是 refresh 时 resolveInteractionMode 的结果
       mode: cache?.mode ?? resolveInteractionMode(undefined, this.state),
       discipline,
+      preset: presetTarget.preset === undefined
+        ? null
+        : {
+          id: presetTarget.preset.id,
+          name: presetTarget.preset.name,
+          source: presetTarget.preset.source,
+          moduleCount: presetStats(presetTarget.preset.modules).moduleCount,
+          enabledCount: presetStats(presetTarget.preset.modules).enabledCount,
+        },
       segments,
       total: segments.reduce((sum, item) => sum + item.chars, 0),
       lore: {
@@ -974,6 +1149,24 @@ export class PromptController {
         forcedConstantOverBudget: diag?.forcedConstantOverBudget ?? false,
       },
     }
+  }
+
+  /** L0.5 纪律包段 / 预设段 / L1 段共用的「有没有角色」判定。 */
+  private renderPresetSection(ctx?: unknown): string {
+    const sessionId = readSessionId(ctx)
+    return this.presetText(this.resolvePreset(sessionId), sessionId)
+  }
+
+  /** 预设段的真实文本（段渲染与 `preview()` 共用；纯内存）。 */
+  private presetText(target: { preset?: Preset }, sessionId?: string): string {
+    if (target.preset === undefined) return ''
+    // `{{char}}` / `{{user}}` 取**该会话决议角色**的卡名与人设称呼；用户没设称呼时用「你」
+    const roleTarget = this.resolveTarget(sessionId)
+    const cache = roleTarget.character === undefined ? undefined : this.cacheOf(roleTarget.key)
+    const char = cache === undefined ? (roleTarget.character ?? '') : cardName(cache.card)
+    const displayName = cache === undefined ? '' : (awiuOf(cache.card)?.userPersona?.displayName ?? '')
+    const user = displayName.trim() !== '' ? displayName.trim() : '你'
+    return renderPresetText(target.preset, { char, user, mode: 'stable' })
   }
 
   /**

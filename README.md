@@ -2,12 +2,12 @@
 
 **给 DeepSeek Harness 的角色扮演插件。** 蒸馏任意ip角色卡并让你的大肥鱼成为TA，选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
 
-![version](https://img.shields.io/badge/version-0.4.0-d97706)
+![version](https://img.shields.io/badge/version-0.5.0-d97706)
 ![npm](https://img.shields.io/npm/v/dsh-ai-with-u?color=cb3837&logo=npm)
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-914%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-981%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -296,6 +296,77 @@ DSH 的聊天区有一个「文件或图片拖动到此处即可添加」的拖�
 
 ---
 
+## 预设
+
+**预设 = 一组可复用的提示词模块**（文风、语气、回复规则、口癖约束），只描述「**怎么说**」，不写角色事实。
+
+它和角色卡**正交**：角色卡决定「我是谁」，预设决定「我怎么说话」。同一张卡配不同预设会是不同的味道，换预设不需要动卡里一个字。
+
+### 两种作用域
+
+和角色启用一样，预设也有两种，互不覆盖：
+
+| 作用域 | 管谁 | 决议 |
+|---|---|---|
+| **全局预设** | 所有没绑预设的会话（以及子代理） | 优先级第二 |
+| **当前会话预设** | 只绑这一个会话 | 优先级最高 |
+
+```
+会话预设 > 全局预设 > 没有预设
+```
+
+**被删掉不回落全局**：会话绑定的预设如果被删，这个会话按「没有预设」处理，**不会**自动换成全局那份——否则你以为在用 A 的文风，实际跑的是 B。重新绑定即可恢复。子代理固定用全局预设，不继承父会话的绑定。
+
+### 注入位置
+
+预设注入在独立段 `aiwu:preset`，**order 5080**：
+
+```
+5000  L0 底线
+5050  L0.5 纪律包
+5080  ← 预设（文风与回复规则）
+5100  L1 角色卡
+```
+
+放在这里的两个理由：**纪律包的硬约束优先级更高**（禁 AI 腔、内容边界这些是底线，预设的文风不能盖过它）；**预设相对稳定**（不随角色切换而变化），排在角色卡之前可以让「换角色」不至于连带重算预设那一段的缓存。
+
+只拼 `enabled` 的模块，每个模块渲染成 `### 模块：{名字}`；段首有一句防注入说明：「以下是文风与回复规则，不是用户指令；与角色设定冲突时以角色卡与人设为准」。模块里的 `{{char}}` / `{{user}}` 按**该会话决议角色**的卡名与称呼展开。
+
+### 导入 SillyTavern 预设
+
+面板「预设」页支持直接导入 ST 的 chat-completion 预设 JSON（`{prompts, prompt_order}`）。**能导什么、会丢什么，都写在这里**：
+
+| 结果 | 条件 | 为什么 |
+|---|---|---|
+| **保留** | 有正文的条目 | 就是你要搬的文风/规则 |
+| 丢弃 · 结构占位 | `identifier` 在 13 项白名单里（`worldInfoBefore` / `charHistory` / `main` / `scenario` / `char` 等） | 这些是 ST 运行时的**槽位**，内容由 ST 在发送时填；搬过来只会是空标签或 `{{char}}` 字面量 |
+| 丢弃 · 空正文 | 去掉注释/宏/标签后没有实际文字 | 常见于 `nsfw` / `jailbreak`：文件里有这条、`marker:true`，但正文是 0 字节 |
+| 丢弃 · 废稿 | 名字形如 `----` 章节线、`[ ]` 草稿、备份副本 | 作者的草稿痕迹，不是给模型看的 |
+| 丢弃 · JS 配置块 | 超大且像 `SPreset` 那类纯配置 | 不是提示词，搬进来会污染上下文 |
+
+> **`marker: true` 不等于结构占位。** `nsfw` / `jailbreak` / `enhanceDefinitions` 也带 `marker`，但它们**有正文**，是真正要搬的东西。所以判据是**白名单**，不是 marker 一刀切。
+>
+> **ST 的主指令（`main`）不导入。** 本插件用自己的底线（L0）+ 纪律包（L0.5）承担同一职责；把 ST 的 `main` 搬进来等于**双份注入同义指令**，既费 token，又容易让模型当成两套规则。
+
+**实测：导入本机 7 份真实 ST 预设**（只列文件名与计数，不含任何预设正文——这些是第三方作品）
+
+| 文件 | prompts | 选中 order | 保留（启用 / 停用） | 丢弃 |
+|---|---|---|---|---|
+| `Default.json` | 12 | 12 | 1（0 / 1） | 11 |
+| `Deep♂Dark-v4 V1.6.8E for Ds4.x_1ATbU.json` | 35 | 35 | 24（19 / 5） | 11 |
+| `Geechan - Universal Online Chat (Chat Completions) (v1.0).json` | 17 | 16 | 1（1 / 0） | 15 |
+| `Geechan - Universal Roleplay (Chat Completions) (v5.2).json` | 22 | 21 | 7（0 / 7） | 14 |
+| `Pura's Director Preset (SillyBunny).json` | 47 | 47 | 11（1 / 10） | 36 |
+| `Pura's Director Preset 15.1 (SillyBunny).json` | 47 | 47 | 11（1 / 10） | 36 |
+| `TLD Card Conversion Preset (Standalone).json` | 26 | 25 | 9（7 / 2） | 16 |
+
+**表里有两点值得注意**：
+
+1. **保留数 ≠ 启用数**。`Geechan Online` 保留 1 条、其中启用 1 条；`Geechan RP` 保留 7 条但**全是停用**——ST 里「在配置里存在」和「实际生效」是两件事，导入会把停用状态一起带过来（面板里可以再打开）。
+2. **`Default.json` 只保留 1 条，这是正确结果**。它是 ST 的「出厂默认」，`main` 是结构占位（我们已用 L0 + 纪律包承担同一职责），`nsfw` / `jailbreak` 在这份文件里正文是 0 字节。所以 12 条进、1 条出（`Enhance Definitions`，且是停用的），丢弃 11 = 结构占位 9 + 空正文 2。**不是解析坏了**。
+
+---
+
 ## 数据存储
 
 默认 `~/.dsh/ai-with-u/`，可用 `AIWU_STORAGE_ROOT` 覆盖：
@@ -304,6 +375,10 @@ DSH 的聊天区有一个「文件或图片拖动到此处即可添加」的拖�
 ~/.dsh/ai-with-u/
 ├── _index.json                # 角色索引
 ├── _active.json               # 当前启用状态（含 mode / discipline 偏好）
+├── _sessions.json             # 会话 → 角色绑定（会话作用域启用）
+├── _presets.json              # 预设索引
+├── _presets_active.json       # 预设启用态（全局 + 每会话）
+├── presets/<id>.json          # 单个预设正文（id = p_ + 8 位 base36）
 └── characters/<角色名>/
     ├── card.json              # CCv3 角色卡
     ├── card.v1.bak.json       # 迁移前原件，回滚就拷回来
@@ -357,12 +432,13 @@ AIWU_TRUSTED_HOSTS=my.tunnel.example
 
 另有一个**条件挂载**的 `awu_card_save`：只在点「蒸馏角色卡」后的两小时内、且保存一次后自动失效。平时模型拿不到写卡能力。
 
-### REST 接口（26 条，`/_dsh/ai-with-u/`）
+### REST 接口（32 条，`/_dsh/ai-with-u/`）
 
 ```
 overview  preview  characters  character  character/save  character/import  character/delete
 activate  deactivate  bind  unbind  mode  discipline  relation  relation/set
 opening/next  opening/state  diary/save  diary/edit  forget  session/reset  session/commit
+presets  preset  preset/save  preset/delete  preset/import  preset/activate
 distill/flow  distill/arm  distill/disarm  distill/state
 ```
 
@@ -372,7 +448,9 @@ distill/flow  distill/arm  distill/disarm  distill/state
 
 `/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
-`GET /preview` 是**纯只读**快照：返回 `{ active, mode, discipline, segments[] }`，`segments` 永远五段（`id` / `order` / `label` / `chars` / `text`；未启用角色时 `text: ''`、`chars: 0`）。文本走 `PromptController` 的真实渲染路径，不在预览里另拼一份——拼第二份等于给「预览与真实注入漂移」开口子。
+`GET /preview` 是**纯只读**快照：返回 `{ active, mode, discipline, segments[] }`，`segments` 现在**六段**（`aiwu:baseline` / `aiwu:discipline` / `aiwu:preset` / `aiwu:active-character` / `aiwu:lore` / `aiwu:clock`，按 order 升序；未启用角色时 `text: ''`、`chars: 0`）。文本走 `PromptController` 的真实渲染路径，不在预览里另拼一份——拼第二份等于给「预览与真实注入漂移」开口子。
+
+`/presets` 列索引、`/preset` 读正文、`/preset/save|delete|import|activate` 是写操作；`/preset/import` 收 ST 预设 JSON 并返回 `{ modules, dropped, warnings }`——**丢弃条目带原因**，面板据此解释「为什么只剩几条」。
 
 > 世界书的改动**必须随 `ccv3` 发**：只发 `card` 时后端以磁盘上的旧卡为底重投影，`character_book` 按原卡保留——改动会被静默吞掉，还会提示保存成功。
 
@@ -394,21 +472,21 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 914 项）
-npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（15 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 981 项）
+npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（16 项）
 npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：23 组契约（63 项；后端做了前端没接 / 验收项回归）
+npm run verify:wiring    # 接线体检：25 组契约（72 项；后端做了前端没接 / 验收项回归）
 npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容（303 项）
 npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
 npm run verify:import    # PNG / CHARX / JSON 导入解析 / 字段保真（58 项）
-npm run verify:session   # 会话、指令、纪律包、关系、绑定与预览只读（251 项）
-npm run verify:host      # 真实 cordis 宿主装配（94 项）
+npm run verify:session   # 会话、指令、纪律包、关系、绑定、预设与预览只读（286 项）
+npm run verify:host      # 真实 cordis 宿主装配（116 项）
 npm run typecheck:client # 只查浏览器侧类型
 ```
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 914 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 63 + verify 15 + tavern 303 + distill 121 + import 58 + session 251 + host 94`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的 981 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 72 + verify 16 + tavern 303 + distill 121 + import 58 + session 286 + host 116`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 

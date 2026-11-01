@@ -3115,6 +3115,156 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-loreEntryIssues li[data-level="info"] { color: var(--awu-ink-mute); }
 .awu-loreIssueList b { color: var(--awu-ink); font-weight: 600; }
 
+/* ---- 预设面板（preset-view.tsx） ----
+   预设 = 一组「怎么说」的提示词模块，与角色卡正交；这里只负责列表/编辑/导入的排版。 */
+.awu-presetRow {
+  width: 100%;
+  border: none;
+  font: inherit;
+  color: var(--awu-ink);
+  text-align: left;
+}
+
+.awu-presetMeta {
+  flex: none;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+/* 两态启用区：按钮 + 常显的边界提示（与角色绑定同一套措辞与排版） */
+.awu-presetUse {
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-3);
+  margin: var(--awu-gap-5) 0 var(--awu-gap-4);
+  padding: var(--awu-gap-4) var(--awu-gap-5);
+  border: 1px solid var(--awu-line);
+  border-left: 2px solid color-mix(in srgb, var(--awu-accent) 55%, transparent);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+}
+
+.awu-presetUseBtns { display: flex; flex-wrap: wrap; gap: var(--awu-gap-3); }
+
+/* 模块列表 */
+.awu-presetModules { display: flex; flex-direction: column; gap: var(--awu-gap-4); }
+
+.awu-presetModule {
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-3);
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid var(--awu-line);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+}
+
+.awu-presetModule[data-enabled="false"] { opacity: .62; }
+
+.awu-presetModuleHead { display: flex; align-items: center; flex-wrap: wrap; gap: var(--awu-gap-3); }
+
+.awu-presetModuleName {
+  flex: 1 1 140px;
+  min-width: 0;
+  height: 32px;
+  font-size: var(--awu-fs-body);
+}
+
+.awu-presetModuleChars {
+  flex: none;
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-micro);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
+/* 正文摘要：点一下进全屏编辑（长文本不塞进这个小框） */
+.awu-presetModuleBody {
+  width: 100%;
+  min-height: 40px;
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px dashed var(--awu-line-strong);
+  border-radius: var(--awu-r-xs);
+  background: var(--awu-surface-field);
+  color: var(--awu-ink-dim);
+  font: inherit;
+  font-size: var(--awu-fs-body);
+  line-height: var(--awu-lh-body);
+  text-align: left;
+  cursor: text;
+  overflow-wrap: anywhere;
+  transition: border-color var(--awu-dur-2) var(--awu-ease), color var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-presetModuleBody:hover { border-color: var(--awu-accent); color: var(--awu-ink); }
+.awu-presetModuleBody:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+
+/* 导入：JSON 输入区 + 预览列表 */
+.awu-presetJson {
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  line-height: var(--awu-lh-snug);
+  min-height: 120px;
+}
+
+.awu-presetImportBar {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-4);
+  margin-top: var(--awu-gap-3);
+}
+
+.awu-presetPreview { display: flex; flex-direction: column; gap: var(--awu-gap-3); }
+
+/* 「被丢弃」的分组摘要：一行胶囊（只列非零项），不让用户去数 11 行 */
+.awu-presetDropSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--awu-gap-2);
+  margin-top: var(--awu-gap-2);
+}
+.awu-presetPreviewStat {
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+}
+
+.awu-presetPreviewList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.awu-presetPreviewList li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--awu-gap-3);
+  padding: var(--awu-gap-2) var(--awu-gap-3);
+  border-radius: var(--awu-r-xs);
+  background: var(--awu-surface-2);
+  font-size: var(--awu-fs-label);
+  color: var(--awu-ink-dim);
+}
+
+.awu-presetPreviewList li[data-enabled="false"] { opacity: .6; }
+
+.awu-presetPreviewName { flex: none; font-weight: 600; color: var(--awu-ink); white-space: nowrap; }
+
+.awu-presetPreviewExcerpt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--awu-ink-mute);
+}
+
 /* ---- 导入角色卡弹层（index.tsx 的 ImportDialog） ---- */
 .awu-importDrop {
   display: flex;

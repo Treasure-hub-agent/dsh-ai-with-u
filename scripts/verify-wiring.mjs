@@ -1468,6 +1468,145 @@ head('[23] 正则屏蔽可证明（ST_SCRIPT_STANCE 全链路）与「字数提�
   }
 }
 
+// ================================================================ 24. 预设接线
+head('[24] 预设接线（6 条 REST + aiwu:preset 段 order 5080 + 客户端视图）')
+{
+  const web = await readSource('src/web.ts')
+  const promptSrc = await readSource('src/prompt.ts')
+  const presetSrc = await readSource('src/preset.ts')
+  const api = (await readSource('client/api.ts')) ?? ''
+
+  // ① 6 条 REST
+  if (web === undefined) {
+    bad('src/web.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const routes = ['/presets', '/preset', '/preset/save', '/preset/delete', '/preset/import', '/preset/activate']
+    const missing = routes.filter(route => sliceRoute(web, route) === undefined)
+    if (missing.length === 0) ok('6 条预设 REST 路由齐全')
+    else {
+      bad('6 条预设 REST 路由齐全',
+        `缺 ${missing.join(' ')}：预设列表/详情/保存/删除/导入/启用任一缺口，面板对应按钮就是死按钮。该找 host-core`)
+    }
+  }
+
+  // ② 段与 order：aiwu:preset = 5080（ORDER_BASE + 80）
+  if (promptSrc === undefined) {
+    bad('src/prompt.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    const base = Number(/export\s+const\s+ORDER_BASE\s*=\s*(\d+)/u.exec(promptSrc)?.[1] ?? 5000)
+    const hasId = promptSrc.includes('aiwu:preset')
+    let order
+    let expr = ''
+    for (const m of promptSrc.matchAll(/section\(\s*([A-Za-z0-9_]+|'[^']+'|"[^"]+")\s*,\s*([^,\n]+),/gu)) {
+      const target = m[1].replace(/['"]/gu, '')
+      if (target !== 'SECTION_PRESET' && target !== 'aiwu:preset') continue
+      expr = m[2].trim()
+      if (/^ORDER_BASE\s*\+\s*(\d+)$/u.test(expr)) order = base + Number(/(\d+)$/u.exec(expr)[1])
+      else if (/^\d+$/u.test(expr)) order = Number(expr)
+      break
+    }
+    if (!hasId) {
+      bad('有 aiwu:preset 段（order 5080）',
+        'prompt.ts 里没有 aiwu:preset：预设保存了也进不了提示词，用户会以为「启用了没效果」。该找 host-core')
+    } else if (order !== 5080) {
+      bad('有 aiwu:preset 段（order 5080）',
+        `段在，但 order 算出来是 ${order ?? '解析不出'}（期望 5080 = ORDER_BASE + 80）：`
+        + '预设是「文风/规则」，必须排在纪律包(5050)之后（硬约束优先）、角色卡(5100)之前（稳定段靠前，不随角色变而重算）。该找 host-core')
+    } else {
+      ok('有 aiwu:preset 段（order 5080）', expr)
+    }
+  }
+
+  // ③ 转化器
+  if (presetSrc === undefined) {
+    bad('src/preset.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else if (/export\s+function\s+convertStPreset/u.test(presetSrc)) {
+    ok('有 convertStPreset 转化器')
+  } else {
+    bad('有 convertStPreset 转化器',
+      'src/preset.ts 里找不到 convertStPreset：没有转化器就没有「导入 ST 预设」这条链路。该找 host-core')
+  }
+
+  // ④ 客户端 6 个函数 + 视图
+  const apiRoutes = ['/presets', '/preset?', '/preset/save', '/preset/delete', '/preset/import', '/preset/activate']
+  const apiMissing = apiRoutes.filter(route => !api.includes(route.replace('?', '')))
+  if (api === '') bad('client/api.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  else if (apiMissing.length === 0) ok('client/api.ts 有 6 个预设接口')
+  else {
+    bad('client/api.ts 有 6 个预设接口',
+      `client/api.ts 里缺 ${apiMissing.join(' ')}：面板发不出对应请求。该找 client-ui`)
+  }
+
+  let viewOk = false
+  try {
+    const view = await readSource('client/preset-view.tsx')
+    viewOk = typeof view === 'string' && view.length > 2000
+  } catch {
+    viewOk = false
+  }
+  if (viewOk) ok('有 client/preset-view.tsx')
+  else {
+    bad('有 client/preset-view.tsx',
+      '找不到预设面板视图（或文件异常小）：接口通了但界面上没有入口，用户只能用 curl。该找 client-ui')
+  }
+}
+
+// ================================================================ 25. ST 判据对齐
+head('[25] ST 预设判据对齐真原件（结构占位白名单 · 不按 marker 一刀切 · 两侧同源）')
+{
+  const presetSrc = await readSource('src/preset.ts')
+  const viewSrc = (await readSource('client/preset-view.tsx')) ?? ''
+  if (presetSrc === undefined) {
+    bad('src/preset.ts 可读', '文件不存在或读不到 —— 该找 host-core')
+  } else {
+    // ① 结构占位是白名单（含 ST 的槽位标识）
+    const whitelistBlock = /ST_STRUCTURAL_IDS\s*=\s*new\s+Set\(\s*\[([\s\S]{0,800}?)\]/u.exec(presetSrc)?.[1] ?? ''
+    const ids = [...whitelistBlock.matchAll(/['"]([A-Za-z/][A-Za-z0-9_/]*)['"]/gu)].map(m => m[1])
+    const need = ['worldInfoBefore', 'chatHistory', 'main']
+    const lack = need.filter(id => !ids.includes(id))
+    if (whitelistBlock !== '' && ids.length >= 10 && lack.length === 0) {
+      ok('结构占位用白名单判定', `${ids.length} 项（含 worldInfoBefore / chatHistory / main）`)
+    } else {
+      bad('结构占位用白名单判定',
+        whitelistBlock === ''
+          ? '找不到 ST_STRUCTURAL_IDS 白名单：结构占位若按名字/位置猜，迟早把真内容当占位丢掉。该找 host-core'
+          : `白名单只有 ${ids.length} 项，缺 ${lack.join(' / ')}（ST 的槽位标识要用白名单钉死，13 项是实测口径）。该找 host-core`)
+    }
+
+    // ② 绝不按 marker 一刀切（marker 只许出现在注释里）
+    const codeLines = presetSrc.split('\n').filter(line => !/^\s*(\*|\/\/|\/\*)/u.test(line))
+    const markerInCode = codeLines.filter(line => /\bmarker\b/u.test(line))
+    const markerDrops = markerInCode.filter(line => /continue|dropped\.push/u.test(line))
+    if (markerDrops.length > 0) {
+      bad('不按 marker:true 一刀切',
+        `代码里有按 marker 丢弃的分支（${markerDrops[0].trim().slice(0, 60)}）：marker:true ≠ 结构占位——`
+        + 'nsfw / jailbreak / enhanceDefinitions 都带 marker 但有正文，一刀切会把真内容丢掉。该找 host-core')
+    } else {
+      ok('不按 marker:true 一刀切', markerInCode.length === 0 ? '代码里不引用 marker' : '只在无丢弃的语境出现')
+    }
+
+    // ③ 多份 prompt_order 取条目最多的
+    const picksLargest = /candidate\.length\s*>\s*order\.length|length\s*>\s*\w+\.length/u.test(presetSrc)
+      && /prompt_order/u.test(presetSrc)
+    if (picksLargest) ok('多份 prompt_order 取条目最多的一份')
+    else {
+      bad('多份 prompt_order 取条目最多的一份',
+        '看不到「取条目最多的那份 prompt_order」的选择逻辑：ST 常同时给单聊/群聊两份 order，'
+        + '拿错那份会漏掉条目（表现为「导入后少了一大半」）。该找 host-core')
+    }
+
+    // ④ 两侧同源（宽松启发式）
+    const sameSource = /同源|真原件/u.test(presetSrc)
+    const viewSame = /同源|真原件/u.test(viewSrc)
+    if (sameSource && viewSame) ok('宿主与客户端判据同源（都注明对真原件）')
+    else if (viewSame) ok('宿主与客户端判据同源', '仅客户端注明（宿主注释缺一句同源说明，不阻塞）')
+    else {
+      skipped('宿主与客户端判据同源',
+        '两侧注释都没写「同源 / 真原件」：判据可能各写一套（面包屑对不上）。建议补注释，但静态判不出真实差异')
+    }
+  }
+}
+
 // ================================================================ 汇总
 console.log('')
 if (fail > 0) {
