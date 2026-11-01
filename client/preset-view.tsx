@@ -35,7 +35,6 @@ import {
 import type { PresetActiveState, PresetDetail, PresetModule, PresetSummary } from './api'
 import { FocusEditor } from './editor-focus'
 import {
-  IconAlert,
   IconBack,
   IconChevron,
   IconPlus,
@@ -43,6 +42,7 @@ import {
   IconRefresh,
   IconTrash,
 } from './icons'
+import { ErrorBar, Skeleton } from './parts'
 import type { Translate } from './text'
 
 /** 与设计稿对齐的上限（宿主也会拦；这里先就地提示，保存前再挡一道）。 */
@@ -450,29 +450,6 @@ export interface PresetPanelProps {
 
 type View = 'list' | 'edit' | 'import'
 
-/**
- * 载入骨架：与主面板 `index.tsx:306-317` 的 `Skeleton` **同构**（同一组 `.awu-sk` / `.awu-skRow`
- * 类名、同样 3 行、同样 `role="status"` + `aria-live` + 视觉隐藏的文字），只是把 `label` 变成必填。
- *
- * 为什么照抄 DOM 而不是 import：那个 `Skeleton` 是 `index.tsx` 的内部函数（没 export），
- * 而 `index.tsx` 是并行的写域——跨模块 import 会把两边的改动绑在一起。共享的是**类名**（在
- * `styles.ts` 里），所以复制一份 15 行的 DOM 形状是成本最低、互不影响的做法。
- *
- * `shape` 不传时 `.awu-sk` 只走基础行高（列表场景）；传 `detail` 时首行会撑到 140px（表单场景）。
- */
-function PresetSkeleton(props: { label: string; shape?: 'detail' | 'cards' }): JSX.Element {
-  return (
-    <div className="awu-sk" data-shape={props.shape} role="status" aria-live="polite">
-      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
-        {props.label}
-      </span>
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-    </div>
-  )
-}
-
 export function PresetPanel(props: PresetPanelProps): JSX.Element {
   const { t, sessionId, onFocusLayerChange, onChanged, onClose } = props
 
@@ -815,14 +792,9 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
           )}
 
           {unavailable && <div className="awu-hint" data-tone="warn">{t('preset.unavailable')}</div>}
-          {error !== '' && (
-            <div className="awu-err" role="alert">
-              <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-              <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
-            </div>
-          )}
+          {error !== '' && <ErrorBar message={error} t={t} />}
 
-          {loading && list.length === 0 && <PresetSkeleton label={t('common.loading')} />}
+          {loading && list.length === 0 && <Skeleton shape="cards" label={t('common.loading')} />}
 
           {!loading && error === '' && list.length === 0 && (
             <div className="awu-empty" data-kind="empty">
@@ -1112,7 +1084,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             那既会被误读成「这个预设是空的」，载入完还会整块跳一次。
           */}
           {editLoading && detail === undefined ? (
-            <PresetSkeleton label={t('common.loading')} shape="detail" />
+            <Skeleton label={t('common.loading')} shape="detail" />
           ) : (
           <>
           {notice !== undefined && (
@@ -1122,12 +1094,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             </div>
           )}
           {unavailable && <div className="awu-hint" data-tone="warn" style={{ marginBottom: 10 }}>{t('preset.unavailable')}</div>}
-          {error !== '' && (
-            <div className="awu-err" role="alert">
-              <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-              <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
-            </div>
-          )}
+          {error !== '' && <ErrorBar message={error} t={t} />}
 
           <label className="awu-label" htmlFor="awu-preset-name">{t('preset.editor.name')}</label>
           <input
@@ -1617,15 +1584,10 @@ function PresetImportView(props: {
           />
         </div>
 
-        {error !== '' && (
-          <div className="awu-err" role="alert">
-            <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-            <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
-          </div>
-        )}
+        {error !== '' && <ErrorBar message={error} t={t} />}
 
         {/* 落库请求在飞：预览先让位给骨架，避免「点了确认但界面一动不动」 */}
-        {busy && <PresetSkeleton label={t('common.loading')} />}
+        {busy && <Skeleton label={t('common.loading')} />}
 
         {!busy && preview !== undefined && (
           <div className="awu-presetPreview">

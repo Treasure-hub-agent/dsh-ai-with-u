@@ -19,16 +19,17 @@
  * 历史：同一位置的可见小入口 `DockEntry` 从未注册过（主人明确要求底部托盘不留蒸馏按钮），
  * 且要填的 `dock*` 文案一起成了死代码，已删除（2026-10-31，任务 3）。
  *
- * TODO（第 4 轮）：把自建的 scrim/dialog 换回 `Overlay`。
- * 现状：本文件自建了一套「scrim + `.awu-dialog` + 自己的 Esc 监听 + 自己的滚动锁」
- * （`DistillDialog` 的 return 与 `useBodyScrollLock`），因为面板的 `Overlay` 是 `index.tsx`
- * 的内部函数、没有导出。那是第 2 批统一动效时留下的一处**副本**，代价是它天生缺 `Overlay` 身上
- * 三条兜底，现在靠手工逐条补齐，改 `Overlay` 时必须记得同步这边：
- *   1. 宿主拖放复位（`resetHostDropState`）—— 本文件已补「卸载时」那一条，见 `DistillDialog` 的 effect；
- *   2. `data-still`（动画期去 blur + 层提升）—— 自建 dialog 未接，因为它没有进入/退场动画可驱动；
- *   3. `presence` / `data-state="closing"`（退场 160ms）—— 自建 dialog 未接，关闭是硬卸载。
- * 换回 Overlay 后这三条自动获得，同时 `.awu-distill-dialog` 的宽/圆角覆盖问题也一并消失。
- * 归属：需要先把 `Overlay` 从 `index.tsx` 抽成 `client/overlay.tsx`（属 index.tsx 写域），不在本批。
+ * **已完成（第 4 轮，2026-11-02）：自建的 scrim/dialog 副本已换回共享的 `client/parts.tsx` 的 `Overlay`。**
+ * 背景：第 2 批统一动效时本文件留了一份「scrim + `.awu-dialog` + 自己的 Esc 监听 + 自己的滚动锁」的副本
+ * （因为当时的 `Overlay` 是 `index.tsx` 内部函数、没导出），代价是它天然缺三条兜底，只能手工补：
+ *   1. 宿主拖放复位（`resetHostDropState`）—— 现在由 `Overlay` 的卸载 effect 负责，本文件那份已删；
+ *   2. `data-still`（动画期去 blur + 层提升）—— 现在由 `Overlay` 的 commit-ref 负责；
+ *   3. `data-state="closing"` 的 160ms 退场 —— 现在由 `DistillButton` 的 `usePresence` +
+ *      `DialogLayerContext.Provider` 驱动（`Overlay` 自己不接 `open`，卸载时机归调用方）。
+ * 同时它落到 `.awu-dialog` 的标准几何（620 宽 / 24 圆角），
+ * 旧的 `.awu-distill-dialog`（760 宽 / 16 圆角）覆盖类不再被使用 —— CSS 侧可删（属 CSS 写域）。
+ * 仍留在本文件的唯一一处「自建」是 `close()` 里的 `busy` 守卫：`Overlay` 没有 `closable` 类入参，
+ * 忙碌期禁止关闭只能由调用方在 `onClose` 里守（已在汇报里登记给 parts.tsx 的 owner）。
  *
  * 发送契约（2026-10-14 / 10-17 对已安装 desktop 0.2.0-rc.2 实测，来源：本机 dsh-story 头部注释）：
  *  - `InputActions = { captureInsertion(), insertText(text, span) → boolean, setDraft(text), …, submit() }`；
@@ -40,14 +41,13 @@
  * @module dsh-ai-with-u/client/distill
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import type { JSX } from 'react'
 
 import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
 import type { DistillKind } from './api'
-import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
-import { resetHostDropState, swallowFileDrag } from './dragdrop'
 import { IconClose, IconQuill } from './icons'
+import { T_EXIT, usePresence } from './motion'
+import { DialogLayerContext, Overlay } from './parts'
 import type { Translate } from './text'
 
 // ---------------------------------------------------------------- 输入框 sink
@@ -356,16 +356,6 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
 // ---------------------------------------------------------------- 弹层
 
-/** 弹层打开期间锁住 body 滚动（与面板弹层同款行为，见 index.tsx 的 useScrollLock）。 */
-function useBodyScrollLock(active: boolean): void {
-  useEffect(() => {
-    if (!active || typeof document === 'undefined') return undefined
-    const previous = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = previous }
-  }, [active])
-}
-
 export interface DistillDialogProps {
   t: Translate
   /** 用户主动关闭（遮罩 / Esc / 关闭按钮）。 */
@@ -391,26 +381,6 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
   const [savedNote, setSavedNote] = useState('')
   /** 指令是否真的发出去了 —— 决定关弹层时该 onDone() 还是 disarm()。 */
   const sentRef = useRef(false)
-  const boxRef = useRef<HTMLDivElement | null>(null)
-
-  useBodyScrollLock(true)
-
-  /**
-   * 卸载兜底：自建 scrim 缺 `Overlay` 的那条复位（`index.tsx` 的 Overlay 有 `useEffect(() => () =>
-   * resetHostDropState(), [])`）。
-   *
-   * 为什么必须有：`.awu-scrim` 是 fixed 全屏遮罩，拖一张卡进来时 drop 落在它身上，我们 `preventDefault`
-   * 吞掉后宿主的「拖放中」计数器不会自己归零 —— 拖放若在中途被打断（Esc / 焦点切走 / 组件先卸载），
-   * drop 永远不来，聊天区的遮罩就永久卡住。这是历史真事故的同类（见 `dragdrop.ts` 文件头）。
-   * `swallowFileDrag` 只在 drop 时复位，所以这里补「卸载时」那一条。
-   */
-  useEffect(() => () => { resetHostDropState() }, [])
-
-  // 焦点三件套（与 index.tsx 的 Overlay / editor-focus 同款接线，2026-11-01 补）：
-  // 顺序不能换：先记「打开前焦点在哪」，再把焦点送进容器，最后拦 Tab。
-  useRestoreFocus(true)
-  useInitialFocus(boxRef, true)
-  useFocusTrap(boxRef, true)
 
   // 开门先看一眼窗口状态：上一次刚存过卡就给一句上下文，别让用户以为要重来
   useEffect(() => {
@@ -431,8 +401,13 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
   /**
    * 关闭：**没发出去就 disarm**，把这次窗口收掉（否则上一条 arm 会一直挂着）；
    * 发出去了才 onDone()，让外层刷新/收尾。
+   *
+   * ⚠️ 换到 `Overlay` 之后，`busy` 期禁止关闭这条语义**只能在这里守**：`Overlay` 的 Esc / 点遮罩
+   * 都会直接调 `onClose`，它没有 `closable` 之类的开关（缺这个 prop 已登记给 parts.tsx 的 owner）。
+   * 所以 busy 时这里直接 return，行为与旧的自建 Esc 监听（`if (… || busy) return`）一致。
    */
   const close = useCallback((): void => {
+    if (busy) return
     if (!sentRef.current) {
       void disarmDistill().catch((error: unknown) => {
         console.error('[ai-with-u] 取消蒸馏时 disarm 失败（不影响使用）', error)
@@ -441,18 +416,7 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
       onDone()
     }
     onClose()
-  }, [onClose, onDone])
-
-  // Esc 关闭：正在 arm/send 时不关，避免用户以为发出去了其实还在跑
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || busy) return
-      event.stopPropagation()
-      close()
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [busy, close])
+  }, [busy, onClose, onDone])
 
   const reasonText = (reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed'): string =>
     sendFailureText(reason, t)
@@ -502,31 +466,33 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
 
   const failed = note !== undefined && note.tone === 'err'
 
-  return createPortal(
-    <div
-      className="awu-scrim"
-      role="presentation"
-      onMouseDown={event => { if (event.target === event.currentTarget && !busy) close() }}
-      onDragOver={swallowFileDrag}
-      onDrop={swallowFileDrag}
-    >
-      <div ref={boxRef} className="awu-dialog awu-distill-dialog" role="dialog" aria-modal="true" aria-label={t('distill.title')}>
-        <div className="awu-dialogHead">
-          <IconQuill size={16} />
-          <span>{t('distill.title')}</span>
-          <button
-            type="button"
-            className="awu-iconBtn awu-distill-close"
-            aria-label={t('common.close')}
-            title={t('common.close')}
-            onClick={close}
-            disabled={busy}
-          >
-            <IconClose size={14} />
-          </button>
-        </div>
+  /*
+    ⚠️ 第 4 轮：这里从「自建 scrim + 自建 dialog」换回了共享的 `Overlay`（`client/parts.tsx`）。
+    换掉之后**自动获得**过去手工补的三条兜底，别再在文件里留第二份：
+      1. 宿主拖放复位（`resetHostDropState`，Overlay 的卸载 effect）；
+      2. 首帧 `data-still`（commit 阶段挂、animationend/兜底摘）——去 blur + 层提升；
+      3. `data-state="closing"` 的 160ms 退场（`closing` 由外层 `DialogLayerContext` 广播）。
+    并被 `.awu-dialog` 的标准几何接管（620 宽 / 24 圆角）；`.awu-distill-dialog` 那个 760/16 的
+    尺寸覆盖类因此不再使用（CSS 侧可删，属 CSS 写域）。
+  */
+  return (
+    <Overlay label={t('distill.title')} onClose={close}>
+      <div className="awu-dialogHead">
+        <IconQuill size={16} />
+        <span>{t('distill.title')}</span>
+        <button
+          type="button"
+          className="awu-iconBtn awu-distill-close"
+          aria-label={t('common.close')}
+          title={t('common.close')}
+          onClick={close}
+          disabled={busy}
+        >
+          <IconClose size={14} />
+        </button>
+      </div>
 
-        <div className="awu-dialogBody">
+      <div className="awu-dialogBody">
           {step === 'confirm' ? (
             <>
               <div className="awu-distill-why">{t('distill.why')}</div>
@@ -613,9 +579,7 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
             </>
           )}
         </div>
-      </div>
-    </div>,
-    document.body,
+    </Overlay>
   )
 }
 
@@ -636,6 +600,13 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
 export function DistillButton(props: { t: Translate; label?: string }): JSX.Element {
   const { t, label } = props
   const [open, setOpen] = useState(false)
+  /**
+   * 退场：`open=false` 后先留 `T_EXIT`(160ms) 让 `Overlay` 画完，再真正卸载
+   * （契约 §2.2：`Overlay` 自己不接 `open`，卸载时机由调用方决定）。
+   * 退场态通过 `DialogLayerContext` 广播给它 —— 不提供 Provider 的话 `closing` 恒 false，
+   * 功能正常但退场动画不会播。
+   */
+  const presence = usePresence(open, T_EXIT)
   return (
     <>
       <button
@@ -650,12 +621,14 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
         <IconQuill size={14} />
         {label ?? t('distill.title')}
       </button>
-      {open && (
-        <DistillDialog
-          t={t}
-          onClose={() => setOpen(false)}
-          onDone={() => setOpen(false)}
-        />
+      {presence.mounted && (
+        <DialogLayerContext.Provider value={presence.closing}>
+          <DistillDialog
+            t={t}
+            onClose={() => setOpen(false)}
+            onDone={() => setOpen(false)}
+          />
+        </DialogLayerContext.Provider>
       )}
     </>
   )

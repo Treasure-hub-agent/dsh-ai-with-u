@@ -19,8 +19,9 @@ import type { JSX } from 'react'
 
 import { errorText, fetchPreview, isUnavailable } from './api'
 import type { PreviewData, PreviewSegment } from './api'
-import { IconAlert, IconChevron, IconRefresh, IconSpark } from './icons'
+import { IconChevron, IconRefresh, IconSpark } from './icons'
 import { T_EXIT, presenceAttrs, usePresence } from './motion'
+import { ErrorBar, Skeleton } from './parts'
 import type { Translate } from './text'
 
 /** 宿主约定里 L1 角色设定段的 id（用来算「L1 字符数」）。 */
@@ -144,18 +145,11 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
       <div className="awu-dialogBody">
         <div className="awu-hint" style={{ marginBottom: 10 }}>{t('preview.hint')}</div>
 
-        {loading && data === undefined && <PreviewSkeleton label={t('preview.loading')} />}
+        {loading && data === undefined && <Skeleton label={t('preview.loading')} />}
 
         {unavailable && <div className="awu-hint" data-tone="warn">{t('preview.unavailable')}</div>}
 
-        {error !== '' && (
-          /* 与主面板 `ErrorBar` 同形：`.awu-status` 给几何 + `data-status="alert"` 给语气
-             （裸 `.awu-err` 只有红描边与红字，少了状态带那条中性底与左轨） */
-          <div className="awu-status awu-err" data-status="alert" role="alert">
-            <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-            <span style={{ flex: 1, minWidth: 0 }}>{t('preview.failed', { reason: error })}</span>
-          </div>
-        )}
+        {error !== '' && <ErrorBar message={t('preview.failed', { reason: error })} t={t} />}
 
         {data !== undefined && (
           <>
@@ -260,24 +254,4 @@ function PreviewSegmentBody(props: {
   return empty
     ? <div className="awu-previewEmpty" {...attrs}>{t('preview.emptySegment')}</div>
     : <pre className="awu-previewText" {...attrs}>{text}</pre>
-}
-
-/**
- * 载入骨架：与主面板 `index.tsx` 的 `Skeleton`（以及 `preset-view` 的 `PresetSkeleton`）**同构** ——
- * 同一组 `.awu-sk` / `.awu-skRow`、同样 3 行、同样 `role="status"` + `aria-live` + 视觉隐藏的文字。
- *
- * 为什么不 import 主面板那个：它是 `index.tsx` 的内部函数（没 export），而 `index.tsx` 是并行写域；
- * 共享的是**类名**（在 `styles.ts` 里），照抄 15 行 DOM 形状是成本最低、互不影响的做法。
- */
-function PreviewSkeleton(props: { label: string }): JSX.Element {
-  return (
-    <div className="awu-sk" role="status" aria-live="polite">
-      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
-        {props.label}
-      </span>
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-    </div>
-  )
 }

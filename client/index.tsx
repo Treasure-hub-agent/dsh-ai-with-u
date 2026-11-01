@@ -8,7 +8,7 @@
  * 设计语言的 CSS 在 `styles.ts`，文案与角色卡解析在 `text.ts`，接口在 `api.ts`；
  * 这个文件只管「状态机 + 布局」，尽量不写魔法数字以外的样式细节。
  */
-import { Fragment, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type {
   ChangeEvent as ReactChangeEvent,
@@ -19,9 +19,10 @@ import type {
 } from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
+import { DialogLayerContext, ErrorBar, Field, Overlay, Section, Skeleton, useScrollLock } from './parts'
 // 动效单一真源（契约 §1）：时长/缓动只从这里取，不在 JSX 里写字面量。
 // pop 帧用 T_MID（= CSS 的 --awu-t-mid），退场用 T_EXIT（= --awu-t-exit）。
-import { EASE, T_BASE, T_ENTER, T_EXIT, T_MID, presenceAttrs, prefersReducedMotion, releaseFocusWithin, useFinePointer, usePresence } from './motion'
+import { EASE, T_BASE, T_ENTER, T_EXIT, T_MID, presenceAttrs, prefersReducedMotion, useFinePointer, usePresence } from './motion'
 
 import {
   activateCharacter,
@@ -202,161 +203,8 @@ function isSavePayload(value: unknown): value is CardSavePayload {
     && typeof payload.loreChanged === 'boolean'
 }
 
-/** 滚动锁：弹层打开时锁住 body 滚动，关掉立刻还原。 */
-function useScrollLock(active: boolean): void {
-  useEffect(() => {
-    if (!active || typeof document === 'undefined') return undefined
-    const previous = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previous
-    }
-  }, [active])
-}
-
-/**
- * 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。
- *
- * 另外**吞掉落在弹层上的文件拖放**：`.awu-scrim` 是 fixed 全屏遮罩，用户拖一张卡进来时
- * 目标就是它，但事件会继续冒到宿主 composer，图片会被当成附件发出去（真机踩过）。
- * `swallowFileDrag` 现在还会在 drop 时复位宿主的拖放计数器（否则聊天区遮罩会永久卡死，
- * 见 `dragdrop.ts` 文件头），拖放区在内层先接住，所以真正的拖放不受影响。
- */
-/**
- * 弹层「正在退场」的广播。
- *
- * 为什么用 context 而不是 prop：`Overlay` 有 9 处调用点（7 个确认/表单弹层 +
- * preview + preset），逐个传 closing 既啰嗦又容易漏；而退场状态本来就是
- * 「宿主这一批弹层」共享的，context 是它正确的粒度。
- */
-const DialogLayerContext = createContext<boolean>(false)
-
-function Overlay(props: {
-  label: string
-  onClose: () => void
-  children: JSX.Element | JSX.Element[]
-  /** 弹层里「没落在拖放区上」的文件：默认只是吞掉；传了就顺手回调（用于给一句提示） */
-  onFilesDropped?: (files: FileList) => void
-  /**
-   * 「本层要先吃 Esc」：为 true 时 Overlay 的 Esc 处理**直接 return**，把 Esc 让给层内。
-   *
-   * 语义是「谁该处理这次 Esc」，不只等于「专注编辑层开着」（2026-11-02 与 preset 侧对齐）：
-   * 内层会自己处理的情形至少三种 —— 模块专注编辑层打开、有未保存改动、
-   * 丢弃确认弹着；三种都要求 Esc 先由内层消费（比如先弹「放弃改动？」），
-   * 否则一次 Esc 会同时触发内层下线与 `onClose`，未保存的编辑无声全丢。
-   *
-   * 所以调用方（目前是 preset 的 `onFocusLayerChange`）给的是一个**汇总后的布尔**，
-   * 而不是「专注层开关」本身。约定见 `editor-focus.tsx:12-13`，
-   * 正确做法参照 `card-editor.tsx` 的 loreFocus 让位。
-   */
-  escYield?: boolean
-}): JSX.Element {
-  const { label, onClose, children, onFilesDropped, escYield = false } = props
-  const boxRef = useRef<HTMLDivElement | null>(null)
-  /**
-   * 退场态由宿主（CharacterPanel 的弹层宿主）通过 context 广播：
-   * `closing` 期间这一层还在 DOM 里跑 160ms 退场动画，但已经不该再吃 Esc / 抢焦点。
-   * 滚动锁仍然按 **mounted** 走（`useScrollLock(true)`，卸载时才解）——
-   * 跟着 closing 解锁会让遮罩淡出的 160ms 里底层页面能滚，比没有退场更糟（契约 §2.2 时序 2）。
-   */
-  const closing = useContext(DialogLayerContext)
-  const scrimRef = useRef<HTMLDivElement | null>(null)
-
-  /**
-   * scrim 与 dialog 的**回调 ref**：commit 阶段同步挂 `data-still="true"`
-   * （契约 §6：带着它渲染 = 这次进入不 blur；effect 补会晚一帧，等于没做）。
-   * 摘除由下面的 effect 负责（animationend + 兜底 timer）。
-   */
-  const attachScrim = useCallback((node: HTMLDivElement | null): void => {
-    scrimRef.current = node
-    if (node !== null) node.setAttribute('data-still', 'true')
-  }, [])
-  const attachBox = useCallback((node: HTMLDivElement | null): void => {
-    boxRef.current = node
-    if (node !== null) node.setAttribute('data-still', 'true')
-  }, [])
-
-  useScrollLock(true)
-
-  // 焦点顺序不能换：先记回来处 → 再把焦点送进容器 → 最后拦 Tab。
-  useRestoreFocus()
-  useInitialFocus(boxRef, true)
-  useFocusTrap(boxRef, true)
-  // 退场第一帧就把焦点请出去：否则焦点停在正在归零、且 pointer-events:none 的节点上
-  useEffect(() => {
-    if (closing) releaseFocusWithin(boxRef.current)
-  }, [closing])
-
-  /** 首帧的 data-still 由回调 ref 挂上；这里在入场动画结束（或 320ms 兜底）后摘掉。 */
-  useEffect(() => {
-    const nodes = [scrimRef.current, boxRef.current].filter((el): el is HTMLDivElement => el !== null)
-    const clear = (event: AnimationEvent): void => {
-      if (event.target instanceof HTMLElement) event.target.removeAttribute('data-still')
-    }
-    for (const node of nodes) node.addEventListener('animationend', clear)
-    const fallback = window.setTimeout(() => {
-      for (const node of nodes) node.removeAttribute('data-still')
-    }, T_ENTER + 60)
-    return () => {
-      window.clearTimeout(fallback)
-      for (const node of nodes) node.removeEventListener('animationend', clear)
-    }
-  }, [])
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        // 退场中不再响应 Esc（这一层已经在走了，再 close 一次只会重置计时）
-        if (closing) return
-        // 内层专注编辑层开着：Esc 归它，壳层什么都不做（也不 stopPropagation，
-        // 内层自己会 stop；不同文档级监听靠注册顺序不会互相拦掉）。
-        if (escYield) return
-        event.stopPropagation()
-        onClose()
-      }
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose, escYield, closing])
-
-  // 兜底：弹层卸载时再复位一次——万一拖放在中途被别的东西吃掉（Esc、焦点切换）
-  // 没走到 drop，宿主的计数器也得有人归零
-  useEffect(() => () => { resetHostDropState() }, [])
-
-  return createPortal(
-    <div
-      ref={attachScrim}
-      className="awu-scrim"
-      role="presentation"
-      /* scrim 与 dialog 都要挂 data-state：只挂 dialog 的话遮罩层会硬切消失（契约 §2.2） */
-      {...presenceAttrs(closing)}
-      onMouseDown={event => {
-        if (event.target === event.currentTarget && !closing) onClose()
-      }}
-      onDragOver={swallowFileDrag}
-      onDrop={event => {
-        swallowFileDrag(event)
-        const files = event.dataTransfer?.files
-        if (files !== undefined && files.length > 0) onFilesDropped?.(files)
-      }}
-    >
-      <div
-        ref={attachBox}
-        className="awu-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        aria-hidden={closing ? true : undefined}
-        {...presenceAttrs(closing)}
-      >
-        {/* TODO（第 3 批）：`distill.tsx:483` 还有一份自建的 scrim + dialog 副本，
-            退场属性得两边同步；第 3 批把它换回这里的 Overlay 之后这段注释可删。 */}
-        {children}
-      </div>
-    </div>,
-    document.body,
-  )
-}
+// 弹层壳（Overlay / DialogLayerContext / useScrollLock）已搬到 `./parts`：
+// 那是 distill 侧也要复用的叶子模块，放在这里会因为 import 环被卡住。
 
 // ---------------------------------------------------------------- 小组件
 
@@ -386,80 +234,7 @@ function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean;
   )
 }
 
-/**
- * 骨架屏。`shape` 交给 CSS 决定形态（`data-shape`）：
- *  - `detail`（默认）：详情页那种竖排行；
- *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片。
- */
-function Skeleton(props: { shape?: 'detail' | 'cards'; label?: string; closing?: boolean }): JSX.Element {
-  return (
-    <div
-      className="awu-sk"
-      data-shape={props.shape ?? 'detail'}
-      role="status"
-      aria-live="polite"
-      aria-hidden={props.closing === true ? true : undefined}
-      /* 退场 160ms：由调用方的 usePresence 决定何时真正卸载（契约 §2.2） */
-      {...presenceAttrs(props.closing === true)}
-    >
-      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
-        {props.label ?? '载入中…'}
-      </span>
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-      <div className="awu-skRow" />
-    </div>
-  )
-}
-
-function ErrorBar(props: { message: string; onRetry?: () => void; t: Translate }): JSX.Element {
-  return (
-    <div className="awu-status awu-err" data-status="alert" role="alert">
-      <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-      <span style={{ flex: 1, minWidth: 0 }}>{props.message}</span>
-      {props.onRetry !== undefined && (
-        <button type="button" className="awu-btn" data-size="sm" onClick={props.onRetry}>
-          {props.t('common.retry')}
-        </button>
-      )}
-    </div>
-  )
-}
-
-/** 一行「键 · 值」。 */
-function Field({ k, v, title }: { k: string; v: string; title?: string }): JSX.Element {
-  return (
-    <div className="awu-field">
-      <span className="awu-fieldKey" title={title ?? k}>{k}</span>
-      <span className="awu-fieldVal">{v}</span>
-    </div>
-  )
-}
-
-/**
- * 把「来源」键缩成可读标签。
- *
- * stats.bySource 的键来自 CCv3 的 data.source：自产卡是 distill / import / custom，
- * 但外部导入卡可能写整条 URL（规范允许）。直接把 URL 铺进 Field 会和右侧计数挤在一起，
- * 所以 URL 一律缩成域名，完整值走 title 悬停。
- */
-/**
- * 角色来源与相对日期的显示统一放在 `client/text.ts`（编辑器与面板共用同一套映射）。
- */
-
-/** 分段字段（性格/声音/关系）的小节。 */
-function Section(props: { title: string; count?: number; children: JSX.Element | JSX.Element[] | null }): JSX.Element {
-  const { title, count, children } = props
-  return (
-    <div className="awu-section">
-      <div className="awu-sectionHead">
-        <span>{title}</span>
-        {count !== undefined && <span className="awu-count">{count}</span>}
-      </div>
-      <div className="awu-sectionBody">{children}</div>
-    </div>
-  )
-}
+// 骨架屏 / 错误条 / 字段行 / 分组块已搬到 `./parts`（纯零件，distill 侧也要用同一份）。
 
 /** 日记视图（详情页与日记页共用）。 */
 // `DiaryTarget` 与「按行改写」的类型定义搬到了 `diary-review.tsx`（日记页那块要复用），
@@ -1735,6 +1510,67 @@ function recentDiaryLines(entries: DiaryEntry[], maxLines: number): DiaryEntry[]
   return out
 }
 
+// ---------------------------------------------------------------- 共享元素（list ↔ detail 头像）
+
+/** 量出来的矩形快照（只留四个数：DOMRect 是活对象，跨渲染/跨卸载不该长期持有）。 */
+interface MorphRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+function rectOf(el: Element): MorphRect {
+  const rect = el.getBoundingClientRect()
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+}
+
+/** 按 `data-card-id` 找左栏那张卡的头像（不用属性选择器拼字符串：卡名可能带引号）。 */
+function findCardAvatar(name: string): HTMLElement | null {
+  if (typeof document === 'undefined' || name === '') return null
+  for (const card of Array.from(document.querySelectorAll<HTMLElement>('.awu-card[data-card-id]'))) {
+    if (card.getAttribute('data-card-id') !== name) continue
+    const avatar = card.querySelector<HTMLElement>('[data-morph="avatar"]')
+    return avatar
+  }
+  return null
+}
+
+/**
+ * 头像共享元素（list → detail 的「同一张卡长大了」）。
+ *
+ * 做法是纯 WAAPI + 内联 transform，不引新 CSS：
+ *  1. 点卡时记下那张卡 avatar 的矩形（`openCharacter` 里）；
+ *  2. 详情页挂载、数据到位后量 hero avatar 的矩形；
+ *  3. 用 `translate(dx,dy) scale(s)` → `none` 画 240ms（T_MID + EASE）；
+ *  4. 期间挂 `data-morphing="true"`（给 CSS/调试一个抓手，也避免 hover 位移抢 transform）。
+ *
+ * 只做 translate + scale，不做宽高动画：两个 avatar 的圆角/字号本就不同，
+ * 插值宽高会在中途出现"字被拉伸"的瞬间，而 transform 走合成层、不触发重排。
+ */
+function morphAvatar(from: MorphRect, target: HTMLElement): Animation | null {
+  const to = rectOf(target)
+  if (from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0) return null
+  const scale = from.width / to.width
+  const dx = (from.left + from.width / 2) - (to.left + to.width / 2)
+  const dy = (from.top + from.height / 2) - (to.top + to.height / 2)
+  target.setAttribute('data-morphing', 'true')
+  const animation = target.animate(
+    [{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: 'translate(0, 0) scale(1)' }],
+    { duration: T_MID, easing: EASE },
+  )
+  const done = (): void => {
+    target.removeAttribute('data-morphing')
+    animation.onfinish = null
+    animation.oncancel = null
+  }
+  animation.onfinish = done
+  animation.oncancel = done
+  // 兜底：元素被打断/隐藏时 finish/cancel 可能不来，属性留着就永远关着 hover 那一层
+  window.setTimeout(done, T_MID + 80)
+  return animation
+}
+
 // ---------------------------------------------------------------- 角色详情
 
 function CharacterDetailView(props: {
@@ -1769,12 +1605,43 @@ function CharacterDetailView(props: {
   onSwitchMode: () => void
   /** ⋯ 菜单：换一句开场 */
   onNextOpening: () => void
+  /** 进详情前记下的卡片头像矩形（共享元素的起点）；undefined = 不播 */
+  morphFrom?: { name: string; rect: MorphRect }
+  /** 播完（或跳过）后通知面板清掉起点，避免重复播放 */
+  onMorphDone?: () => void
 }): JSX.Element {
   const {
     detail, loading, error, relation, live, boundHere, sessionId, busy, t,
     onBack, onRetry, onBindSession, onUnbindSession, onActivate, onDeactivate, onDelete, onEdit,
-    onOpenDiary, onExport, onSwitchMode, onNextOpening,
+    onOpenDiary, onExport, onSwitchMode, onNextOpening, morphFrom, onMorphDone,
   } = props
+
+  /**
+   * 共享元素：hero 头像从卡片头像的位置「长」到自己的位置。
+   *
+   * 时序要注意：详情页先渲染 Skeleton（detail 还没到），hero 此时**不存在**，
+   * 所以不能只在挂载时跑一次 —— 依赖 `detail`，等数据到位、hero 进 DOM 的那一帧再量。
+   * `morphTriedRef` 保证一张卡只播一次（loading → error → retry 不会反复播）。
+   */
+  const detailRootRef = useRef<HTMLDivElement | null>(null)
+  const morphTriedRef = useRef(false)
+  useLayoutEffect(() => {
+    if (detail === undefined || morphTriedRef.current) return undefined
+    morphTriedRef.current = true
+    const done = (): void => { onMorphDone?.() }
+    if (morphFrom === undefined || morphFrom.name !== detail.name || prefersReducedMotion()) {
+      done()
+      return undefined
+    }
+    const hero = detailRootRef.current?.querySelector<HTMLElement>('.awu-detailHero [data-morph="avatar"]') ?? null
+    const animation = hero === null ? null : morphAvatar(morphFrom.rect, hero)
+    if (animation === null) done()
+    return () => {
+      // 换人/卸载时停掉：残留的 WAAPI 动画会跟着新节点跑（translate 到旧卡片的位置）
+      try { animation?.cancel() } catch { /* 已结束的动画 cancel 会抛，忽略 */ }
+      if (hero !== null) hero.removeAttribute('data-morphing')
+    }
+  }, [detail, morphFrom, onMorphDone])
 
   if (loading) return <Skeleton label={t('common.loading')} />
 
@@ -1817,7 +1684,7 @@ function CharacterDetailView(props: {
   const recentDiary = recentDiaryLines(detail.diary, DETAIL_DIARY_LINES)
 
   return (
-    <div className="awu-detail">
+    <div className="awu-detail" ref={detailRootRef}>
       {/*
         返回是一条独立的「导航」，不是「动作」：
         放在详情内容的左上角、单独一行，和启用/删除这类会改变状态的操作彻底分开。
@@ -2495,6 +2362,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [query, setQuery] = useState('')
   /** 正在淡出的卡名（删卡第 1 段；空串 = 没有在删）。 */
   const [deletingName, setDeletingName] = useState('')
+
+  /**
+   * 头像共享元素的「起点」与「回程起点」。
+   *
+   * 进向：点卡时立刻量卡片头像（那一刻列表还在，rect 才是真的）。
+   * 出向：返回时量 hero 头像，等详情卸载后让卡片头像从 hero 的位置收回来。
+   * 两处都用 state（不是 ref）：详情页要在首次渲染时就读到起点，ref 变更不会触发渲染。
+   */
+  const [morphFrom, setMorphFrom] = useState<{ name: string; rect: MorphRect } | undefined>(undefined)
+  const returnMorphRef = useRef<{ name: string; rect: MorphRect } | null>(null)
 
   const [dialog, setDialog] = useState<'' | PanelDialog>('')
   /**
@@ -3372,6 +3249,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const openCharacter = useCallback((name: string): void => {
     clearPopTimer()
+    // 共享元素的起点：必须在 setDetailName 之前量（那一刻卡片还在布局里）
+    const avatar = findCardAvatar(name)
+    setMorphFrom(avatar === null ? undefined : { name, rect: rectOf(avatar) })
     setDetailName(name)
     if (tab === 'stats' || tab === 'guide') setTab('roster')
     if (narrow) setNavState('push')
@@ -3390,11 +3270,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   /** 详情页「返回」：清掉选中对象再退回列表。 */
   const closeDetail = useCallback((): void => {
+    // 回程起点：返回那一刻 hero 还在，先量下来；真正播放要等详情卸载之后（见下面的 effect）
+    const hero = typeof document === 'undefined'
+      ? null
+      : document.querySelector<HTMLElement>('.awu-detailHero [data-morph="avatar"]')
+    returnMorphRef.current = hero === null || detailName === '' ? null : { name: detailName, rect: rectOf(hero) }
     setDetailName('')
     setDetail(undefined)
     setDetailError('')
     returnToList()
-  }, [returnToList])
+  }, [returnToList, detailName])
 
   /**
    * 切 tab。
@@ -3447,6 +3332,24 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       showNotice(t('detail.exportFailed', { reason: errorText(e) }), 'warn')
     }
   }, [detail, showNotice, t])
+
+  /**
+   * 出向共享元素：详情卸载后，让左栏那张卡的头像从 hero 的位置「缩回去」。
+   *
+   * 为什么放在 `detailName === ''` 之后：hero 节点已随详情卸载，量不到了；
+   * 起点在 `closeDetail` 里就存好了。窄屏下左栏是 visibility:hidden，播放看不见但也无害。
+   */
+  useEffect(() => {
+    if (detailName !== '') return undefined
+    const pending = returnMorphRef.current
+    if (pending === null) return undefined
+    returnMorphRef.current = null
+    if (prefersReducedMotion()) return undefined
+    const card = findCardAvatar(pending.name)
+    if (card === null) return undefined
+    const animation = morphAvatar(pending.rect, card)
+    return () => { try { animation?.cancel() } catch { /* 已结束 */ } }
+  }, [detailName])
 
   /** 详情页「最近日记」的出口：带着这位进日记 tab。 */
   const onOpenDiaryOf = useCallback((name: string): void => {
@@ -4176,6 +4079,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     onExport={onExportDetail}
                     onSwitchMode={() => openDialog('mode')}
                     onNextOpening={onNextOpening}
+                    morphFrom={morphFrom}
+                    onMorphDone={() => { setMorphFrom(undefined) }}
                   />
                 ) : (
                   /* 未选卡：给「往左看」的箭头指引 + 一个次级行动（C 报告 P2-6 / A5） */
