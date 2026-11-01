@@ -221,7 +221,7 @@ export interface PreviewSnapshot {
    *
    * 预设与角色卡**正交**：换角色不换预设，换预设不动角色。
    */
-  preset: { id: string; name: string; source: 'st' | 'custom'; moduleCount: number; enabledCount: number } | null
+  preset: { id: string; name: string; source: 'st' | 'custom'; moduleCount: number; enabledCount: number; chars: number } | null
   /**
    * 世界书命中快照。
    *
@@ -1166,8 +1166,10 @@ export class PromptController {
           id: presetTarget.preset.id,
           name: presetTarget.preset.name,
           source: presetTarget.preset.source,
+          // 计数与重量都从正文现算（Preset 里也有落盘值，这里以正文为准）
           moduleCount: presetStats(presetTarget.preset.modules).moduleCount,
           enabledCount: presetStats(presetTarget.preset.modules).enabledCount,
+          chars: presetTarget.preset.chars,
         },
       segments,
       total: segments.reduce((sum, item) => sum + item.chars, 0),

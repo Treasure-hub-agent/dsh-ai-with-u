@@ -1256,6 +1256,142 @@ section('19. 预设系统：CRUD / 上限 / 决议优先级 / 删预设不回落
   await restCall(routes, 'POST', '/preset/activate', { body: { scope: 'global' } })
 }
 
+// ---------------------------------------------------------------- 20. 预设重量 + 未知宏
+
+section('20. 预设重量（chars / 8000 阈值）与 ST 未知宏统计')
+{
+  const { pc } = await makePromptHost()
+  const routes = buildRoutes(store, pc)
+  const enabledText = '启用的模块正文（这段要计入 chars）'
+  const disabledText = '停用的模块正文（这段不该计入 chars）'
+
+  // ---- 1) chars 只算启用模块
+  const weighted = await store.savePreset({
+    name: '重量自检',
+    modules: [
+      { name: '开', content: enabledText, enabled: true },
+      { name: '关', content: disabledText, enabled: false },
+    ],
+  })
+  const expectChars = enabledText.length
+  // 直连 store 保存后要手动同步镜像（产品路径由 /preset/save 内部 reloadPresets）
+  await pc.reloadPresets()
+  check(weighted.chars === expectChars,
+    `chars = 启用模块字数之和（${weighted.chars} = ${expectChars}）`)
+  check(weighted.chars !== enabledText.length + disabledText.length, '停用模块不计入 chars')
+  check(weighted.moduleCount === 2 && weighted.enabledCount === 1, `计数：${weighted.moduleCount} 模块 / ${weighted.enabledCount} 启用`)
+  const reread = await store.readPreset(weighted.id)
+  check(reread?.chars === expectChars, '重新读盘后 chars 按正文重算（与落盘值一致）')
+  const fileOnDisk = JSON.parse(await readFile(join(sandbox, 'presets', `${weighted.id}.json`), 'utf8'))
+  check(fileOnDisk.chars === expectChars && fileOnDisk.moduleCount === 2 && fileOnDisk.enabledCount === 1,
+    `预设文件里落了 chars/moduleCount/enabledCount：${JSON.stringify({ chars: fileOnDisk.chars, m: fileOnDisk.moduleCount, e: fileOnDisk.enabledCount })}`)
+  const indexOnDisk = JSON.parse(await readFile(join(sandbox, '_presets.json'), 'utf8'))
+  check(indexOnDisk.presets.find(p => p.id === weighted.id)?.chars === expectChars, '索引项里也带 chars')
+
+  // ---- 2) /presets 列表每项带 chars
+  const listRes = await restCall(routes, 'GET', '/presets')
+  const listed = (listRes.body?.presets ?? []).find(p => p.id === weighted.id)
+  check(listed?.chars === expectChars, `GET /presets 每项带 chars（${String(listed?.chars)}）`)
+
+  // ---- 3) 未超阈值 → activate 无「占用约」警告；超阈值 → 有（含 8000 与具体字符数）
+  const normal = await restCall(routes, 'POST', '/preset/activate', { body: { id: weighted.id, scope: 'global' } })
+  check(normal.status === 200 && normal.body?.chars === expectChars, `activate 返回 chars（${String(normal.body?.chars)}）`)
+  check(Array.isArray(normal.body?.warnings) && !normal.body.warnings.some(w => String(w).includes('占用约')),
+    '未超阈值时没有「占用约 N 字符」警告')
+
+  const heavyText = '重'.repeat(8001)
+  const heavy = await store.savePreset({ name: '超重预设', modules: [{ name: '大块', content: heavyText, enabled: true }] })
+  await pc.reloadPresets()
+  const heavyRes = await restCall(routes, 'POST', '/preset/activate', { body: { id: heavy.id, scope: 'global' } })
+  const heavyWarn = (heavyRes.body?.warnings ?? []).find(w => String(w).includes('占用约'))
+  check(heavyWarn !== undefined, `超 8000 阈值给警告：${String(heavyWarn)}`)
+  check(String(heavyWarn).includes(String(heavy.chars)) && String(heavyWarn).includes('8000'),
+    '警告文案含实际字符数与阈值 8000')
+  // save 也回 chars
+  const saveRes = await restCall(routes, 'POST', '/preset/save', {
+    body: { name: '保存回 chars', modules: [{ name: '一', content: '一二三', enabled: true }] },
+  })
+  check(saveRes.body?.chars === 3, `POST /preset/save 返回 chars（${String(saveRes.body?.chars)}）`)
+
+  // ---- 4) /overview.preset.current 带 chars
+  const overview = await restCall(routes, 'GET', '/overview')
+  check(overview.body?.preset?.current?.chars === heavy.chars,
+    `overview.preset.current.chars = ${String(overview.body?.preset?.current?.chars)}`)
+
+  // ---- 5) 未知宏：{{char}} 白名单不误报；{{persona}}/{{original}} 计数并告警
+  const macroImport = await restCall(routes, 'POST', '/preset/import', {
+    body: {
+      name: '宏自检',
+      json: {
+        prompts: [
+          {
+            identifier: 'm1',
+            name: '机制',
+            role: 'system',
+            content: '{{char}} 看着 {{user}}，{{random:甲,乙}} 与 {{roll:6}}；{{persona}} 和 {{original}}；再看一次 {{persona}}',
+          },
+        ],
+        prompt_order: [{ order: [{ identifier: 'm1', enabled: true }] }],
+      },
+    },
+  })
+  check(macroImport.status === 200, `导入宏自检预设 → ${macroImport.status}`)
+  const macros = macroImport.body?.unsupportedMacros ?? {}
+  check(macros['persona'] === 2 && macros['original'] === 1,
+    `unsupportedMacros 计数正确：${JSON.stringify(macros)}`)
+  check(macros['char'] === undefined && macros['user'] === undefined
+    && macros['random'] === undefined && macros['roll'] === undefined,
+  '白名单宏（char/user/random/roll）不被误报')
+  // 白名单要**逐个对上 expandMacros 的真实分支**（2026-11-01 实测，不是凭印象）：
+  //   · trim / setvar / getvar / newline 确实没实现 → 必须报
+  //   · {{Roll:6}} 能展开（roll 正则带 i）→ 不能报；{{CHAR}} 不展开（只认小写）→ 必须报
+  //   · {{random}} / {{roll}} 不带参数 → 不展开 → 必须报（避免"面板说能展开、实际注入原文"的假绿）
+  const edgeImport = await restCall(routes, 'POST', '/preset/import', {
+    body: {
+      name: '宏边界',
+      json: {
+        prompts: [{
+          identifier: 'm2',
+          name: '边界',
+          role: 'system',
+          // 正文要有实词：ST 转换器会把「只有宏、剥完没字」的条目当空内容丢掉
+          content: '规则：{{trim}} {{setvar::x::y}} {{getvar::x}} {{newline}} {{Roll:6}} {{CHAR}} {{random}} {{roll}} 结束。',
+        }],
+        prompt_order: [{ order: [{ identifier: 'm2', enabled: true }] }],
+      },
+    },
+  })
+  const edgeMacros = edgeImport.body?.unsupportedMacros ?? {}
+  check(['trim', 'setvar', 'getvar', 'newline'].every(name => edgeMacros[name] === 1),
+    `未实现的 ST 宏如实上报（trim/setvar/getvar/newline）：${JSON.stringify(edgeMacros)}`)
+  check(edgeMacros['Roll'] === undefined, '{{Roll:6}} 实际能展开（roll 正则带 i）→ 不误报')
+  check(edgeMacros['CHAR'] === 1, '{{CHAR}} 实际不展开（SIMPLE_MACRO 只认小写）→ 如实上报')
+  check(edgeMacros['random'] === 1 && edgeMacros['roll'] === 1,
+    '无参数的 {{random}} / {{roll}} 实际不展开 → 如实上报（避免假绿）')
+  const macroWarn = (macroImport.body?.warnings ?? []).find(w => String(w).includes('无法展开'))
+  check(macroWarn !== undefined, `未知宏汇总告警：${String(macroWarn)}`)
+  check(String(macroWarn).includes('×2') && String(macroWarn).includes('{{persona}}') && String(macroWarn).includes('×1'),
+    '告警含「×N」计数与前缀宏名')
+  check(String(macroWarn).includes('以原文进入提示词'), '告警说明它们会以原文进入提示词')
+  // 不自动删改：正文里两个宏都还在
+  const importedContent = macroImport.body?.preset?.modules?.[0]?.content ?? ''
+  check(importedContent.includes('{{persona}}') && importedContent.includes('{{original}}'),
+    '未知宏**原样保留**在正文里（没有自动删/替换）')
+  // 而 {{char}} 渲染时展开、{{persona}} 原样出现在段里
+  await restCall(routes, 'POST', '/preset/activate', { body: { id: macroImport.body.preset.id, scope: 'global' } })
+  const segText = await restCall(routes, 'GET', '/preview')
+  const presetSeg = (segText.body?.segments ?? []).find(s => s.id === 'aiwu:preset')
+  check((presetSeg?.text ?? '').includes(NAME) && !(presetSeg?.text ?? '').includes('{{char}}'),
+    '段里 {{char}} 已展开成角色名')
+  check((presetSeg?.text ?? '').includes('{{persona}}'), '段里 {{persona}} 原样保留（行为可预测）')
+  const previewPreset = segText.body?.preset
+  check(previewPreset?.chars === macroImport.body.preset.chars,
+    `preview.preset.chars = ${String(previewPreset?.chars)}`)
+
+  // 收尾：解除全局预设
+  await restCall(routes, 'POST', '/preset/activate', { body: { scope: 'global' } })
+}
+
 // ---------------------------------------------------------------- 清理
 
 await rm(sandbox, { recursive: true, force: true })

@@ -3147,6 +3147,57 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-presetUseBtns { display: flex; flex-wrap: wrap; gap: var(--awu-gap-3); }
+/* 预设体积：列表行「约 N 字符」+ 编辑页「启用后约 M 字符/轮」；超参考线转警示色并挂「重」 */
+.awu-presetChars { white-space: nowrap; }
+.awu-presetChars[data-heavy="true"] { color: var(--awu-gold); }
+
+.awu-presetHeavy {
+  margin-left: var(--awu-gap-2);
+  padding: 0 var(--awu-gap-2);
+  border-radius: var(--awu-r-xs);
+  background: color-mix(in srgb, var(--awu-gold) 18%, transparent);
+  color: var(--awu-gold);
+  font-style: normal;
+  font-size: var(--awu-fs-micro);
+  font-weight: 600;
+}
+
+.awu-presetWeight {
+  margin-top: var(--awu-gap-3);
+  font-family: var(--awu-mono);
+  font-size: var(--awu-fs-caption);
+  color: var(--awu-ink-mute);
+}
+
+.awu-presetWeight[data-heavy="true"] { color: var(--awu-gold); }
+
+/* 启用前的重量确认：**内联一行**（不是全屏弹层），问完就地给两个按钮 */
+.awu-presetHeavyConfirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--awu-gap-3);
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid color-mix(in srgb, var(--awu-gold) 45%, transparent);
+  border-radius: var(--awu-r-md);
+  background: color-mix(in srgb, var(--awu-gold) 10%, transparent);
+  animation: awu-fade var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-presetHeavyText {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: var(--awu-fs-label);
+  line-height: var(--awu-lh-body);
+  color: var(--awu-ink-dim);
+}
+
+.awu-presetHeavyActions { display: flex; gap: var(--awu-gap-3); margin-left: auto; }
+
+/* 列表行允许换行：加体积后一行放不下（rail 只有 340px） */
+.awu-presetRow { flex-wrap: wrap; row-gap: var(--awu-gap-2); }
+.awu-presetRow .awu-presetMeta { flex: 1 1 100%; white-space: normal; }
+
 
 /* 模块列表 */
 .awu-presetModules { display: flex; flex-direction: column; gap: var(--awu-gap-4); }

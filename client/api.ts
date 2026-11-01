@@ -235,6 +235,13 @@ export interface PresetSummary {
   source: string
   moduleCount: number
   enabledCount: number
+  /**
+   * 启用后的注入体积（字符/轮，只算 enabled 模块）。
+   *
+   * 宿主新字段（N1 加）。缺省 = 宿主还没升级 → 面板**不显示体积**，也不做重量提示，
+   * 绝不自己拿模块数瞎估。
+   */
+  chars?: number
   updatedAt?: string
 }
 
@@ -244,6 +251,8 @@ export interface PresetDetail {
   name: string
   source: string
   modules: PresetModule[]
+  /** 启用后的注入体积（字符/轮）；宿主没给时面板按 enabled 口径本地算（见 preset-view） */
+  chars?: number
 }
 
 /** 启用态：`global` + 每个会话各自的绑定（会话 > 全局 > 无）。 */
@@ -273,6 +282,13 @@ export interface PresetImportResult {
   warnings?: string[]
   /** 被丢弃的条目（结构占位 / 废稿 / SPreset 块…），带原因 */
   dropped?: Array<{ name?: string; reason?: string }>
+  /**
+   * 无法展开的 ST 变量（`{{persona}}` / `{{original}}`…）→ 出现次数。
+   *
+   * 这些会**以原文进提示词**（宿主只展开 `{{char}}` / `{{user}}` / random / roll / 注释）。
+   * 宿主新字段（N1 加）；缺省时面板用本地扫描结果兜底展示。
+   */
+  unsupportedMacros?: Record<string, number>
 }
 
 /** `overview.preset`：当前会话实际生效的预设。 */
@@ -295,8 +311,17 @@ export function fetchPreset(id: string): Promise<PresetDetailResult> {
 }
 
 /** 保存（新建 / 覆盖）。`id` 缺省时由宿主生成。 */
-export function savePreset(input: { id?: string; name: string; modules: PresetModule[] }): Promise<{ ok: true; preset: PresetDetail }> {
-  return post<{ ok: true; preset: PresetDetail }>(ROUTES.presetSave, input)
+export interface PresetSaveResult {
+  ok: true
+  preset: PresetDetail
+  /** 启用后的注入体积（字符/轮）；老宿主没有 */
+  chars?: number
+  /** 宿主的软提示（例如「所有模块都关着，启用后不会注入」），面板原样展示 */
+  warnings?: string[]
+}
+
+export function savePreset(input: { id?: string; name: string; modules: PresetModule[] }): Promise<PresetSaveResult> {
+  return post<PresetSaveResult>(ROUTES.presetSave, input)
 }
 
 /** 删除预设；`prunedSessions` = 顺带清掉的会话启用数（宿主会把悬空引用一起剪掉）。 */
@@ -321,12 +346,24 @@ export function importPreset(json: unknown): Promise<PresetImportResult> {
  * - `scope: 'global'`：所有未绑定预设的会话都用它；
  * - 不带 `id`：清掉该作用域上的预设（=「不使用」）。
  */
+export interface PresetActivateResult {
+  ok: true
+  active: PresetActiveState
+  /** 启用后的注入体积（字符/轮）；老宿主没有 */
+  chars?: number
+  /**
+   * 宿主的重量提示（单一真源）：`chars` 超阈值时宿主会在这里给一句带数字的话。
+   * 面板负责原样展示，不自己拼数字。
+   */
+  warnings?: string[]
+}
+
 export function activatePreset(input: {
   id?: string
   scope: 'session' | 'global'
   sessionId?: string
-}): Promise<{ ok: true; active: PresetActiveState }> {
-  return post<{ ok: true; active: PresetActiveState }>(ROUTES.presetActivate, input)
+}): Promise<PresetActivateResult> {
+  return post<PresetActivateResult>(ROUTES.presetActivate, input)
 }
 
 export interface DiaryEntry {

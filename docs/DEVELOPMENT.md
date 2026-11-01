@@ -520,7 +520,7 @@ npm run verify:host    # 真实 cordis 宿主验证（55 项）
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
 
 > **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **998 项**（截至绑定 dead 修复轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> 九套合计 **1025 项**（截至预设重量/宏口径轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
 
 ### 安装到 DSH（desktop profile）
 

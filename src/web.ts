@@ -20,6 +20,7 @@ import { distillFlowInfo } from './distill.js'
 import { parseCardBuffer } from './import-card.js'
 import { normalizeCard, cardName, collectCardWarnings, toLegacyView } from './tavern.js'
 import { convertStPreset } from './preset.js'
+import { heavyPresetWarning } from './preset.js'
 
 export const ROUTE_PREFIX = '/_dsh/ai-with-u'
 
@@ -281,7 +282,12 @@ export function buildRoutes(
             active: presetSnapshot.active,
             current: presetTarget.preset === undefined
               ? null
-              : { id: presetTarget.preset.id, name: presetTarget.preset.name },
+              : {
+                id: presetTarget.preset.id,
+                name: presetTarget.preset.name,
+                // 当前生效预设的重量（启用模块合计字符数）：面板要能显示"这一轮多贵"
+                chars: presetTarget.preset.chars,
+              },
             source: presetTarget.source,
           },
         })
@@ -391,11 +397,16 @@ export function buildRoutes(
         })
         await prompt.reloadPresets()
         prompt.invalidate()
-        const stats = { moduleCount: preset.modules.length, enabledCount: preset.modules.filter(m => m.enabled !== false).length }
+        // 保存后就把重量告诉面板（编辑时实时显示）；超阈值也给同一条中文警告
+        const warnings: string[] = []
+        if (preset.enabledCount === 0) warnings.push('这份预设的所有模块都是关闭状态，启用后不会注入任何内容')
+        const heavy = heavyPresetWarning(preset.chars)
+        if (heavy !== undefined) warnings.push(heavy)
         send(res, 200, {
           ok: true,
           preset,
-          warnings: stats.enabledCount === 0 ? ['这份预设的所有模块都是关闭状态，启用后不会注入任何内容'] : [],
+          chars: preset.chars,
+          warnings,
         })
       }),
     },
@@ -433,8 +444,11 @@ export function buildRoutes(
         send(res, 200, {
           ok: true,
           preset,
+          chars: preset.chars,
           warnings: converted.warnings,
           dropped: converted.dropped,
+          // 我们展开不了的 ST 变量（宏名 → 次数）；正文原样保留，不删不改
+          unsupportedMacros: converted.unsupportedMacros,
         })
       }),
     },
@@ -457,7 +471,13 @@ export function buildRoutes(
         await prompt.reloadPresets()
         prompt.invalidate()
         // 该会话的预览/面板会立刻反映；容器层的缓存不受影响（预设段本身不进 L1 缓存）
-        send(res, 200, { ok: true, active })
+        // 重量在这里一并回给面板：**启用前**就要知道它会占多少字符/轮（真机实测 24913 字符那种事）
+        const resolved = prompt.resolvePreset(scope === 'session' ? sessionId : undefined)
+        const chars = resolved.preset?.chars ?? 0
+        const warnings: string[] = []
+        const heavy = heavyPresetWarning(chars)
+        if (heavy !== undefined) warnings.push(heavy)
+        send(res, 200, { ok: true, active, chars, warnings })
       }),
     },
     // ------------------------------------------------------------ 角色列表

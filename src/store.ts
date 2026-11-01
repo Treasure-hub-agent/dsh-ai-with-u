@@ -1550,6 +1550,8 @@ export class Store {
         source: item['source'] === 'st' ? 'st' : 'custom',
         moduleCount: Number(item['moduleCount'] ?? 0) || 0,
         enabledCount: Number(item['enabledCount'] ?? 0) || 0,
+        // 旧索引没有 chars：按 0 处理（读到正文时会重算，不会一直错下去）
+        chars: Number(item['chars'] ?? 0) || 0,
         updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : '',
       })
     }
@@ -1578,6 +1580,8 @@ export class Store {
       })
     }
     const name = typeof raw['name'] === 'string' && raw['name'].trim() !== '' ? raw['name'].trim() : id
+    // chars / 计数一律**按正文重算**，不信任文件里的旧值（模块被手改过也不会显示错数）
+    const stats = presetStats(modules)
     return {
       version: PRESET_VERSION,
       id,
@@ -1586,6 +1590,9 @@ export class Store {
       createdAt: typeof raw['createdAt'] === 'string' ? raw['createdAt'] : localIsoTimestamp(),
       updatedAt: typeof raw['updatedAt'] === 'string' ? raw['updatedAt'] : localIsoTimestamp(),
       modules,
+      chars: stats.chars,
+      moduleCount: stats.moduleCount,
+      enabledCount: stats.enabledCount,
     }
   }
 
@@ -1650,6 +1657,7 @@ export class Store {
       }
       const id = requestedId !== '' ? requestedId : newPresetId(index.presets.map(item => item.id))
       const now = localIsoTimestamp()
+      const stats = presetStats(valid.modules)
       const preset: Preset = {
         version: PRESET_VERSION,
         id,
@@ -1658,14 +1666,18 @@ export class Store {
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
         modules: valid.modules,
+        // 重量随正文一起落盘：列表页/面板不必打开文件就能显示「这个预设有多重」
+        chars: stats.chars,
+        moduleCount: stats.moduleCount,
+        enabledCount: stats.enabledCount,
       }
-      const stats = presetStats(preset.modules)
       const entry: PresetIndexEntry = {
         id,
         name: preset.name,
         source: preset.source,
         moduleCount: stats.moduleCount,
         enabledCount: stats.enabledCount,
+        chars: stats.chars,
         updatedAt: now,
       }
       await atomicWrite(this.presetPath(id), `${JSON.stringify(preset, null, 2)}\n`)

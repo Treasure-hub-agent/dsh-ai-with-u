@@ -31,6 +31,110 @@ export interface PresetModule {
   enabled: boolean
 }
 
+/**
+ * 「这个预设偏重」的阈值（**单一真源**）：启用模块的正文合计超过它就给中文警告。
+ *
+ * 为什么是 8000：真机实测 TLD 那份 9 模块 / 7 启用 → 段文本 24913 字符，叠上角色卡就是单轮 3.6 万字；
+ * 用户在**启用之前**完全不知道。8000 大致是「明显能感觉到贵、但还不算离谱」的分界。
+ */
+export const PRESET_HEAVY_CHARS = 8000
+
+/**
+ * 我们**能展开**的宏名（白名单，**逐个对上 `tavern.expandMacros` 的真实分支**，不含"应该有"的想象）。
+ *
+ * 依据（2026-11-01 实测 `expandMacros`，不是凭印象）：
+ *   - `{{char}}` / `{{user}}` —— `SIMPLE_MACRO`，**只认小写**（`{{CHAR}}` 不会被展开，会原样留下）；
+ *   - `{{random:A,B}}` / `{{pick:A,B}}` —— `LIST_MACRO`，**必须带参数**（`{{random}}` 不展开）；
+ *   - `{{roll:N}}` / `{{roll:1dN}}` —— `ROLL_MACRO`，**大小写不敏感**（`{{Roll:6}}` 也能展开）；
+ *   - 注释 `{{// …}}` / `{{comment: …}}` —— `COMMENT_MACRO`（`comment` 必须带冒号、只认小写）。
+ *
+ * ⚠️ 明确**不支持**（导入时报进 `unsupportedMacros`，正文原样保留）：
+ * `{{trim}}` / `{{setvar::…}}` / `{{getvar::…}}` / `{{newline}}` / `{{persona}}` / `{{original}}` /
+ * `{{charIfNotGroup}}` / `{{description}}` 等 ST 专有变量。
+ * 不"顺手实现"它们：`trim` 在 ST 里是「裁掉上一段末尾的换行」（不是普通字符串 trim），
+ * `setvar/getvar` 依赖 ST 的变量作用域——猜一个语义只会让两端行为对不上（假绿）。
+ */
+export const EXPANDABLE_MACROS: readonly string[] = ['char', 'user', 'random', 'pick', 'roll', 'comment', '//']
+
+/** 宏扫描结果：宏名 → 出现次数（按次数降序、同次数按名字排序，输出稳定）。 */
+export type UnsupportedMacroCounts = Record<string, number>
+
+/** `{{…}}` 的通用提取（不含花括号，两侧空白剥掉）。 */
+const MACRO_RE = /\{\{\s*([^{}]*?)\s*\}\}/gu
+
+/** 从 `{{xxx:yyy}}` 里取宏名（`xxx`；注释类 `//` 原样当名字）。 */
+function macroNameOf(body: string): string {
+  if (body.startsWith('//')) return '//'
+  const match = /^([A-Za-z_][\w-]*)/u.exec(body.trim())
+  return match?.[1] ?? ''
+}
+
+/**
+ * 这一个 `{{…}}` 会不会真的被展开（**逐条对齐 `expandMacros` 的正则**）。
+ *
+ * 为什么要精确到"是否带参数 / 大小写"：只按宏名放行会让 `{{random}}`（无参数）、
+ * `{{CHAR}}`（大写）这类**实际原样注入**的宏被当成"已知"，面板就会说"能展开"——那是假绿。
+ */
+function isExpandableMacro(name: string, body: string): boolean {
+  if (body.startsWith('//')) return true
+  switch (name) {
+    // 只认小写、无参数
+    case 'char':
+    case 'user':
+      return true
+    // 必须带参数（LIST_MACRO 要求 `:`）
+    case 'random':
+    case 'pick':
+      return body.includes(':')
+    // 注释：必须带冒号
+    case 'comment':
+      return /^comment\s*:/u.test(body)
+    default:
+      // roll 的正则带 i 标志：大小写都算，但必须是 `roll:N` / `roll:1dN`
+      return /^roll\s*:\s*(?:1?d)?\d+$/iu.test(body)
+  }
+}
+
+/**
+ * 扫描一批模块正文里的 `{{…}}`，返回**我们展开不了**的宏及其出现次数。
+ *
+ * 只统计、不改正文：这些宏会以原文进提示词（行为可预测，用户自己决定要不要留）。
+ */
+export function scanUnsupportedMacros(modules: readonly PresetModule[]): UnsupportedMacroCounts {
+  const counts = new Map<string, number>()
+  for (const module of modules) {
+    const text = typeof module?.content === 'string' ? module.content : ''
+    if (text === '') continue
+    for (const match of text.matchAll(MACRO_RE)) {
+      const body = match[1] ?? ''
+      const name = macroNameOf(body)
+      // 取不到名字（如 `{{}}` / `{{  }}`）不算宏，跳过，避免造出 `''` 这种脏键
+      if (name === '' || isExpandableMacro(name, body)) continue
+      counts.set(name, (counts.get(name) ?? 0) + 1)
+    }
+  }
+  const out: UnsupportedMacroCounts = {}
+  for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+    out[name] = count
+  }
+  return out
+}
+
+/** 未知宏的汇总告警（**一条**，含总量与前 5 个），没有未知宏时返回 undefined。 */
+export function unsupportedMacrosWarning(counts: UnsupportedMacroCounts): string | undefined {
+  const entries = Object.entries(counts)
+  if (entries.length === 0) return undefined
+  const total = entries.reduce((sum, [, count]) => sum + count, 0)
+  const sample = entries.slice(0, 5).map(([name, count]) => `{{${name}}} ×${count}`).join('、')
+  return `${total} 处 ST 变量无法展开（前 5 个：${sample}${entries.length > 5 ? ' 等' : ''}），它们会以原文进入提示词`
+}
+
+/** 「预设偏重」的告警文案；没超过阈值返回 undefined（启用/保存时展示）。 */
+export function heavyPresetWarning(chars: number): string | undefined {
+  if (!Number.isFinite(chars) || chars <= PRESET_HEAVY_CHARS) return undefined
+  return `这个预设启用后会占用约 ${chars} 字符/轮（超过建议的 ${PRESET_HEAVY_CHARS}），会明显抬高 token 成本`
+}
+
 /** 来源：`st` = 从 SillyTavern / dsh-tavern 预设导入，`custom` = 面板自建。 */
 export type PresetSource = 'st' | 'custom'
 
@@ -43,6 +147,10 @@ export interface Preset {
   createdAt: string
   updatedAt: string
   modules: PresetModule[]
+  /** 启用模块的正文合计（`String.length`）——「这个预设有多重」的唯一口径。 */
+  chars: number
+  moduleCount: number
+  enabledCount: number
 }
 
 /** `_presets.json` 索引项（列表页只读它，不必打开每个文件）。 */
@@ -52,6 +160,8 @@ export interface PresetIndexEntry {
   source: PresetSource
   moduleCount: number
   enabledCount: number
+  /** 启用模块的正文合计（字符）；旧索引里没有时按 0 处理，读到正文后可重算。 */
+  chars: number
   updatedAt: string
 }
 
@@ -240,6 +350,8 @@ export interface ConvertedPreset {
   modules: PresetModule[]
   warnings: string[]
   dropped: DroppedPresetEntry[]
+  /** 我们展开不了的 ST 变量（宏名 → 次数）；正文原样保留，不删不改。 */
+  unsupportedMacros: UnsupportedMacroCounts
 }
 
 export interface ConvertFailure {
@@ -388,7 +500,12 @@ export function convertStPreset(json: unknown, options: { name?: string } = {}):
     warnings.push(`丢弃 ${dropped.length} 条：${preview}${dropped.length > 8 ? ' 等' : ''}`)
   }
 
+  // ST 专有变量：只统计 + 告警，正文原样保留（行为可预测；用户自己能决定要不要留）
+  const unsupportedMacros = scanUnsupportedMacros(modules)
+  const macroWarning = unsupportedMacrosWarning(unsupportedMacros)
+  if (macroWarning !== undefined) warnings.push(macroWarning)
+
   const fallbackName = String(record['name'] ?? record['title'] ?? '').trim()
   const name = String(options.name ?? '').trim() || fallbackName || 'ST 预设'
-  return { ok: true, name, modules, warnings, dropped }
+  return { ok: true, name, modules, warnings, dropped, unsupportedMacros }
 }
