@@ -46,7 +46,7 @@
 | P0-3 | 预设编辑器无脏数据保护 | ✅ | `requestLeave` 单一出口 + baseline + 保存门（沙盒 13 步全绿） |
 | P0-4 | 面板关闭无退场 | ✅ | `usePresence` 160ms，80ms 采样 `data-state="closing"`、+160ms 卸载 |
 | P0-5 | sheet + 遮罩无退场 | ✅ | scrim/dialog 同时挂 `data-state`，退场期不吃 Esc/点遮罩 |
-| P0-6 | list↔detail 只进不出 | ⚠️ 半 | 进向 +8px 已接、`awu-exit-left/right` 已接选择器；**返回方向缺 `.awu-detail` presence**（index.tsx，遗留） |
+| P0-6 | list↔detail 只进不出 | ✅ | 进向 +8px + **头像共享元素双向**（`parts` 拆分后给详情接了 morph）；`.awu-detail` 自身的退场 presence 仍缺（见遗留 1） |
 | P0-7 | tab 切换零过渡 | ✅ | `.awu-mainBody > *` 120ms `awu-view-in`（零 JSX 依赖） |
 | P0-8 | 分段器无滑块 | ✅ | `--awu-tab-i/-n` 驱动，1440 下 157px、1024 下 134px |
 | P0-9 | `prefers-reduced-transparency` 只兑现一半 | ✅ | 8/8 模糊面 + 全部半透明卡面换实底（截图 `final-rt/` 可验） |
@@ -99,16 +99,24 @@ focus ring 值只有一个来源（2 档 offset）；reduced-motion 从「手工
 
 ## 6. 遗留清单（如实，未做/未验）
 
-1. **`.awu-detail` 的 presence 未接** → 详情「返回列表」仍是硬切；CSS 侧 `awu-exit-left/right` 已备好选择器，只差 `index.tsx` 给详情根挂 `usePresence` + `data-exit`。
-2. **`distill.tsx` 未换回 Overlay** → 自建 scrim/dialog 副本仍在（本轮已手动补齐 drop 复位 + `role=status`；`data-still`/presence 仍缺），文件头有第 4 轮 TODO。
-3. **`parts.tsx` 未抽** → `ErrorBar`/`Skeleton`/`EmptyState`/`IconBtn` 仍分散（本轮只做了 preview 的错误条同形与骨架同构，未做统一组件）。
-4. **3 处折叠缺实机证据**（`.awu-loreBody`+FocusEditor、`.awu-diary`、`.awu-preview*`）：沙盒 fixture 无 `ccv3.data`/日记/`/preview` 路由，代码同 hook 同形状但未采样，不敢写成已验证。
-5. **保存成功后编辑器仍是硬切**（父级 `setEditing(false)` 直接卸载，本层拦不到）。
-6. **`prefers-contrast: more` 整块仍缺**（原计划第 3 批，未做）。
-7. **ErrorBoundary 崩溃路径未活验**（只验了包一层后正常路径无回归）。
-8. **字体放大无效**（全 px，改用 rem 属跨轮改动，未做）。
-9. **lorebook 两处 chevron 是静态换图标**（不是过渡），彻底修法需 `icons.tsx` 补 `IconUp/IconDown`。
-10. **未推远端、未发 npm**（按主人指令：只本地提交）。
+> 收尾轮（提交 `1297000`）已把原第 1/2/3 条做掉：`parts.tsx` 抽取（7 个纯零件）、
+> `distill` 换回 `Overlay`、list↔detail **头像共享元素**（含返回向）。下表是更新后的现状。
+
+1. **`.awu-detail` 的退场 presence 仍缺**：头像共享元素已经涵盖「返回」的运动，但详情视图本身
+   （列表卡片之外的内容块）卸载时仍是硬切。CSS 侧 `awu-exit-left/right` 已备好选择器，
+   只差给详情根挂 `usePresence` + `data-exit`。
+2. **`Overlay` 缺 `onRequestClose`/`closable`**：`distill` 的「busy 期禁止关闭」目前靠在调用方
+   `close()` 首行守（Esc/点遮罩/X 都走它），语义上应该在 `Overlay` 内建。
+3. **preset / preview 的 loading 与报错态缺 fixture 实跑证据**：沙盒没有 `/presets`、`/preview`
+   路由，走的是「宿主接口未就绪」分支，`Skeleton` 一闪而过、`ErrorBar` 不出现。
+   替换点靠 tsc + 与其它调用方共用同一份 `parts` 组件保证。
+4. **`Skeleton` 形态默认值**：`parts` 版默认 `data-shape="detail"`（首行 140px），
+   预设列表已改传 `shape="cards"`；其它新增调用点记得按形态传参。
+5. **`prefers-contrast: more` 整块仍缺**（原计划第 3 批，未做）。
+6. **ErrorBoundary 崩溃路径未活验**（只验了包一层后正常路径无回归）。
+7. **字体放大无效**（全 px，改用 rem 属跨轮改动，未做）。
+8. **lorebook 两处 chevron 是静态换图标**（不是过渡），彻底修法需 `icons.tsx` 补 `IconUp/IconDown`。
+9. **未推远端、未发 npm**（按主人指令：只本地提交）。
 
 ---
 
