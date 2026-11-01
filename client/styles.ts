@@ -57,7 +57,10 @@ const CSS = `
      2026-10-30 主人第二次反馈「没啥液态玻璃感觉、偏白偏实」：面板底从 .72 降到 .58，
      卡片反而比底更实（.34 → 更亮），靠「底更透、层更实」拉开深度；sheen 是顶部高光强度，
      edge 是玻璃边缘的 1px 亮边 —— 这两样是玻璃在平背景上也认得出的关键。 */
-  --awu-glass-1: rgba(20, 20, 24, .66);
+  /* 2026-11-02（W1-C）：面板底 .66→.70。理由是两栏骨架落地后，右栏内容直接压在面板底上，
+     太透时正文的第一行会被壁纸"顶"起来（对比度抖动）；抬高 4% 只损失一点通透感，
+     换的是 1000px 宽正文的稳定底色。卡片/浮起层不动，深度仍然靠"底透、层实"拉开。 */
+  --awu-glass-1: rgba(20, 20, 24, .70);
   --awu-glass-2: rgba(72, 72, 82, .44);
   /* 卡面 hover 档：只提亮一档（把灰蓝往白推），不叠加灰罩 */
   --awu-glass-2-hi: rgba(98, 98, 112, .52);
@@ -66,9 +69,13 @@ const CSS = `
   --awu-shadow-card-hi: 0 14px 34px rgba(0, 0, 0, .42);
   --awu-sheen: rgba(255, 255, 255, .13);
   --awu-glass-edge: rgba(255, 255, 255, .20);
-  /* 大面积（面板底）用轻 blur；强 blur 只留给小面积元素（卡片/按钮/弹层内容），否则 1120×900 会掉帧 */
-  --awu-blur-panel: blur(20px) saturate(150%);
+  /* 大面积（面板底）用轻 blur；强 blur 只留给小面积元素（卡片/按钮/弹层内容），否则 1120×900 会掉帧。
+     saturate 150%→138%：面板底下垫的多是灰蓝壁纸，1.5 倍饱和会把整块玻璃往蓝紫推，
+     正文的黑白层次反而被压平；138% 是"有玻璃感但不抢色"的临界值。 */
+  --awu-blur-panel: blur(20px) saturate(138%);
   --awu-blur: blur(30px) saturate(180%);
+  /* 遮罩档：只糊字不磨砂。全视口遮罩上 6px 与 30px 的观感差别很小，成本差 5 倍。 */
+  --awu-blur-sm: blur(6px);
   --awu-specular: inset 0 1px 0 rgba(255, 255, 255, .20);
   --awu-scrim-bg: rgba(0, 0, 0, .36);
   /* 降级用：prefers-reduced-transparency 时把玻璃换成实心底，必须有这一档，
@@ -88,9 +95,11 @@ const CSS = `
   --awu-surface-2: var(--awu-glass-2);
   --awu-surface-3: var(--awu-glass-3);
   --awu-surface-field: rgba(0, 0, 0, .22);
-  --awu-surface-strip: transparent;
-  --awu-surface-foot: rgba(28, 28, 30, .55);
-  --awu-surface-dialog: rgba(30, 30, 32, .86);
+  /* 左栏底：W1-C 起从 transparent 改为"一档微暗"，rail 因此比 main 低半层（凹陷） */
+  --awu-surface-strip: rgba(0, 0, 0, .12);
+  /* 弹层底 .86→.72：sheet 是"浮在面板之上"的托盘，太实会像另一块面板；
+     72% + 30px 模糊 + 顶部 sheen 才有"玻璃托盘"的层次。 */
+  --awu-surface-dialog: rgba(30, 30, 32, .72);
 
   /* ---- 强调：iOS 系统蓝。三档分工 ----
      accent        = 非文字装饰（辉光、描边、选中底）
@@ -103,16 +112,16 @@ const CSS = `
 
   /* ---- 角色专属色：旧暖金降级到这里，只出现在头像/角色名/启用态辉光 ---- */
   --awu-gold: #e8c07a;                         /*  8.13:1 */
-  --awu-gold-hi: #ffd89b;                      /* 10.32:1 */
   --awu-on-character: #2b1d0a;                 /* 角色色底上的字（对 gold 9.55:1） */
   --awu-grad: linear-gradient(135deg, #ffd89b 0%, #e8c07a 52%, #e58a78 100%);
-  --awu-grad-soft: linear-gradient(135deg, rgba(255, 216, 148, .18), rgba(229, 138, 120, .14));
+  /* 角色色块（头像/徽标）的立体投影：单独一个 token，因为它压在渐变上、
+     深浅两态的强度不一样（深色要压住，浅色要收着），和卡片的 elevation 不是一回事。 */
+  --awu-shadow-glyph: inset 0 1px 0 rgba(255, 255, 255, .45), 0 2px 8px rgba(0, 0, 0, .18);
 
   /* ---- 语义色 ---- */
   --awu-teal: #30d158;                         /*  6.89:1 成功 */
   --awu-danger: #ff6b61;                       /*  5.00:1 */
   --awu-rose: #e58a78;                         /*  5.47:1 */
-  --awu-pink: #f2b8c6;                         /*  8.26:1 */
 
   /* ---- 字体：正文与控件统一走无衬线黑体（2026-10-30 主人：用黑体会好很多）。
      黑体优先级按「系统里真装了的」排：macOS PingFang → Windows 微软雅黑 UI/雅黑 →
@@ -142,6 +151,21 @@ const CSS = `
   --awu-lh-snug: 1.4;
   --awu-lh-body: 1.65;
   --awu-lh-loose: 1.8;
+  /* ---- 整数行高阶梯（W1-C·§2.6）----
+     为什么比例与整数两套并存：比例行高给"字号会变"的正文（14/15px 混排时按比例才对），
+     整数行高给"高度必须锁死"的地方（卡片四行、岛屿列表行、字段行）。
+     2026-10-30 那次「卡片高度差 1-2px，滚动像三块不同尺寸的砖」就是比例行高乘出 .5px 导致的，
+     所以 1121/1132/1153/1172 等处的 22/23/18/22 不再写裸 px，统一走这里。
+     命名带 -px 是为了和上面的比例档一眼分开；契约 §2.6 里写的 --awu-lh-tight/-body 是笼统指代，
+     若直接把它们改成 px 会把 100+ 处比例用法一起改掉（22px 标题配 1.25 = 27.5px，整数化后会挤在一起），
+     所以这里额外给两个"契约名 + -px"的别名额，JSX 侧读哪个都行。 */
+  --awu-lh-px-18: 18px;
+  --awu-lh-px-20: 20px;
+  --awu-lh-px-22: 22px;
+  --awu-lh-px-23: 23px;
+  --awu-lh-px-24: 24px;
+  --awu-lh-tight-px: var(--awu-lh-px-22);
+  --awu-lh-body-px: var(--awu-lh-px-23);
 
   /* ---- 间距 10 档 + 唯一 gutter（1120 宽用 32） ---- */
   --awu-gap-1: 2px;
@@ -157,8 +181,11 @@ const CSS = `
   --awu-gutter: 32px;
   /* 长表单/长文本的阅读宽度：1120 全宽对中文表单太宽，正文收在 760 */
   --awu-content-max: 760px;
-  /* 两栏骨架：左栏（列表）固定宽，右栏自适应 */
-  --awu-rail-w: 340px;
+  /* 两栏骨架：左栏（列表）固定宽，右栏自适应。
+     340→336：336 能被 8 整除（gutter 32 之后剩 272，正好放 4 个 68px 的 tab 位），
+     340 会让分段器的 4 格算出 67.5px 的小数宽，最后一条 tab 与右边界差 1px。
+     <1100 视口再降到 300（见文件末尾「响应式」段）。 */
+  --awu-rail-w: 336px;
 
   /* ---- 尺寸 7 档 ---- */
   --awu-size-hit: 28px;
@@ -167,7 +194,6 @@ const CSS = `
   --awu-size-rail: 36px;
   --awu-size-avatar: 38px;
   --awu-size-avatar-lg: 56px;
-  --awu-size-empty: 56px;
 
   /* ---- 圆角 6 档（面板 24 / 卡片 16 / 输入 12 / 按钮 10） ---- */
   --awu-r-xs: 8px;
@@ -176,15 +202,65 @@ const CSS = `
   --awu-r-lg: 16px;
   --awu-r-xl: 24px;
   --awu-r-pill: 999px;
+  /* 弹层圆角单独一档：sheet 的 24 与面板 24 数值相同，但语义不同
+     （面板是"窗"，sheet 是"托盘"），第 3 批蒸馏弹层不再自己写 16。 */
+  --awu-radius-sheet: 24px;
 
-  /* ---- 动效：弹簧缓动 + 5 个时长 + 1 个环境档 ---- */
+  /* ---- 控件高度 2 档（W1-C：原来 34/38/40/42/44/46 六种）----
+     ctrl-h    = 36：按钮默认 / md / block / 输入框 / 下拉
+     ctrl-h-sm = 28：工具行小按钮 / 行内 chip 内的高
+     其余高度（卡片 46、抽屉头 56）不是控件，留在各自规则里用整数。
+     为什么是 36 而不是 34：iOS 触控目标下限 44 达不到时，36 是"能稳点中"的最小整数档，
+     34 加上 1px 描边后实际可点区只有 32。 */
+  --awu-ctrl-h: 36px;
+  --awu-ctrl-h-sm: 28px;
+
+  /* ---- 分隔线：比 --awu-line 更轻的一档 ----
+     深色下 line 是 10% 白，在面板底(70%)上仍然是一条清晰实线，统计条/分组头这种
+     "只是分区、不是边界"的地方应该几乎看不见（6%）；浅色 14%→8%。 */
+  --awu-line-soft: rgba(255, 255, 255, .055);
+
+  /* ---- 焦点环唯一真源（W1-C：原来 24 条规则各写各的，5 种 offset）----
+     ring 用 accent 而不是 accent-text：焦点环是非文本装饰，3:1 就够（accent 3.82）；
+     offset 两档：普通控件向外 +1（不压内容），沉在容器里的分段/整行头向内 -2（不出界）。 */
+  --awu-focus-ring: var(--awu-accent);
+  --awu-focus-offset: 1px;
+  --awu-focus-offset-inset: -2px;
+
+  /* ---- 卡片指针跟随高光（W1-C·§2.3）----
+     只在 hover:hover + pointer:fine 下启用；JSX 把百分比写进 --awu-mx/--awu-my，
+     缺省值 (50%, -10%) 就是原来那束"顶部中央"的静态高光，所以没有 JS 时观感与旧版一致。
+     浅色必须更弱（.55）：同样的白高光叠在 68% 白卡上就是一块过曝的白斑。 */
+  --awu-card-hi: rgba(255, 255, 255, .12);
+  /* 一次性扫光（状态带/骨架共用）：深色是白扫，浅色要更亮才看得见 */
+  --awu-sheen-sweep: rgba(255, 255, 255, .10);
+  /* 骨架屏：底色与扫光分两个 token —— 旧版把 .04/.10 写死，浅色下等于白扫白（对比 1.02） */
+  --awu-sk-base: rgba(255, 255, 255, .05);
+  --awu-sk-sweep: rgba(255, 255, 255, .14);
+
+  /* ---- 动效令牌 v2（W0-B 地基）----
+     语义名是唯一真源；下面的 --awu-dur-* 全部降级为别名，全库 300 处调用一处不改。
+     数值与 client/motion.ts 的 T_FAST..T_AMBIENT 逐字相等 —— 改这里必须同步那边。
+     各档分工：fast=触感、base=颜色/焦点环、mid=层级内位移、enter=大层进入、
+     exit=退场（永远比对应进入快 ~40%，用户在等它消失）、slow=一次性扫光、ambient=呼吸/骨架。 */
+  --awu-t-fast: .12s;
+  --awu-t-base: .2s;
+  --awu-t-mid: .24s;
+  --awu-t-enter: .32s;
+  --awu-t-exit: .16s;
+  --awu-t-slow: .6s;
+  --awu-t-ambient: 3.4s;
+  /* 别名（旧名，保留以冻结调用方；数值必须与本段上面的语义名一致） */
+  --awu-dur-1: var(--awu-t-fast);
+  --awu-dur-2: var(--awu-t-base);
+  --awu-dur-3: var(--awu-t-mid);
+  --awu-dur-4: var(--awu-t-enter);
+  --awu-dur-5: var(--awu-t-slow);
+  --awu-dur-breathe: var(--awu-t-ambient);
+  /* 缓动：进入=主曲线（弹簧收尾）、退场/落位=out、收起/塌陷=in。三档够用，别加第四档。 */
   --awu-ease: ${EASE};
-  --awu-dur-1: .12s;
-  --awu-dur-2: .18s;
-  --awu-dur-3: .24s;
-  --awu-dur-4: .34s;
-  --awu-dur-5: .6s;
-  --awu-dur-breathe: 3.4s;
+  --awu-ease-out: cubic-bezier(.22,1,.36,1);
+  --awu-ease-in: cubic-bezier(.55,0,1,.45);
 
   /* ---- 层：值刻意不变（设计文档 §5）。panel/scrim 是 body 级 portal 与宿主抢栈的经验值 ---- */
   --awu-z-panel: 2147482000;
@@ -195,7 +271,10 @@ const CSS = `
   --awu-panel-w: ${PANEL_WIDTH}px;
   --awu-panel-pad-y: ${PANEL_MAX_H}px;
   --awu-panel-max-h: calc(100vh - var(--awu-panel-pad-y));
-  --awu-dialog-w: 760px;
+  /* 弹层宽度（W3 单一真源）：620 是从"三个输入框排一行"反推的——
+     760 宽下表单会被拉成两条长杠，iOS sheet 的呼吸感就没了。
+     蒸馏弹层不再自己写 420/760，直接继承这一档（.awu-distill-dialog 的几何规则已删）。 */
+  --awu-dialog-w: 620px;
   --awu-dialog-max-h: 720px;
 
   --awu-shadow: 0 28px 80px rgba(0, 0, 0, .50), 0 2px 12px rgba(0, 0, 0, .30);
@@ -232,9 +311,13 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
   --awu-line: rgba(60, 60, 67, .14);
   --awu-line-strong: rgba(60, 60, 67, .24);
+  --awu-line-soft: rgba(60, 60, 67, .08);
+  --awu-card-hi: rgba(255, 255, 255, .55);
+  --awu-sheen-sweep: rgba(255, 255, 255, .55);
+  --awu-sk-base: rgba(60, 60, 67, .09);
+  --awu-sk-sweep: rgba(255, 255, 255, .72);
   --awu-surface-field: rgba(120, 120, 128, .10);
   --awu-surface-strip: rgba(120, 120, 128, .06);
-  --awu-surface-foot: rgba(255, 255, 255, .62);
   --awu-surface-dialog: rgba(255, 255, 255, .90);
 
   --awu-accent: #007aff;
@@ -243,15 +326,13 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   --awu-on-accent: #ffffff;
 
   --awu-gold: #8a5f1e;                         /*  5.43:1 */
-  --awu-gold-hi: #a9722a;
   --awu-on-character: #2b1d0a;
   --awu-grad: linear-gradient(135deg, #f2ce93 0%, #d9a35c 52%, #c98a6e 100%);
-  --awu-grad-soft: linear-gradient(135deg, rgba(217, 163, 92, .18), rgba(201, 138, 110, .14));
+  --awu-shadow-glyph: inset 0 1px 0 rgba(255, 255, 255, .85), 0 2px 6px rgba(30, 30, 40, .12);
 
   --awu-teal: #1e7a33;                         /*  4.62:1 */
   --awu-danger: #d70015;                       /*  5.20:1 */
   --awu-rose: #c0392b;
-  --awu-pink: #b03a63;
 
   --awu-shadow: 0 34px 84px rgba(28, 30, 40, .24), 0 6px 20px rgba(28, 30, 40, .10);
   --awu-scroll: rgba(60, 60, 67, .30);
@@ -309,7 +390,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   box-shadow: 0 0 0 1px var(--awu-accent), var(--awu-specular);
 }
 
-.awu-trigger:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; }
+.awu-trigger:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 /* 徽标：角色专属色渐变 + 名字首字（衬线） */
 .awu-mark {
@@ -327,7 +408,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   font-weight: 700;
   line-height: 1;
   background: var(--awu-grad);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 2px 8px rgba(0, 0, 0, .18);
+  box-shadow: var(--awu-shadow-glyph);
 }
 
 /* 启用态：一圈很淡的角色色呼吸（整份 UI 里唯一的暖色动效） */
@@ -467,14 +548,18 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   line-height: var(--awu-lh-body);
   overflow: hidden;
   transform-origin: center;
-  will-change: transform, opacity;
-  animation: awu-panel-in var(--awu-dur-3) var(--awu-ease);
+  /* W2：will-change 不再常驻（它让 1120x900 的层永不回收）。
+     动画期由 JSX 挂 data-still="true"，CSS 在那段时间才买层提升，animationend 移除。 */
+  animation: awu-panel-in var(--awu-dur-4) var(--awu-ease);
 }
 
 /* ================================================================ 两栏骨架（iOS Split View） */
 /* JSX 接线：<div class="awu-workspace"><aside class="awu-rail">…列表…</aside><main class="awu-main">…内容…</main></div>
    两栏各自独立滚动；<900px 收成单栏（.awu-rail 隐藏条件由 JSX 决定，见设计文档 §3.2）。 */
 .awu-workspace {
+  /* position: relative 是必须的：<900 单栏 push 时 .awu-rail 走绝对定位，
+     没有它就会以 .awu-panel（fixed）为基准铺满整个面板、把头部一起盖住。 */
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -489,14 +574,20 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* 左栏比右栏再压一层极淡的底：两栏同材质时中间那道分隔线太弱，列表会「浮」在面板上。
-     只加 3% 的灰，不破坏通透。 */
+  /* 左栏「凹陷」/ 右栏「浮起」（W1-C·§C6）：
+     1) 底一档微暗（--awu-surface-strip = 深 12% 黑 / 浅 6% 灰），rail 因此比 main 低半层；
+     2) 分隔线从 border 换成 inset 阴影：border 会占 1px 布局宽（336 变 335，四格算出 67.75），
+        inset 不占位、还能和 --awu-line-soft 一起调淡；
+     3) 顶部一条极淡的亮边，让"凹陷"有厚度（只有下压没有高光会像一块补丁）。 */
   background: var(--awu-surface-strip);
-  border-right: 1px solid var(--awu-line);
+  box-shadow:
+    inset -1px 0 0 var(--awu-line-soft),
+    inset 0 1px 0 color-mix(in srgb, var(--awu-glass-edge) 35%, transparent);
   overflow: hidden;
 }
 
 .awu-main {
+  position: relative; /* .awu-menu 的定位锚点；也是单栏 nav 栈的层基准 */
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -507,33 +598,67 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 /* 栏内可滚动区（替代旧的 .awu-body 在单栏里的角色） */
 .awu-pane {
+  /* 骨架退场要脱离文档流（见 .awu-sk[data-state="closing"]），它需要这里当定位上下文 */
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
-  /* 滚动条：细轨 + 静息态几乎透明，指针进到栏内 / 键盘聚焦时才显形。
-     配色只走 --awu-scroll（滚动条专用 token，深浅两态各一档）。 */
+}
+
+/* ---- 滚动条（W1-C：原来三处复制，第四处漏抄）----
+   列表 / 右栏正文 / 编辑器正文 / 专注层共用一个真源：细轨 + 静息几乎透明 + 指针进栏或键盘聚焦才显形。
+   ⚠️ 新增滚动容器的做法是在下面四条规则里加选择器，**不要**再复制一段 ——
+   之前 .awu-focusBody 就是因为没加进来，长文本编辑时用的是系统默认粗滚动条。 */
+.awu-pane,
+.awu-mainBody,
+.awu-editorBody,
+.awu-focusBody {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--awu-scroll) 22%, transparent) transparent;
 }
 
 .awu-pane:hover,
-.awu-pane:focus-within {
+.awu-pane:focus-within,
+.awu-mainBody:hover,
+.awu-mainBody:focus-within,
+.awu-editorBody:hover,
+.awu-editorBody:focus-within,
+.awu-focusBody:hover,
+.awu-focusBody:focus-within {
   scrollbar-color: var(--awu-scroll) transparent;
 }
 
-.awu-pane::-webkit-scrollbar { width: 8px; }
-.awu-pane::-webkit-scrollbar-track { background: transparent; }
-.awu-pane::-webkit-scrollbar-thumb {
+.awu-pane::-webkit-scrollbar,
+.awu-mainBody::-webkit-scrollbar,
+.awu-editorBody::-webkit-scrollbar,
+.awu-focusBody::-webkit-scrollbar { width: 8px; }
+
+.awu-pane::-webkit-scrollbar-track,
+.awu-mainBody::-webkit-scrollbar-track,
+.awu-editorBody::-webkit-scrollbar-track,
+.awu-focusBody::-webkit-scrollbar-track { background: transparent; }
+
+.awu-pane::-webkit-scrollbar-thumb,
+.awu-mainBody::-webkit-scrollbar-thumb,
+.awu-editorBody::-webkit-scrollbar-thumb,
+.awu-focusBody::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: var(--awu-r-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
   transition: background-color var(--awu-dur-2) var(--awu-ease);
 }
+
 .awu-pane:hover::-webkit-scrollbar-thumb,
-.awu-pane:focus-within::-webkit-scrollbar-thumb {
+.awu-pane:focus-within::-webkit-scrollbar-thumb,
+.awu-mainBody:hover::-webkit-scrollbar-thumb,
+.awu-mainBody:focus-within::-webkit-scrollbar-thumb,
+.awu-editorBody:hover::-webkit-scrollbar-thumb,
+.awu-editorBody:focus-within::-webkit-scrollbar-thumb,
+.awu-focusBody:hover::-webkit-scrollbar-thumb,
+.awu-focusBody:focus-within::-webkit-scrollbar-thumb {
   background-color: color-mix(in srgb, var(--awu-scroll) 80%, transparent);
 }
 
@@ -549,8 +674,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   flex-direction: column;
   gap: var(--awu-gap-6);
   padding: var(--awu-gap-5) var(--awu-gutter) var(--awu-gap-4);
-  /* 工具栏与列表之间一条发丝：把「操作区 / 内容区」分开，滚动列表从线下开始 */
-  border-bottom: 1px solid var(--awu-line);
+  /* 工具栏与列表之间一条发丝：把「操作区 / 内容区」分开，滚动列表从线下开始。
+     W1-C：降到 line-soft —— 左栏已经是"凹陷"的底，再叠一条 10% 的实线会显得像切了一刀。 */
+  border-bottom: 1px solid var(--awu-line-soft);
 }
 
 /* 子块 margin 归零 —— 必须写到「两个类」的权重。写成 .awu-railHead > * 时与后面的
@@ -558,15 +684,121 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    双份 gutter（207px 宽），「角色簿」直接变成省略号。 */
 .awu-railHead > .awu-distill-entry,
 .awu-railHead > .awu-tabs,
-.awu-railHead > .awu-toolbar { margin: 0; }
+.awu-railHead > .awu-toolbar,
+.awu-railHead > .awu-railNow { margin: 0; }
 
-/* 唯一断点：<900 收成单栏（详情页占满、列表退回全宽） */
+/* 窄屏列表态：全局动作（刷新 / 关闭）随 tablist 一起搬进左栏头部（JSX 在 showTabsInRail 时渲染）。
+   它自己是个 flex 容器，且会被列向父级 stretch 成整行宽 —— 不右对齐就是孤零零贴左的一排图标。
+   用 justify-content 而不是 margin-left:auto：后者只会推容器本身，容器已经满宽了。 */
+.awu-railHead > .awu-headActions { justify-content: flex-end; }
+
+/* ================================================================ 右栏顶部（W1-C 新骨架，契约 §2.4）
+   JSX 结构：.awu-main > .awu-mainHead（tabs + 全局动作） + .awu-mainBody（四视图）
+   为什么要拆：tabs 原来在左栏，切 tab 却影响右栏内容，视线要横跨 1120px；
+   归位到右栏顶部后，"切什么"和"看什么"在同一个视觉列里。 */
+.awu-mainHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-5);
+  min-width: 0;
+  /* 只用下边一条发丝（line-soft），不加卡片底 —— 它是"栏头"，不是一块内容 */
+  padding: var(--awu-gap-5) var(--awu-gutter) var(--awu-gap-4);
+  border-bottom: 1px solid var(--awu-line-soft);
+}
+
+/* tabs 搬进 mainHead 后自带 margin 会变成双份 gutter（rail 侧由上一段归零） */
+.awu-mainHead > .awu-tabs { flex: 1; min-width: 0; margin: 0; }
+.awu-mainHead > .awu-headActions { margin-left: auto; flex: none; }
+
+.awu-mainBody {
+  /* 同上：骨架退场的定位上下文 */
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
+}
+
+/* tabpanel 容器是可聚焦的（tabIndex=0，供键盘用户跳过 rail 直接进内容区），
+   所以焦点环会画在整块内容区上：必须内描边，否则 1px 外环会被 .awu-main 裁掉一半。 */
+.awu-mainBody:focus-visible {
+  outline: 2px solid var(--awu-focus-ring);
+  outline-offset: var(--awu-focus-offset-inset);
+}
+
+/* tab 切换 crossfade（契约 §3：T_FAST，只 opacity，不带位移、不带 stagger）。
+   做法是给"视图根节点"一条进场动画 —— 视图切换时 React 换的是根节点本身，
+   新节点入 DOM 就自动播一次；同一个节点被复用时不会重播（这正是切 tab 与刷新的区别）。
+   为什么写在这里而不是文件末尾的动效段：靠**顺序**让各视图自己的进场动画赢
+   （.awu-detail 的 awu-slide-in、.awu-guide 等都在本行之后声明），
+   这里只兜住"没有自己动画"的那几个视图。 */
+.awu-mainBody > * {
+  animation: awu-view-in var(--awu-t-fast) var(--awu-ease-out) both;
+}
+
+/* 左栏"正在看：X"一行（diary tab 下显示，data-empty 时隐藏）。
+   data-empty 由 JSX 写；React 传 false 会直接不渲染该属性，所以 [data-empty] 只在"真空"时命中。 */
+.awu-railNow {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-3);
+  flex: none;
+  margin: 0 var(--awu-gutter) var(--awu-gap-5);
+  padding: var(--awu-gap-3) var(--awu-gap-4);
+  border: 1px solid var(--awu-line-soft);
+  border-radius: var(--awu-r-md);
+  background: var(--awu-surface-2);
+  font-size: var(--awu-fs-caption);
+  line-height: var(--awu-lh-px-18);
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.awu-railNow b { color: var(--awu-gold); font-weight: 600; }
+/* ⚠️ 必须写 ="true"：JSX 侧是 data-empty={cond ? 'true' : 'false'}，
+   写成 [data-empty] 会连 "false" 一起命中 → 这一行永远不显示。 */
+.awu-railNow[data-empty="true"] { display: none; }
+
+/* 主断点：<900 收成单栏（详情页占满、列表退回全宽）
+   W1-C 新增：单栏导航栈（契约 §2.1 的 data-nav）。
+   为什么需要：旧版单栏时 rail 不隐藏，选中一张卡后详情排在整张列表**下面**，
+   用户得滚过 20 张卡才看到刚点的东西（审查 F35）。现在由 JSX 声明语义，
+   CSS 只负责"push 盖住列表、pop 退回列表"的层级；进退位移留给第 2 批的动效。 */
 @media (max-width: 900px) {
   .awu-workspace { display: block; overflow-y: auto; }
-  .awu-rail { width: 100%; border-right: none; }
+  .awu-rail { width: 100%; }
   .awu-main { min-height: auto; }
   .awu-pane { padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-8); }
+  .awu-mainBody { padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-8); }
   .awu-panel { --awu-gutter: 20px; }
+
+  /* push / pop：详情覆盖列表。用 position + z-index 而不是 display:none ——
+     display 切换会让 rail 的滚动位置在返回时丢失，且第 2 批要给"覆盖"做位移。
+     ⚠️ W2 补 pop（视觉 bug 修复）：JSX 在 pop 期间会把 .awu-main 多留 240ms 让退场播完。
+     如果 pop 不像 push 那样把 rail 压到绝对定位的下层，这 240ms 里窄屏看到的是
+     「详情页和角色列表上下堆叠」——比没有动画更难看。所以两个方向共用同一条覆盖规则。 */
+  .awu-workspace:is([data-nav="push"], [data-nav="pop"]) > .awu-rail {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .awu-workspace:is([data-nav="push"], [data-nav="pop"]) > .awu-main {
+    position: relative;
+    z-index: var(--awu-z-inset);
+    min-height: 100%;
+  }
+}
+
+/* 中宽：两栏还开着，但左栏收窄一档（336→300），把宽度让给正文。
+   901~1099 区间右栏内容区只有 465~663px 时，世界书两栏/字段两列会挤（审查 F34）。 */
+@media (max-width: 1099px) {
+  :is(.awu-scope, .awu-layer) { --awu-rail-w: 300px; }
 }
 
 /* ================================================================ 头部 */
@@ -596,7 +828,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   content: "";
   flex: 1;
   height: 1px;
-  background: var(--awu-line);
+  /* 统计条那一行只是"分区"，不是边界：用 line-soft（深色 5.5%）几乎看不见，
+     但能把标题与右侧动作拉开；用 line(10%) 会变成一条抢眼的横线。 */
+  background: var(--awu-line-soft);
 }
 
 .awu-title {
@@ -666,21 +900,21 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-iconBtn:hover { color: var(--awu-ink); background: var(--awu-surface-3); border-color: var(--awu-line); }
 .awu-iconBtn:active { transform: scale(.94); }
-.awu-iconBtn:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-iconBtn:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 .awu-iconBtn[data-spin="true"] svg { animation: awu-spin .9s linear infinite; }
 
-/* 面板忙碌：头底一条 2px 不定进度光带 */
+/* 面板忙碌：头底一条 2px 不定进度光带。
+   W2：原来动 background-position（每帧重绘整条），改成"45% 宽的光块 + translateX"，
+   位移是合成属性，2px 高的东西也不该占一条 paint 通道。 */
 .awu-panel[data-busy="true"] .awu-head::after {
   content: "";
   position: absolute;
   left: 0;
-  right: 0;
   bottom: 0;
+  width: 45%;
   height: 2px;
   background: linear-gradient(90deg, transparent, var(--awu-accent), transparent);
-  background-size: 45% 100%;
-  background-repeat: no-repeat;
-  animation: awu-progress 1.1s linear infinite;
+  animation: awu-sweep-x 1.1s linear infinite;
 }
 
 /* ================================================================ 状态带（四态一形） */
@@ -732,7 +966,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(100deg, transparent 32%, rgba(255, 255, 255, .10) 50%, transparent 68%);
+  background: linear-gradient(100deg, transparent 32%, var(--awu-sheen-sweep) 50%, transparent 68%);
   transform: translateX(-100%);
   animation: awu-sheen var(--awu-dur-5) var(--awu-ease) 1;
   pointer-events: none;
@@ -755,7 +989,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-status[data-status="alert"] {
-  background: color-mix(in srgb, var(--awu-danger) 12%, var(--awu-surface-2));
+  /* 2026-11-02 对比度修复（审查 C1）：旧版是「12% 红底 + 红字」= 同色压同色，
+     深色 4.17:1 / 浅色 4.33:1，14px 正文不达 4.5。改成中性底，红只留在描边与左轨。
+     复算（sRGB 直通 alpha 合成，底 = surface-2 叠面板）：深 4.94:1 / 浅 5.38:1 → 达标。 */
+  background: var(--awu-surface-2);
   border-color: color-mix(in srgb, var(--awu-danger) 34%, transparent);
   color: var(--awu-danger);
 }
@@ -798,7 +1035,11 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 
 /* ================================================================ 分段控制（iOS segmented） */
+/* W1-C：选中块改由 .awu-tabs::before 的滑块承担（契约 §2.3）。
+   JSX 只需往 .awu-tabs 上写两个内联变量：--awu-tab-i（序号，0 基）/ --awu-tab-n（总数）。
+   缺省值按 4 格：没有 JS 变量时滑块停在第一格，观感与旧版"第一个 tab 高亮"一致。 */
 .awu-tabs {
+  position: relative;
   flex: none;
   display: flex;
   gap: var(--awu-gap-1);
@@ -808,7 +1049,31 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   background: var(--awu-glass-3);
 }
 
+/* 滑块宽度必须把 gap 算进去，否则 4 格时右侧会累积 3 × 2px 的误差：
+   可用宽 = 100% − 两侧 padding(3px×2) − (n−1) × gap；
+   单格宽 = 可用宽 / n；位移 i × (单格宽 + gap)。
+   translateX 的百分比是相对元素自身宽（= 单格宽），所以位移可以直接写成 i × (100% + gap)。 */
+.awu-tabs::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  bottom: 3px;
+  width: calc((100% - 6px - (var(--awu-tab-n, 4) - 1) * var(--awu-gap-1)) / var(--awu-tab-n, 4));
+  border-radius: var(--awu-r-sm);
+  /* 滑块用 glass-2-hi 而不是 glass-1：glass-1 在深色下是"面板底"(20,20,24,.70)，
+     画在更亮的槽(glass-3)上会读成一个黑洞（实测深色下"选中的是凹下去的"）；
+     glass-2-hi 在深浅两态都比槽亮，才像一枚被推上去的白色小片。 */
+  background: var(--awu-glass-2-hi);
+  box-shadow: var(--awu-shadow-card), var(--awu-specular);
+  transform: translateX(calc(var(--awu-tab-i, 0) * (100% + var(--awu-gap-1))));
+  transition: transform var(--awu-t-mid) var(--awu-ease);
+  pointer-events: none;
+}
+
 .awu-tab {
+  position: relative; /* 压在滑块之上；没有这层，rAF 跟随的雪佛龙会被滑块盖住 */
+  z-index: 0;
   flex: 1;
   min-width: 0;
   padding: var(--awu-gap-3) var(--awu-gap-4);
@@ -824,45 +1089,28 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
-  transition: color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease),
-    box-shadow var(--awu-dur-2) var(--awu-ease);
+  transition: color var(--awu-dur-2) var(--awu-ease);
 }
 
 .awu-tab:hover { color: var(--awu-ink-dim); }
 
+/* 选中态只留文字（底与阴影已交给 ::before 滑块）——
+   这两行如果还在，滑块下面会多出一层硬边底，4 格时能明显看到"双底"。 */
 .awu-tab[data-on="true"] {
   color: var(--awu-ink);
   font-weight: 600;
-  background: var(--awu-glass-1);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .18), var(--awu-specular);
 }
 
-.awu-tab:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-tab:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 
-/* ================================================================ 滚动主体（单栏时代的 .awu-body，保留） */
-.awu-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
-  scrollbar-width: thin;
-  scrollbar-color: var(--awu-scroll) transparent;
-}
-
-.awu-body::-webkit-scrollbar { width: 8px; }
-.awu-body::-webkit-scrollbar-track { background: transparent; }
-.awu-body::-webkit-scrollbar-thumb {
-  background: var(--awu-scroll);
-  border-radius: var(--awu-r-pill);
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-/* 顶部滚动阴影：纯 CSS + scroll timeline，不支持就只是没有阴影 */
+/* 顶部滚动阴影：纯 CSS + scroll timeline，不支持就只是没有阴影。
+   2026-11-02（W1-C）：原写法是 scroll(self)，但 ::before 是伪元素、自身不是滚动容器，
+   按规范时间线不活跃 → 阴影永远停在 opacity:0（等于这条规则从未生效）。
+   改成 scroll(nearest)，由最近的滚动祖先（.awu-pane / .awu-mainBody / .awu-editorBody）驱动。 */
 @supports (animation-timeline: scroll()) {
-  .awu-body::before,
-  .awu-pane::before {
+  .awu-pane::before,
+  .awu-mainBody::before,
+  .awu-editorBody::before {
     content: "";
     position: sticky;
     top: 0;
@@ -872,7 +1120,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     background: var(--awu-line-strong);
     opacity: 0;
     animation: awu-scroll-hint linear both;
-    animation-timeline: scroll(self);
+    animation-timeline: scroll(nearest);
     animation-range: 0 24px;
   }
   @keyframes awu-scroll-hint { from { opacity: 0; } to { opacity: 1; } }
@@ -931,7 +1179,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-modePill:hover { color: var(--awu-ink); }
 .awu-modePill[data-on="true"] { background: var(--awu-glass-1); color: var(--awu-ink); box-shadow: var(--awu-specular); }
 .awu-modePill:disabled { opacity: .45; cursor: default; }
-.awu-modePill:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-modePill:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 
 /* ---- 提示条：成功（info）自动淡出，警告（warn）留给人手动关 ---- */
 .awu-status[data-status="warn"] {
@@ -970,7 +1218,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-noticeClose:hover { color: var(--awu-ink); background: var(--awu-surface-3); }
-.awu-noticeClose:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-noticeClose:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 /* ---- 自创卡弹层：AI 补全勾选的说明文字 ---- */
 .awu-newAiHint {
@@ -1016,11 +1264,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   padding: var(--awu-gap-6) var(--awu-gap-6) var(--awu-gap-5);
   border: 1px solid var(--awu-line);
   border-radius: var(--awu-r-lg);
-  /* 卡面自己带一层顶部高光（径向），hover 时只提亮不压暗 —— iOS 手感：
-     点上去像纸片被灯照亮，而不是被灰罩住。高光画在 background-image 上，
-     不开伪元素，免得盖住文字。 */
+  /* 卡面高光改由 ::after 承担（W1-C）：原来是 background-image 的静态径向，
+     hover 只能整体提亮、无法跟随指针；挪到伪元素后 opacity 可动画，浅色也能单独压强度。 */
   background-color: var(--awu-glass-2);
-  background-image: radial-gradient(120% 70% at 50% -24%, var(--awu-sheen) 0%, transparent 62%);
   text-align: left;
   font: inherit;
   color: inherit;
@@ -1030,6 +1276,48 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   transition: border-color var(--awu-dur-2) var(--awu-ease), background-color var(--awu-dur-2) var(--awu-ease),
     box-shadow var(--awu-dur-2) var(--awu-ease), transform var(--awu-dur-2) var(--awu-ease);
   animation: awu-rise var(--awu-dur-4) var(--awu-ease) backwards;
+}
+
+/* 顶部高光 + 指针跟随 + 启用态呼吸（契约 §2.3 / §3「环境呼吸」）
+   ── 伪元素归属（W2 定案，别改）────────────────────────────────────
+   .awu-card::before  → 左栏选中蓝轨（[data-selected="true"] 时才有，W1-C）
+   .awu-card::after   → **光层**，一个元素两层背景：
+        layer 1 = 顶部高光 / 指针跟随（--awu-mx / --awu-my）
+        layer 2 = 启用态金色呼吸（只有 [data-live="true"] 时才给 --awu-live-glow 上色）
+   为什么呼吸放在这一层：awu-glow 原来动 box-shadow（不可合成、每帧重绘整卡）。
+   现在 box-shadow 是**静态**的（见 [data-live] 那段），呼吸只动这一层的 opacity（合成），
+   卡片外观的"外圈金环"由静态 box-shadow 提供，"会呼吸的亮度"由这层提供。
+   ⚠️ 别把 box-shadow 再写回动画 —— 那就退回每帧 paint 了。 */
+.awu-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  /* 半径 240px + 圆心在卡片上方 20%：没有 JS 变量时，这束光正好摊成原来那条"顶部横带"；
+     指针进来后 JSX 写 --awu-mx/--awu-my，同一层光就变成跟随的小高光（一个公式两种形态）。
+     第二层用 var(--awu-live-glow, transparent)：非启用卡取不到变量 → 整层透明，零视觉影响。 */
+  background:
+    radial-gradient(240px circle at var(--awu-mx, 50%) var(--awu-my, -20%),
+      var(--awu-card-hi) 0%, transparent 62%),
+    radial-gradient(120% 96% at 50% -8%,
+      var(--awu-live-glow, transparent) 0%, transparent 64%);
+  opacity: .85;
+  transition: opacity var(--awu-t-base) var(--awu-ease);
+}
+
+/* 只在"真指针"设备上跟随：触屏没有 hover，不该为一束不会移动的光多开一层合成 */
+@media (hover: hover) and (pointer: fine) {
+  .awu-card:hover::after { opacity: 1; }
+}
+
+/* 用户从面板级开关关掉高光（契约 §2.1 的 data-fx）：退回旧的静态顶部高光，
+   即使 JS 还在写 --awu-mx/--awu-my 也不跟随；同时把呼吸也关掉（静态=不呼吸）。 */
+.awu-panel[data-fx="off"] .awu-card::after,
+.awu-panel[data-fx="off"] .awu-card[data-live="true"]::after {
+  background: radial-gradient(120% 70% at 50% -24%, var(--awu-sheen) 0%, transparent 62%);
+  animation: none;
+  opacity: 1;
 }
 
 /* hover：上浮 2px + 卡面提亮一档 + 阴影加深。刻意不写 background: --awu-glass-3，
@@ -1044,15 +1332,48 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 /* 按下：回到原位，给一点「压下去」的反馈 */
 .awu-card:active { transform: translateY(0); box-shadow: var(--awu-shadow-card), var(--awu-specular); }
 
-.awu-card:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; }
+.awu-card:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
-/* 启用中的卡：角色色描边 + 呼吸（不做渐变填充，保持 iOS 干净） */
+/* 启用中的卡：角色色描边 + 呼吸（不做渐变填充，保持 iOS 干净）。
+   W2 去 paint 化：box-shadow 变成**静态**的一档（原来是 awu-glow 在 18%↔34% 之间每帧重画），
+   "呼吸感"移到 ::after 的 opacity（合成属性）。外圈金环由这里的静态阴影负责，
+   亮度由 --awu-live-glow 那一层负责 —— 两层分离后，动画不再碰 paint。 */
 .awu-card[data-live="true"] {
+  --awu-live-glow: color-mix(in srgb, var(--awu-gold) 30%, transparent);
   border-color: color-mix(in srgb, var(--awu-gold) 55%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--awu-gold) 22%, transparent),
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--awu-gold) 26%, transparent),
     0 10px 30px color-mix(in srgb, var(--awu-gold) 16%, transparent), var(--awu-specular);
-  animation: awu-rise var(--awu-dur-4) var(--awu-ease) backwards, awu-glow 3.6s ease-in-out infinite;
 }
+
+/* 呼吸：opacity .35↔.85，时长走环境档（3.4s），永不重置。
+   hover 时停掉呼吸切到常亮 —— 指针已经在卡上，静态全亮更好读，也避免"鼠标一进就抖"。 */
+.awu-card[data-live="true"]::after {
+  animation: awu-glow-breathe var(--awu-t-ambient) ease-in-out infinite;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .awu-card[data-live="true"]:hover::after { animation: none; opacity: 1; }
+}
+
+/* 左栏选中态（契约 §2.1）：静态蓝轨，**不呼吸** —— 与 [data-live] 的金色呼吸分开读。
+   为什么用伪元素而不是 box-shadow：awu-glow 动画驱动的就是 box-shadow，
+   两者写同一个属性会互相覆盖（选中态会被动画帧盖掉）。伪元素不参与那条动画，
+   所以「选中 + 启用」能同时看见：左轨蓝、描边金、外圈金呼吸，三条通道互不打架。 */
+.awu-card[data-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 14%;
+  bottom: 14%;
+  width: 2px;
+  border-radius: 0 var(--awu-r-pill) var(--awu-r-pill) 0;
+  background: var(--awu-accent);
+}
+
+.awu-card[data-selected="true"] { border-color: color-mix(in srgb, var(--awu-accent) 45%, transparent); }
+
+/* 同时选中 + 启用：描边交回金色（"在扮演谁"优先），选中由左轨承担 */
+.awu-card[data-selected="true"][data-live="true"] { border-color: color-mix(in srgb, var(--awu-gold) 55%, transparent); }
 
 .awu-cardTop {
   display: flex;
@@ -1078,7 +1399,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   line-height: 1;
   color: var(--awu-on-character);
   background: var(--awu-grad);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 2px 8px rgba(0, 0, 0, .18);
+  box-shadow: var(--awu-shadow-glyph);
 }
 
 /* 三套色相：让卡片墙不至于一片金（仍是角色色系，不抢系统蓝） */
@@ -1118,7 +1439,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   font-size: var(--awu-fs-title);
   font-weight: 600;
   letter-spacing: .01em;
-  line-height: 22px;
+  line-height: var(--awu-lh-px-22);
   color: var(--awu-gold);
   white-space: nowrap;
   overflow: hidden;
@@ -1129,7 +1450,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   display: block;
   max-width: 100%;
   font-size: var(--awu-fs-label);
-  line-height: 18px;
+  line-height: var(--awu-lh-px-18);
   color: var(--awu-ink-mute);
   white-space: nowrap;
   overflow: hidden;
@@ -1150,7 +1471,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    不同内容的字面高度再叠一层，卡片就长短不一。锁死行高 + 摘要固定 2 行即可。 */
 .awu-cardBlurb {
   font-size: var(--awu-fs-body);
-  line-height: 23px;
+  line-height: var(--awu-lh-px-23);
   color: var(--awu-ink-dim);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1168,8 +1489,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   gap: var(--awu-gap-3);
   min-width: 0;
-  min-height: 22px;
-  line-height: 22px;
+  min-height: var(--awu-lh-px-22);
+  line-height: var(--awu-lh-px-22);
   font-size: var(--awu-fs-caption);
   letter-spacing: 0;
   color: var(--awu-ink-mute);
@@ -1183,7 +1504,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   border-radius: var(--awu-r-pill);
   border: 1px solid var(--awu-line);
   font-size: var(--awu-fs-caption);
-  line-height: 18px;
+  line-height: var(--awu-lh-px-18);
   letter-spacing: 0;
   color: var(--awu-ink-mute);
   white-space: nowrap;
@@ -1196,7 +1517,12 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-pill[data-tone="teal"] {
+  /* 审查 C2：这枚胶囊原本没有底色（青字直接压在卡片玻璃上），实测深 6.82 / 浅 5.40 是达标的。
+     补一层中性底是把"底色"变成确定的，不再受下面垫了几层玻璃影响；青只留描边 + 文字。
+     复算（底 = surface-2）：深 6.82:1 / 浅 5.40:1，浅色+中灰壁纸最差 4.59:1 → 达标。
+     ⚠️ 别再给它加 12% 青底：那会把青字压回 4.2（本轮修的就是这个构造）。 */
   border-color: color-mix(in srgb, var(--awu-teal) 40%, transparent);
+  background: var(--awu-surface-2);
   color: var(--awu-teal);
 }
 
@@ -1211,7 +1537,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   justify-content: center;
   gap: var(--awu-gap-3);
-  height: 34px;
+  /* 控件高度收敛（W1-C·§2.6）：34/38/40/44 四档合成一档 --awu-ctrl-h(36)。
+     38 与 36 差 2px 肉眼几乎无差，但四档并排时（工具行 + hero 动作 + 弹层底部）
+     会看出"每排高一点点"的参差。 */
+  height: var(--awu-ctrl-h);
   padding: 0 var(--awu-gap-6);
   border: 1px solid var(--awu-line-strong);
   border-radius: var(--awu-r-sm);
@@ -1229,7 +1558,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-btn:hover { background: var(--awu-glass-3); border-color: var(--awu-line-strong); }
 .awu-btn:active { transform: scale(.97); }
-.awu-btn:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-btn:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 .awu-btn:disabled { opacity: .42; cursor: not-allowed; transform: none; }
 
 /* 主操作：唯一的高饱和实心块。阴影加深一档，让它在三个动作里明显最重 */
@@ -1276,28 +1605,36 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-ink);
 }
 
-/* md 档：详情页 hero 的动作按钮用它（原 sm 28px 太小）。全局定义，弹层里也能用 */
+/* md 档：详情页 hero 的动作按钮用它（原 sm 28px 太小）。全局定义，弹层里也能用。
+   W1-C：高度并入 --awu-ctrl-h；**字重移出 size 档** —— 原来这里写 font-weight:500，
+   会盖掉 [data-kind="primary"] 的 600（同为 (0,2,0)，md 在后），
+   于是"主操作最重"在主操作 + md 的组合下失效。size 只管几何，字重归 kind。 */
 .awu-btn[data-size="md"] {
-  height: 38px;
+  height: var(--awu-ctrl-h);
   padding: 0 var(--awu-gap-6);
   font-size: var(--awu-fs-body);
-  font-weight: 500;
   border-radius: var(--awu-r-sm);
 }
 
-.awu-btn[data-size="sm"] { height: var(--awu-size-hit); padding: 0 var(--awu-gap-4); font-size: var(--awu-fs-label); border-radius: var(--awu-r-xs); }
-.awu-btn[data-size="block"] { width: 100%; height: 40px; }
-.awu-btn[data-size="lg"] { height: 44px; padding: 0 var(--awu-gap-8); font-size: var(--awu-fs-body-lg); font-weight: 600; border-radius: var(--awu-r-md); }
+.awu-btn[data-size="sm"] { height: var(--awu-ctrl-h-sm); padding: 0 var(--awu-gap-4); font-size: var(--awu-fs-label); border-radius: var(--awu-r-xs); }
+.awu-btn[data-size="block"] { width: 100%; height: var(--awu-ctrl-h); }
+.awu-btn[data-size="lg"] { height: var(--awu-ctrl-h); padding: 0 var(--awu-gap-8); font-size: var(--awu-fs-body-lg); font-weight: 600; border-radius: var(--awu-r-md); }
 
 /* ================================================================ 详情页 */
 .awu-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--awu-gap-7);
+  /* 分组间距 16→20（W1-C）：详情页现在把"删除"下沉到最底部，一屏里会出现 5~6 个分组，
+     16px 会让相邻两组的 kicker 贴到上一组的最后一行上。 */
+  gap: var(--awu-gap-8);
   max-width: var(--awu-content-max);
   margin: 0 auto;
   animation: awu-slide-in var(--awu-dur-3) var(--awu-ease);
 }
+
+/* 「删除」下沉到详情底部（契约 §2.5）：它现在是 .awu-detail 的直接子元素，
+   纵向节奏由上面的 gap 负责，不要再叠自己的 margin-top。 */
+.awu-detail > .awu-dangerZone { margin-top: 0; }
 
 .awu-detailNav { display: flex; align-items: center; gap: var(--awu-gap-4); min-width: 0; }
 
@@ -1322,7 +1659,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-navBack:hover { background: color-mix(in srgb, var(--awu-accent) 12%, transparent); }
 .awu-navBack:active { transform: translateX(-1px); }
-.awu-navBack:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-navBack:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 .awu-navBack svg { flex: none; }
 
 .awu-detailNavTitle {
@@ -1423,14 +1760,14 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-ink-dim);
 }
 
-/* hero 右侧的动作组。2026-10-30 主人：「编辑/启用/删除 三个按钮太小，而且挨得很近」。
-   修法不是简单放大，而是把「一目了然的风险梯度」做出来：
-     编辑 = 中性（透明底 + 常规描边，退到次要层）
-     启用 = 主操作（蓝色实底 + 蓝色投影，唯一的高饱和块）
-     删除 = 危险（红描边 + 红字，不填底，避免和主操作抢）
-   尺寸：data-size 已由 JSX 从 sm 改成 md（基础 38px），这里再放大到 40px、内边距 18px，
-   间距 6→10px；窄屏折行时整组右对齐、行间也有 10px，不会挤成两行半。 */
+/* hero 右侧的动作组。
+   W1-C 起收敛成「1 主 + 1 次 + 1 个 ⋯」（契约 §2.5）：原来编辑/启用/删除/绑定四五个平铺，
+   宽度一挤就折成两行半，而且四个按钮一样重，看不出主次。
+   现在的层级：data-tone="primary"（或 data-kind="primary"）1 个实心主操作、
+   data-size="md" 1 个中性次要、.awu-menuBtn 收走其余（导出/改模式/换开场白）。
+   2026-10-30 主人原话「编辑/启用/删除 三个按钮太小，而且挨得很近」——间距 6→10px 保留。 */
 .awu-heroActions {
+  position: relative; /* .awu-menu 的定位锚点 */
   display: flex;
   gap: var(--awu-gap-5);
   flex-wrap: wrap;
@@ -1441,7 +1778,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 /* 选择器要压到 (0,3,0) 才吃得掉 .awu-btn[data-size="md"]，两条同权重时后写的赢 */
 .awu-heroActions .awu-btn[data-size="md"] {
-  height: 40px;
+  height: var(--awu-ctrl-h);
   padding: 0 var(--awu-gap-8);
   gap: var(--awu-gap-3);
   border-radius: var(--awu-r-sm);
@@ -1449,13 +1786,93 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   font-weight: 600;
 }
 
-/* 窄屏：三个动作等宽铺满一行，避免「两个半」这种最难看的折法 */
+/* 窄屏：动作等宽铺满一行，避免「两个半」这种最难看的折法 */
 @media (max-width: 900px) {
   .awu-heroActions { justify-content: flex-start; }
   .awu-heroActions .awu-btn[data-size="md"] { flex: 1 1 auto; padding: 0 var(--awu-gap-6); }
 }
 
 .awu-heroActions .awu-btn svg { flex: none; }
+
+/* ---- ⋯ 溢出菜单（契约 §2.5）----
+   JSX 负责开合、Esc / 点外部关闭、焦点归还给 ⋯ 按钮；CSS 只负责"一个从按钮下方长出来的玻璃托盘"。
+   为什么不是原生 <details>/popover：菜单项里有危险项与图标，需要统一键盘顺序与焦点归还，
+   交给 JSX 的焦点管理比原生 popover 更好控（而且宿主环境里 popover 的顶层行为会被面板 z-index 干扰）。 */
+.awu-menuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--awu-ctrl-h);
+  height: var(--awu-ctrl-h);
+  padding: 0;
+  border: 1px solid var(--awu-line-strong);
+  border-radius: var(--awu-r-sm);
+  background: var(--awu-surface-3);
+  color: var(--awu-ink-mute);
+  cursor: pointer;
+  transition: color var(--awu-dur-2) var(--awu-ease), background var(--awu-dur-2) var(--awu-ease);
+}
+
+.awu-menuBtn:hover { color: var(--awu-ink); background: var(--awu-glass-3); }
+.awu-menuBtn:active { transform: scale(.94); }
+.awu-menuBtn:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
+.awu-menuBtn[aria-expanded="true"] { color: var(--awu-ink); border-color: var(--awu-accent); }
+
+.awu-menu {
+  position: absolute;
+  top: calc(100% + var(--awu-gap-2));
+  right: 0;
+  z-index: var(--awu-z-inset);
+  min-width: 208px;
+  padding: var(--awu-gap-2);
+  border: 1px solid var(--awu-glass-edge);
+  border-radius: var(--awu-r-md);
+  background-color: var(--awu-surface-dialog);
+  backdrop-filter: var(--awu-blur);
+  -webkit-backdrop-filter: var(--awu-blur);
+  box-shadow: var(--awu-shadow);
+  animation: awu-menu-in var(--awu-t-mid) var(--awu-ease);
+}
+
+@keyframes awu-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 菜单项：也接受裸 <button>（JSX 侧可能不写类名，两种都认） */
+.awu-menuItem,
+.awu-menu > button {
+  display: flex;
+  align-items: center;
+  gap: var(--awu-gap-3);
+  width: 100%;
+  min-height: var(--awu-ctrl-h-sm);
+  padding: 0 var(--awu-gap-4);
+  border: none;
+  border-radius: var(--awu-r-xs);
+  background: transparent;
+  color: var(--awu-ink);
+  font: inherit;
+  font-size: var(--awu-fs-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.awu-menuItem:hover,
+.awu-menu > button:hover { background: var(--awu-surface-3); }
+.awu-menuItem:focus-visible,
+.awu-menu > button:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
+.awu-menuItem[data-kind="danger"],
+.awu-menu > button[data-kind="danger"] { color: var(--awu-danger); }
+.awu-menuItem[data-kind="danger"]:hover,
+.awu-menu > button[data-kind="danger"]:hover { background: color-mix(in srgb, var(--awu-danger) 14%, transparent); }
+
+.awu-menuSep {
+  height: 1px;
+  margin: var(--awu-gap-2) var(--awu-gap-3);
+  background: var(--awu-line-soft);
+}
 
 /* ---- 会话绑定 / 全局启用的边界说明（可见文案，不是 tooltip） ---- */
 .awu-bindHints {
@@ -1528,33 +1945,43 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   gap: var(--awu-gap-4);
   padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-4);
-  border-bottom: 1px solid var(--awu-line);
-  /* 分节标题：13px 600 + 微字距。它是「卡内小标题」，比字段值重、比名字轻 */
-  font-size: var(--awu-fs-label);
+  border-bottom: 1px solid var(--awu-line-soft);
+  /* 分节标题 = kicker（W1-C 排版收敛）：12px 大写间距 + 墨色退一档。
+     原来 13px/600/ink-dim 与字段值（14px/ink）几乎同重，一屏里出现四五个分组时
+     「标题」和「内容」读起来是平的；kicker 化之后标题自动退成"标签"。
+     大写对中文不生效（没有大小写），只用它压住拉丁/数字；字距仍给中英混排一点呼吸。 */
+  font-size: var(--awu-fs-caption);
   font-weight: 600;
-  letter-spacing: .06em;
-  color: var(--awu-ink-dim);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--awu-ink-mute);
 }
 
 .awu-sectionHead .awu-count { font-family: var(--awu-sans); font-size: var(--awu-fs-caption); letter-spacing: 0; color: var(--awu-ink-mute); }
 
 .awu-sectionBody { padding: 0 var(--awu-gap-7); }
 
-/* iOS 表单行：左标签 + 右内容，行间发丝，最后一行去掉 */
+/* iOS 表单行：左标签 + 右内容，行间发丝，最后一行去掉。
+   W1-C：标签 13px/ink-mute、值 14px/500/ink（原来两者都是 14px、只差一档墨，
+   "标签与值谁更重要"读不出来）；行高改整数 23px 免得同组行高在 2x 屏上差半像素；
+   纵向 10→12px，一个分组 8 行时节奏更松。 */
 .awu-field {
   display: grid;
   grid-template-columns: 104px 1fr;
   gap: var(--awu-gap-6);
-  padding: var(--awu-gap-5) 0;
+  padding: var(--awu-gap-6) 0;
   font-size: var(--awu-fs-body);
-  line-height: var(--awu-lh-body);
-  border-bottom: 1px solid var(--awu-line);
+  line-height: var(--awu-lh-px-23);
+  border-bottom: 1px solid var(--awu-line-soft);
 }
 
 .awu-field:last-child { border-bottom: none; }
-.awu-fieldKey { color: var(--awu-ink-mute); }
-.awu-fieldVal { color: var(--awu-ink-dim); word-break: break-word; }
-.awu-fieldVal b { color: var(--awu-ink); font-weight: 500; }
+.awu-fieldKey { font-size: var(--awu-fs-label); color: var(--awu-ink-mute); }
+.awu-fieldVal { font-size: var(--awu-fs-body); font-weight: 500; color: var(--awu-ink); word-break: break-word; }
+.awu-fieldVal b { color: var(--awu-ink); font-weight: 600; }
+/* 值的第二层（说明/编号/时间戳）：掉回常规字重与次要墨色，避免整行发黑 */
+.awu-fieldVal small,
+.awu-fieldVal em { font-weight: 400; font-style: normal; color: var(--awu-ink-mute); }
 
 /* 分组外的小标题（供 iOS「标签在卡外」使用） */
 .awu-sectionLabel {
@@ -1605,7 +2032,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
      整段时间线看着「发虚」。衬线于是只剩头像里那个字形块。 */
   font-family: var(--awu-sans);
   font-size: var(--awu-fs-body-lg);
-  line-height: 24px;
+  line-height: var(--awu-lh-px-24);
   letter-spacing: .01em;
   color: var(--awu-ink-dim);
   transition: background var(--awu-dur-2) var(--awu-ease);
@@ -1640,7 +2067,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-line:hover .awu-lineEdit,
 .awu-lineEdit:focus-visible { opacity: 1; }
-.awu-lineEdit:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-lineEdit:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 .awu-lineEdit:hover { background: color-mix(in srgb, var(--awu-accent) 14%, transparent); }
 
 /* ---- 记忆回顾：搜索栏 + 按月折叠（diary-review.tsx） ---- */
@@ -1651,7 +2078,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-reviewInput {
   flex: 1 1 180px;
   min-width: 0;
-  height: 36px;
+  height: var(--awu-ctrl-h);
   font-size: var(--awu-fs-body);
 }
 
@@ -1679,7 +2106,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   gap: var(--awu-gap-4);
   width: 100%;
-  min-height: 40px;
+  min-height: var(--awu-ctrl-h);
   padding: var(--awu-gap-3) var(--awu-gap-5);
   border: none;
   background: transparent;
@@ -1691,7 +2118,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-reviewMonthHead:hover { background: var(--awu-surface-3); }
-.awu-reviewMonthHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-reviewMonthHead:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 .awu-reviewMonth[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
 
 .awu-reviewMonthTitle { font-size: var(--awu-fs-body); font-weight: 600; }
@@ -1755,7 +2182,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   gap: var(--awu-gap-3);
   width: 100%;
-  min-height: 40px;
+  min-height: var(--awu-ctrl-h);
   padding: var(--awu-gap-3) var(--awu-gap-4);
   border: none;
   background: transparent;
@@ -1767,7 +2194,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-previewSegHead:hover { background: var(--awu-surface-3); }
-.awu-previewSegHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-previewSegHead:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 .awu-previewSeg[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
 
 .awu-previewSegLabel {
@@ -1905,7 +2332,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   box-sizing: border-box;
   resize: vertical;
   min-height: 110px;
-  font-family: var(--awu-serif);
   font-size: var(--awu-fs-body-lg);
   line-height: var(--awu-lh-body);
   letter-spacing: .01em;
@@ -1985,25 +2411,40 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   border: 1px solid color-mix(in srgb, var(--awu-danger) 34%, transparent);
   border-left: 2px solid var(--awu-danger);
   border-radius: var(--awu-r-md);
-  background: color-mix(in srgb, var(--awu-danger) 12%, var(--awu-surface-2));
+  /* 审查 C1（与 .awu-status[data-status="alert"] 是同一个构造的两处）：
+     12% 红底 + 红字 → 深 4.17 / 浅 4.33，不达 4.5。改中性底，红只留 1px 描边 + 2px 左轨 + 红字。
+     复算（底 = surface-2 叠面板）：深 4.94:1 / 浅 5.38:1 → 达标。 */
+  background: var(--awu-surface-2);
   color: var(--awu-danger);
   font-size: var(--awu-fs-body);
   line-height: var(--awu-lh-body);
 }
 
-/* 骨架屏：形状与即将出现的布局一致 */
+/* 骨架屏：形状与即将出现的布局一致（W1-C 重做，审查 A 报告 P0-10）
+   旧版把底色与扫光写死成 rgba(255,255,255,.04/.10)：深色下没问题，浅色下白扫白
+   → 对比 1.02:1，"正在加载"这个信号直接读不出来（浅色主题唯一的 P0 可见缺陷）。
+   现在拆成两个随主题走的 token：--awu-sk-base（底）与 --awu-sk-sweep（扫光），
+   深色 = 亮扫、浅色 = 白扫灰底。
+   另一处改动：扫光从 background-position 动画改成伪元素 transform 位移 ——
+   background-position 不可合成，4~8 行全宽骨架是每帧 0.3~0.6M px 的重绘。 */
 .awu-sk { display: flex; flex-direction: column; gap: var(--awu-gap-5); padding: var(--awu-gap-1) 0; }
 .awu-sk[data-shape="cards"] { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--awu-gap-6); padding: 0; }
 
 .awu-skRow {
+  position: relative;
   height: 76px;
   border-radius: var(--awu-r-lg);
-  background: linear-gradient(100deg,
-    rgba(255, 255, 255, .04) 20%,
-    rgba(255, 255, 255, .10) 40%,
-    rgba(255, 255, 255, .04) 60%);
-  background-size: 300% 100%;
-  animation: awu-shimmer 1.4s linear infinite;
+  background: var(--awu-sk-base);
+  overflow: hidden;
+}
+
+.awu-skRow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 32%, var(--awu-sk-sweep) 50%, transparent 68%);
+  transform: translateX(-100%);
+  animation: awu-sheen 1.4s linear infinite;
 }
 
 .awu-sk[data-shape="cards"] .awu-skRow {
@@ -2054,8 +2495,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   gap: var(--awu-gap-4);
   margin-top: var(--awu-gap-2);
   min-width: 0;
-  /* 名字：衬线 + 角色色 */
-  font-family: var(--awu-serif);
+  /* 名字：黑体 600 + 角色色（2026-10-30 起不再用衬线；衬线只剩头像/徽标首字） */
   font-size: var(--awu-fs-headline);
   font-weight: 600;
   letter-spacing: .02em;
@@ -2109,25 +2549,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   display: flex;
   flex-direction: column;
   gap: var(--awu-gap-5);
-  /* 与 .awu-pane 同一套滚动条：细轨 + hover 才显形 */
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--awu-scroll) 22%, transparent) transparent;
-}
-
-.awu-editorBody:hover,
-.awu-editorBody:focus-within { scrollbar-color: var(--awu-scroll) transparent; }
-
-.awu-editorBody::-webkit-scrollbar { width: 8px; }
-.awu-editorBody::-webkit-scrollbar-track { background: transparent; }
-.awu-editorBody::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: var(--awu-r-pill);
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-.awu-editorBody:hover::-webkit-scrollbar-thumb,
-.awu-editorBody:focus-within::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--awu-scroll) 80%, transparent);
+  /* 滚动条样式不在这里写：见上方「滚动条」统一段（.awu-pane, .awu-editorBody, .awu-focusBody） */
 }
 
 /* ---- 分组：iOS inset grouped list ---- */
@@ -2168,7 +2590,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-editGroupHead:hover { background: var(--awu-surface-3); }
-.awu-editGroupHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-editGroupHead:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 
 .awu-editGroupChevron {
   flex: none;
@@ -2226,7 +2648,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   gap: var(--awu-gap-5);
   padding: var(--awu-gap-2) var(--awu-gap-6) var(--awu-gap-6);
   border-top: 1px solid var(--awu-line);
-  animation: awu-fade var(--awu-dur-2) var(--awu-ease);
+  /* 展开动画不再写在这里：四套折叠（编辑分组 / 世界书条目 / 日记月 / 预览段）统一由
+     文件末尾「折叠编排」段的一条规则驱动（展开 T_BASE / 收起 T_EXIT），改一处四套同时生效。 */
 }
 
 .awu-editGroupHint {
@@ -2266,7 +2689,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-editInput {
   width: 100%;
   box-sizing: border-box;
-  height: 40px;
+  height: var(--awu-ctrl-h);
   font-family: var(--awu-sans);
   font-size: var(--awu-fs-body);
   letter-spacing: 0;
@@ -2282,7 +2705,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   padding: var(--awu-gap-4) var(--awu-gap-5);
   resize: vertical;
   overflow-y: auto;
-  font-family: var(--awu-serif);
   font-size: var(--awu-fs-body-lg);
   line-height: var(--awu-lh-body);
 }
@@ -2307,10 +2729,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   flex: 1;
   min-width: 0;
   height: auto;
-  min-height: 40px;
+  min-height: var(--awu-ctrl-h);
   padding: var(--awu-gap-3) var(--awu-gap-4);
   resize: vertical;
-  font-family: var(--awu-serif);
 }
 
 .awu-editListRemove {
@@ -2319,7 +2740,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   align-items: center;
   justify-content: center;
   width: var(--awu-size-hit);
-  height: 40px;
+  height: var(--awu-ctrl-h);
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--awu-r-xs);
@@ -2333,7 +2754,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-editListItem:hover .awu-editListRemove { opacity: 1; }
 .awu-editListRemove:hover { color: var(--awu-danger); background: color-mix(in srgb, var(--awu-danger) 12%, transparent); }
-.awu-editListRemove:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-editListRemove:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 .awu-editAdd {
   align-self: flex-start;
@@ -2354,7 +2775,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-editAdd:hover { color: var(--awu-accent-text); border-color: var(--awu-accent); background: color-mix(in srgb, var(--awu-accent) 10%, transparent); }
-.awu-editAdd:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-editAdd:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 /* ---- 底部固定条 ---- */
 .awu-editorFoot {
@@ -2400,8 +2821,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   justify-content: center;
   padding: var(--awu-gap-8);
   background: var(--awu-scrim-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: var(--awu-blur-sm);
+  -webkit-backdrop-filter: var(--awu-blur-sm);
   border-radius: var(--awu-r-xl);
   animation: awu-fade var(--awu-dur-2) var(--awu-ease);
 }
@@ -2439,6 +2860,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-editorConfirmActions { display: flex; justify-content: flex-end; gap: var(--awu-gap-4); margin-top: var(--awu-gap-6); }
 
 /* ================================================================ 弹层（iOS sheet：底部浮起 + grabber） */
+/* W2：遮罩层的 6px 全屏模糊已删除（D 报告「最划算的一刀」）。
+   理由：它盖住的是整块 1.3M px 的视口，每帧都要为"下面那一整屏"做一次模糊采样；
+   而 scrim 自己已经有 --awu-scrim-bg 的压暗层，去掉模糊后"能不能看清弹层"没有任何变化，
+   省的是一条全屏滤镜通道。视觉上唯一的差别是背景里的字不再糊 —— 实测更接近 iOS 的做法。 */
 .awu-scrim {
   position: fixed;
   inset: 0;
@@ -2448,23 +2873,24 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   justify-content: center;
   padding: var(--awu-gap-6);
   background: var(--awu-scrim-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   animation: awu-fade var(--awu-dur-2) var(--awu-ease);
 }
 
 .awu-dialog {
   position: relative;
-  /* 表单弹层收窄到 620：760 宽下三个输入框会被拉成两条长杠，iOS sheet 的呼吸感就没了。
-     这个宽度直接写在这里，不动 --awu-dialog-w 令牌（蒸馏弹层还在用它兜底 420）。 */
-  width: min(620px, 100%);
+  /* 表单弹层宽度：620（令牌 --awu-dialog-w）。760 宽下三个输入框会被拉成两条长杠，
+     iOS sheet 的呼吸感就没了；蒸馏弹层同样吃这一档，不再自带 420/760 的兜底值。 */
+  width: min(var(--awu-dialog-w), 100%);
   max-height: min(84vh, var(--awu-dialog-max-h));
   display: flex;
   flex-direction: column;
   border: 1px solid var(--awu-glass-edge);
-  border-radius: var(--awu-r-xl);
+  /* 托盘圆角统一走 --awu-radius-sheet（契约 §2.6）：所有 sheet 一个值。
+     蒸馏弹层已改为继承本规则（它自己那条 16px 圆角在 W3 删掉了），所以不再需要桥接选择器。 */
+  border-radius: var(--awu-radius-sheet);
   background-color: var(--awu-surface-dialog);
-  background-image: radial-gradient(120% 70% at 50% -20%, var(--awu-sheen) 0%, transparent 60%);
+  /* 顶部 sheen 加强到 78%：.86→.72 之后弹层更透，没有顶部高光会读成"一块灰膜" */
+  background-image: radial-gradient(130% 78% at 50% -22%, var(--awu-sheen) 0%, transparent 66%);
   backdrop-filter: var(--awu-blur);
   -webkit-backdrop-filter: var(--awu-blur);
   box-shadow: var(--awu-shadow), var(--awu-specular);
@@ -2500,6 +2926,17 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-dialogBody { padding: var(--awu-gap-6) var(--awu-gap-8) var(--awu-gap-5); overflow-y: auto; }
 
+/* 弹层内不要再吃一次 gutter（W1-C，E 报告视觉漂移 #3）：
+   .awu-err / .awu-status 自带 margin: 0 var(--awu-gutter)，那是为"贴在面板全宽上"设计的；
+   进 .awu-dialogBody（自身已有 20px padding）后 → 实际缩进 32+20=52px，比同级正文多出 32px。
+   只归零左右，上下 margin 保留（纵向节奏还是它们自己的）。
+   ⚠️ 这两个类在弹层里的调用点：preview.tsx / preset-view.tsx 共 5 处。 */
+.awu-dialogBody > .awu-err,
+.awu-dialogBody > .awu-status {
+  margin-left: 0;
+  margin-right: 0;
+}
+
 .awu-dialogFoot {
   display: flex;
   justify-content: flex-end;
@@ -2514,7 +2951,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-input {
   width: 100%;
   box-sizing: border-box;
-  height: 42px;
+  /* 输入框高度并入 --awu-ctrl-h（原 42）：与同一行里的按钮等高，行内不再错位 */
+  height: var(--awu-ctrl-h);
   padding: 0 var(--awu-gap-5);
   border: 1px solid var(--awu-line-strong);
   border-radius: var(--awu-r-md);
@@ -2549,7 +2987,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-previewName {
   margin-top: var(--awu-gap-4);
-  font-family: var(--awu-serif);
   font-size: var(--awu-fs-body-lg);
   color: var(--awu-ink-mute);
 }
@@ -2579,6 +3016,10 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-check input { margin: 3px 0 0; accent-color: var(--awu-accent); cursor: pointer; }
 
 /* ================================================================ 专注编辑层（长文本整屏） */
+/* W2：原来用 --awu-surface（面板底）+ 30px 强模糊盖住整块面板（约 1.0M px），
+   违反本文件自己在变量层写的「大面积用轻 blur、强模糊只给小面积」。
+   改成弹层级实底（.86/.90）+ --awu-blur-panel（20px）：一层更实、一层更轻，
+   专注层本来就该"把下面按住"，用底色而不是用模糊来做到。 */
 .awu-focus {
   position: absolute;
   inset: 0;
@@ -2586,9 +3027,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   display: flex;
   flex-direction: column;
   border-radius: var(--awu-r-xl);
-  background: var(--awu-surface);
-  backdrop-filter: var(--awu-blur);
-  -webkit-backdrop-filter: var(--awu-blur);
+  background: var(--awu-surface-dialog);
+  backdrop-filter: var(--awu-blur-panel);
+  -webkit-backdrop-filter: var(--awu-blur-panel);
   animation: awu-fade var(--awu-dur-2) var(--awu-ease);
 }
 
@@ -2627,8 +3068,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--awu-gutter) max(var(--awu-gutter), calc((100% - var(--awu-content-max)) / 2));
-  scrollbar-width: thin;
-  scrollbar-color: var(--awu-scroll) transparent;
 }
 
 .awu-focusInput {
@@ -2641,7 +3080,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   outline: none;
   background: transparent;
   color: var(--awu-ink);
-  font-family: var(--awu-serif);
   font-size: var(--awu-fs-control);
   line-height: var(--awu-lh-loose);
   letter-spacing: .01em;
@@ -2650,7 +3088,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-focusInput::placeholder { color: var(--awu-ink-mute); }
 
 .awu-focusRead {
-  font-family: var(--awu-serif);
   font-size: var(--awu-fs-control);
   line-height: var(--awu-lh-loose);
   color: var(--awu-ink-dim);
@@ -2659,7 +3096,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   outline: none;
 }
 
-.awu-focusRead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 4px; border-radius: var(--awu-r-xs); }
+.awu-focusRead:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); border-radius: var(--awu-r-xs); }
 
 .awu-focusFoot {
   flex: none;
@@ -2673,52 +3110,21 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-focusHint { flex: 1; min-width: 0; font-size: var(--awu-fs-body); line-height: var(--awu-lh-body); color: var(--awu-ink-mute); }
 .awu-focusHint[data-over="true"] { color: var(--awu-gold); }
 
-/* ================================================================ 预留模块（世界书 / 词条 / CCv3 预览 / 编辑器分段） */
-/* 对应组件尚未接线（见 2026-10-30-tavern-editor.md），规则先按新语言定死，
-   免得组件落地时再改一次皮肤。 */
+/* ================================================================ 预留模块（已清理，2026-11-02）
+   原来这里挂着「世界书两栏 / 词条 chips / CCv3 原生字段 / 编辑器分段」四组样式，
+   合计 21 个类、约 171 行，在 client/ 全目录（含 tsx）里引用数为 0 —— 组件从未接线。
+   审查 F9 判定为死代码，本轮全部删除（git 历史里还在，接线时按需取回）：
+     .awu-loreSplit / .awu-lorePane / .awu-loreDetail
+     .awu-editorTabs / .awu-editorTab
+     .awu-budgetTag / .awu-levelTag / .awu-fieldCount
+     .awu-chips / .awu-chip / .awu-chipX / .awu-chipInput
+     .awu-nativeField / .awu-jsonView / .awu-stack
+     .awu-modeOption / .awu-modeOptionRow / .awu-modeOptionText / .awu-modeLabel / .awu-modeHint
+   接线时的正确做法：在世界书/预设组件落地的那一批里**新写**，并要求那一批同时把类名登记进本文件顶部注释，
+   而不是靠"先囤一套皮肤等组件"。死 CSS 的代价是它会随令牌改动漂移（比如这批刚改的 radius/line-soft），
+   等真接线时反而要重写一遍。 */
 
-/* 世界书两栏：左条目列表 + 右条目内容（<900 收成单栏手风琴） */
-.awu-loreSplit {
-  display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: var(--awu-gap-6);
-  align-items: start;
-}
-
-.awu-lorePane { min-width: 0; display: flex; flex-direction: column; gap: var(--awu-gap-3); }
-.awu-loreDetail { min-width: 0; display: flex; flex-direction: column; gap: var(--awu-gap-5); }
-
-@media (max-width: 900px) {
-  .awu-loreSplit { grid-template-columns: minmax(0, 1fr); }
-}
-
-.awu-editorTabs {
-  flex: none;
-  display: flex;
-  gap: var(--awu-gap-1);
-  margin: 0 var(--awu-gutter) var(--awu-gap-5);
-  padding: 3px;
-  border-radius: var(--awu-r-md);
-  background: var(--awu-glass-3);
-}
-
-.awu-editorTab {
-  flex: 1;
-  min-width: 0;
-  padding: var(--awu-gap-2) var(--awu-gap-4);
-  border: none;
-  border-radius: var(--awu-r-sm);
-  background: transparent;
-  color: var(--awu-ink-mute);
-  font: inherit;
-  font-size: var(--awu-fs-body);
-  cursor: pointer;
-  transition: background var(--awu-dur-2) var(--awu-ease), color var(--awu-dur-2) var(--awu-ease);
-}
-
-.awu-editorTab[data-active="true"] { background: var(--awu-glass-1); color: var(--awu-ink); box-shadow: var(--awu-specular); }
-.awu-editorTab:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
-
+/* 世界书列表（这部分是活的：lorebook-editor.tsx 在用） */
 .awu-exportPill {
   display: inline-flex;
   align-items: center;
@@ -2735,94 +3141,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-exportPill[data-state="warn"] { color: var(--awu-gold); background: color-mix(in srgb, var(--awu-gold) 14%, transparent); }
 .awu-exportPill[data-state="bad"] { color: var(--awu-danger); background: color-mix(in srgb, var(--awu-danger) 14%, transparent); }
 
-.awu-budgetTag,
-.awu-levelTag {
-  flex: none;
-  padding: 0 var(--awu-gap-3);
-  border-radius: var(--awu-r-pill);
-  font-size: var(--awu-fs-micro);
-  font-weight: 500;
-  letter-spacing: .02em;
-  color: var(--awu-ink-mute);
-  background: var(--awu-surface-3);
-}
 
-.awu-levelTag[data-level="required"] { color: var(--awu-accent-text); background: color-mix(in srgb, var(--awu-accent) 16%, transparent); }
-.awu-levelTag[data-level="recommended"] { color: var(--awu-gold); background: color-mix(in srgb, var(--awu-gold) 14%, transparent); }
-.awu-budgetTag[data-budget="never"] { opacity: .7; }
-.awu-budgetTag[data-budget="l1"] { color: var(--awu-accent-text); }
-
-.awu-fieldCount {
-  font-family: var(--awu-mono);
-  font-size: var(--awu-fs-micro);
-  color: var(--awu-ink-mute);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 词条 chips（世界书关键词 / 标签） */
-.awu-chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--awu-gap-3);
-  min-height: 42px;
-  padding: var(--awu-gap-3) var(--awu-gap-4);
-  border: 1px solid var(--awu-line-strong);
-  border-radius: var(--awu-r-md);
-  background: var(--awu-surface-field);
-  max-height: 132px;
-  overflow-y: auto;
-}
-
-.awu-chips:focus-within { border-color: var(--awu-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--awu-accent) 18%, transparent); }
-
-.awu-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--awu-gap-2);
-  height: var(--awu-size-hit);
-  padding: 0 var(--awu-gap-2) 0 var(--awu-gap-4);
-  border-radius: var(--awu-r-pill);
-  background: var(--awu-surface-3);
-  font-size: var(--awu-fs-label);
-  color: var(--awu-ink);
-  white-space: nowrap;
-}
-
-.awu-chipX {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: var(--awu-r-pill);
-  background: transparent;
-  color: var(--awu-ink-mute);
-  font-size: var(--awu-fs-caption);
-  line-height: 1;
-  cursor: pointer;
-}
-
-.awu-chipX:hover { background: var(--awu-surface-2); color: var(--awu-ink); }
-
-.awu-chipInput {
-  flex: 1;
-  min-width: 140px;
-  height: var(--awu-size-hit);
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--awu-ink);
-  font: inherit;
-  font-size: var(--awu-fs-body);
-}
-
-.awu-chipInput::placeholder { color: var(--awu-ink-mute); }
-
-/* 世界书列表 */
-.awu-loreList { display: flex; flex-direction: column; gap: var(--awu-gap-3); }
 
 .awu-loreRow {
   position: relative;
@@ -2890,7 +3209,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   cursor: pointer;
 }
 
-.awu-loreRowMain:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; border-radius: var(--awu-r-xs); }
+.awu-loreRowMain:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); border-radius: var(--awu-r-xs); }
 
 .awu-loreRowTitleWrap { display: flex; align-items: center; gap: var(--awu-gap-3); max-width: 100%; min-width: 0; }
 
@@ -2917,6 +3236,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-loreRowFlag {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 15px;
   height: 15px;
   border-radius: var(--awu-r-pill);
@@ -2924,8 +3246,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-danger);
   font-size: var(--awu-fs-micro);
   font-weight: 700;
-  line-height: 15px;
-  text-align: center;
+  /* 用 flex 居中代替 line-height: 15px（那是个只为"把 ! 垂直居中"而存在的裸 px，
+     token 化没有意义；flex 居中在任何字号下都对） */
 }
 
 /* 徽记按等级换色：error 红 / warn 金 / info 灰点（真卡的规模提示不该抢眼） */
@@ -2954,7 +3276,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-loreRowBtn:hover { color: var(--awu-ink); background: var(--awu-surface-3); }
 .awu-loreRowBtn:disabled { opacity: .32; cursor: default; background: transparent; }
-.awu-loreRowBtn:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-loreRowBtn:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 .awu-loreGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--awu-gap-5); }
 
@@ -2974,7 +3296,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-loreFold > summary::-webkit-details-marker { display: none; }
-.awu-loreFold > summary:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-loreFold > summary:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 .awu-loreFold[open] > summary { border-bottom: 1px solid var(--awu-line); color: var(--awu-ink); }
 .awu-loreFold > .awu-loreAdv { padding: var(--awu-gap-4) var(--awu-gap-5) var(--awu-gap-5); }
 
@@ -2993,7 +3315,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-loreFullscreen:hover { color: var(--awu-accent-text); border-color: var(--awu-accent); }
-.awu-loreFullscreen:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 2px; }
+.awu-loreFullscreen:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 .awu-loreHealth { display: flex; flex-wrap: wrap; align-items: center; gap: var(--awu-gap-4); }
 
@@ -3051,8 +3373,11 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-loreDroppedHead:hover { background: color-mix(in srgb, var(--awu-gold) 12%, transparent); }
-.awu-loreDroppedHead:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: -2px; }
+.awu-loreDroppedHead:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 .awu-loreDropped[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
+/* 世界书「体检说明」那块（lorebook-editor 的信息折叠）：与上面四套折叠同一个箭头语言。
+   有了这条，JSX 侧就不必再给 IconChevron 写内联 transform（那份内联是过渡缺失时期的补丁）。 */
+.awu-loreInfoBlock[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
 
 .awu-loreDroppedTitle { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -3234,7 +3559,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 /* 正文摘要：点一下进全屏编辑（长文本不塞进这个小框） */
 .awu-presetModuleBody {
   width: 100%;
-  min-height: 40px;
+  min-height: var(--awu-ctrl-h);
   padding: var(--awu-gap-3) var(--awu-gap-4);
   border: 1px dashed var(--awu-line-strong);
   border-radius: var(--awu-r-xs);
@@ -3250,7 +3575,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 .awu-presetModuleBody:hover { border-color: var(--awu-accent); color: var(--awu-ink); }
-.awu-presetModuleBody:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 1px; }
+.awu-presetModuleBody:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); }
 
 /* 导入：JSON 输入区 + 预览列表 */
 .awu-presetJson {
@@ -3343,7 +3668,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-ink-mute);
 }
 
-.awu-importNative:focus-visible { outline: 2px solid var(--awu-accent); outline-offset: 3px; border-radius: var(--awu-r-xs); }
+.awu-importNative:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset); border-radius: var(--awu-r-xs); }
 
 .awu-importView { display: flex; flex-direction: column; gap: var(--awu-gap-5); }
 
@@ -3417,29 +3742,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   color: var(--awu-ink-dim);
 }
 
-/* CCv3 预览段 */
-.awu-nativeField { display: flex; flex-direction: column; gap: var(--awu-gap-2); padding: var(--awu-gap-4) 0; border-bottom: 1px solid var(--awu-line); }
-.awu-nativeField:last-child { border-bottom: none; }
-.awu-nativeField[data-source="raw"] { border-left: 2px solid color-mix(in srgb, var(--awu-gold) 50%, transparent); padding-left: var(--awu-gap-4); }
-.awu-nativeField[data-source="unmapped"] { border-left: 2px solid color-mix(in srgb, var(--awu-accent) 50%, transparent); padding-left: var(--awu-gap-4); }
-
-.awu-jsonView {
-  margin: 0;
-  max-height: 260px;
-  overflow: auto;
-  padding: var(--awu-gap-4);
-  border-radius: var(--awu-r-md);
-  background: var(--awu-surface-field);
-  font-family: var(--awu-mono);
-  font-size: var(--awu-fs-micro);
-  line-height: var(--awu-lh-snug);
-  color: var(--awu-ink-dim);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .awu-issueList { display: flex; flex-direction: column; gap: var(--awu-gap-3); }
-.awu-stack { display: flex; flex-direction: column; gap: var(--awu-gap-6); }
 
 .awu-path {
   font-family: var(--awu-mono);
@@ -3449,17 +3752,47 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   word-break: break-all;
 }
 
-.awu-modeOption { width: 100%; justify-content: flex-start; height: auto; padding: var(--awu-gap-5) var(--awu-gap-6); margin-bottom: var(--awu-gap-4); text-align: left; }
-.awu-modeOptionRow { display: inline-flex; align-items: center; gap: var(--awu-gap-4); }
-.awu-modeOptionText { display: inline-flex; flex-direction: column; gap: var(--awu-gap-1); }
-.awu-modeLabel { font-size: var(--awu-fs-body-lg); font-weight: 600; }
-.awu-modeHint { font-size: var(--awu-fs-body); font-weight: 400; color: var(--awu-ink-mute); }
+/* ================================================================ 跨批过渡：使用指南排版（第 3 批收回）
+   这里的规则本该写在 guide.styles.ts（那是第 3 批的写域，本轮不动），但排版是第 1 批的验收项，
+   所以先用 (0,2,0) 的选择器在本文件末尾压过去，等第 3 批把 guide 的 12/13/14 三档换成令牌后整段删除。
+   目标（契约 §E）：阅读宽 760 居中、正文 14/23。 */
+.awu-guide { max-width: var(--awu-content-max); margin: 0 auto; }
+.awu-guide .awu-guide-line,
+.awu-guide .awu-guide-text,
+.awu-guide .awu-guide-key,
+.awu-guide .awu-guide-a,
+.awu-guide .awu-guide-q { font-size: var(--awu-fs-body); line-height: var(--awu-lh-px-23); }
+.awu-guide .awu-guide-note,
+.awu-guide .awu-guide-pathLine,
+.awu-guide .awu-guide-pathHint { font-size: var(--awu-fs-label); line-height: var(--awu-lh-px-20); }
+.awu-guide .awu-guide-h { font-size: var(--awu-fs-caption); }
+
+/* 空态的第二行说明（.awu-emptySub 在 index.tsx 里用了很久，但一直没规则 → 掉回继承的 14px/ink）。
+   这里补一条：比主提示低一档字号与墨色，和 .awu-emptyHint + .awu-emptyHint 的层级保持同一种读法。 */
+.awu-emptySub {
+  font-size: var(--awu-fs-caption);
+  line-height: var(--awu-lh-px-18);
+  color: var(--awu-ink-mute);
+  max-width: 360px;
+}
+
+/* 空态的 data-kind 之前是「白挂」（JSX 写了 9 处，CSS 一处没认）：这里给徽标上色，
+   让「出错了 / 还没有日记 / 还没选人」三种空态在扫视时能分开。
+   diary 用角色金、error 用红、pick/empty 沿用系统蓝。 */
+.awu-empty[data-kind="diary"] .awu-emptyMark { color: var(--awu-gold); }
+.awu-empty[data-kind="error"] .awu-emptyMark {
+  color: var(--awu-danger);
+  border-color: color-mix(in srgb, var(--awu-danger) 40%, transparent);
+}
+.awu-empty[data-kind="pick"] .awu-emptyMark { color: var(--awu-accent-text); }
 
 /* ================================================================ 字体归属（最后统一裁决）
-   衬线只留两处辨识度：角色名（.awu-cardName / .awu-heroName / .awu-sigilName）与日记正文（.awu-line）。
-   其余一切「要读的字」——输入框、编辑分组、专注层、预览名——统一黑体：
-   Windows 上宋体小字发虚，主人反馈的「辨认困难」主要就来自这里。
-   写在文件末尾：与各处规则同权重，靠顺序赢，逐条改反而容易漏。 */
+   **事实（2026-11-02 校正）**：衬线现在只剩两处字形块 —— .awu-mark 与 .awu-avatar 的姓名首字。
+   角色名（.awu-cardName / .awu-heroName / .awu-sigilName / .awu-editorName）与日记正文（.awu-line）
+   已在 2026-10-30 的「辨认困难」修复里改成黑体，各自规则内就写着 --awu-sans。
+   下面这张表是把"输入类控件"统一压成黑体的兜底：它们原先各自写了 --awu-serif，
+   被本段覆盖后那 7 条声明就是死声明 —— 本轮已把源头的 font-family 一并删掉（只留这张表做兜底）。
+   ⚠️ 不要再照旧注释去"恢复角色名衬线"：会改完没反应（本段在文件末尾，同权重靠顺序赢）。 */
 .awu-textarea,
 .awu-editArea,
 .awu-editListText,
@@ -3494,9 +3827,13 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   to { opacity: 1; transform: translateX(0); }
 }
 
-@keyframes awu-glow {
-  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--awu-gold) 18%, transparent), 0 8px 24px color-mix(in srgb, var(--awu-gold) 12%, transparent); }
-  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--awu-gold) 34%, transparent), 0 12px 32px color-mix(in srgb, var(--awu-gold) 20%, transparent); }
+/* 启用态呼吸（W2）：只动 opacity。
+   旧版 awu-glow 动的是两个 box-shadow（0 0 0 1px / 0 10px 30px），box-shadow 不可合成、
+   每帧都要重画整张卡（含圆角与渐变），一个"启用中"的卡就是常年 10%~15% 的 paint。
+   现在外圈金环是静态 box-shadow，呼吸落在 .awu-card::after 的 opacity 上（合成，零 paint）。 */
+@keyframes awu-glow-breathe {
+  0%, 100% { opacity: .35; }
+  50% { opacity: .85; }
 }
 
 @keyframes awu-breathe {
@@ -3514,54 +3851,433 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   85%, 100% { transform: translateX(100%); }
 }
 
-@keyframes awu-shimmer {
-  from { background-position: 100% 0; }
-  to { background-position: -50% 0; }
+/* 横向扫过（W2）：替代原来动 background-position 的两条循环动画。
+   用在"忙碌进度条"（45% 宽的光块）上，位移是合成属性。
+   骨架屏早前已改成 .awu-skRow::after + awu-sheen，这里不再需要 shimmer。 */
+@keyframes awu-sweep-x {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(223%); }
 }
 
 @keyframes awu-spin { to { transform: rotate(360deg); } }
 
-@keyframes awu-progress {
-  from { background-position: -45% 0; }
-  to { background-position: 145% 0; }
+/* tab 切换 crossfade（契约 §3）：120ms、只 opacity、不带位移、不带 stagger。
+   挂在 .awu-mainBody > *（见该规则处的注释）与显式 [data-view-state="enter"] 上。 */
+@keyframes awu-view-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
+/* 折叠展开/收起（契约 §3：展开 T_BASE / 收起 T_EXIT，四套折叠共用）。
+   只动 opacity：高度动画会触发布局（reflow），在 340px 列表里尤其明显；
+   折叠体的高度本来就是"瞬间到位"，让内容淡进来比整块长出来更安静。
+   收起那条要配合 JSX 在折叠体上挂 presence，否则 React 卸载时元素已经没了。 */
+@keyframes awu-fold-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes awu-fold-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ---- 折叠编排（契约 §3：展开 T_BASE / 收起 T_EXIT）----
+   四套折叠体共用这一条，别再给单个组件写 animation：
+     1) 卡编辑器分组  .awu-editGroupBody
+     2) 世界书条目    .awu-loreBody
+     3) 日记按月      .awu-reviewMonth > .awu-diary
+     4) 注入预览分段  .awu-previewText / .awu-previewEmpty
+   收起那条在退场段（.awu-*[data-state="closing"]），前提是 JSX 用 usePresence 留 160ms。 */
+.awu-editGroupBody,
+.awu-loreBody,
+.awu-reviewMonth > .awu-diary,
+.awu-previewText,
+.awu-previewEmpty {
+  animation: awu-fold-in var(--awu-t-base) var(--awu-ease-out) both;
+}
+
+/* ---- 提示条编排（契约 §3：notice 进场 / 退场）----
+   进场用 awu-rise（T_BASE，8px 上浮）；退场用 awu-exit-rise（T_EXIT）。
+   .awu-notice 是契约里的新类名；同时兜住还没有这个类的旧写法
+   （提示条当前是 .awu-status[data-status="info"|"warn"]，验收前的面板就是它）。 */
+.awu-notice,
+.awu-status[data-status="info"],
+.awu-status[data-status="warn"] {
+  animation: awu-rise var(--awu-t-base) var(--awu-ease) both;
+}
+
+/* ---- 视图编排（契约 §3：tab 切换 T_FAST crossfade，不带位移、不带 stagger）----
+   语义澄清（W2，与 index.tsx owner 对表过）：这是 **animation，不是 transition**。
+   animation 在元素**入 DOM** 时自动播一次，所以最稳的用法是上面那条零依赖的
+   「.awu-mainBody > *」（挂在 ~700 行，靠顺序输给各视图自己的动画）。
+   曾经还有一条「容器显式声明」的写法（.awu-mainBody[data-view-state="enter"]），
+   JSX 侧已整段删除（他们的注释也写了：animation 路线上"下一帧摘属性"会把动画一起摘掉，
+   淡入被截断 = 等于没做）。第 3 批（2026-11-02）CSS 侧同步删掉，不留下无人写入的钩子。
+   awu-view-in 的唯一引用就是 .awu-mainBody > * 那条，别一起删。 */
+
+/* ---- 骨架退场（JSX 用 data-state="closing" 标 160ms 再卸载）----
+   骨架是"加载中"的替身，淡出比硬消失少一次闪；只动 opacity。
+   ⚠️ 必须同时脱离文档流（position: absolute + left/right 撑满）：内容是在骨架还挂在树上时
+   就渲染出来的，留在流里会让"骨架 + 内容"上下并存 160ms，看起来像页面抖了一下。
+   用 left:0/right:0 而不是 inset:0 —— top 保持 auto 就会留在自己的静态位置（与淡出前同一处），
+   只把宽度按容器撑满；.awu-pane / .awu-mainBody 是它的定位上下文（见各自规则）。 */
+.awu-sk[data-state="closing"] {
+  position: absolute;
+  left: 0;
+  right: 0;
+  animation: awu-exit var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* ---- 提示条退场（.awu-status 系）----
+   注意别和进场撞车：进场是按 [data-status="info"|"warn"] 命中的 awu-rise，
+   这里按 [data-state="closing"] 命中，两条同权重 (0,2,0)，**本段在后面所以它赢**。
+   如果哪天把这段挪到进场之前，提示条就会"退场时又升一次"，别动顺序。 */
+.awu-status[data-state="closing"] {
+  animation: awu-exit-rise var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* ---- FLIP 期间抑制 hover 位移（契约 §2.1 的 data-flipping）----
+   JSX 删卡时用 WAAPI 跑位移动画，同时挂 data-flipping="true"。
+   WAAPI 的 transform 优先级高于 CSS，但**动画结束的那一帧**属性若还没摘，
+   :hover 的 translateY(-2px) 会立刻接管 → 卡片在归位后自己弹一下。
+   这里把位移与过渡都按住：归位只由 FLIP 负责，hover 只管颜色与阴影。 */
+.awu-card[data-flipping="true"],
+.awu-card[data-flipping="true"]:hover,
+.awu-card[data-flipping="true"]:active {
+  transform: none;
+}
+
+/* ---- 按压编排（契约 §3「按压」：T_FAST，卡片 .995 / 按钮 .97 / 图标件 .94）----
+   这 13 个控件此前只有 :hover 没有 :active，点下去只有"结果"没有"触感"。
+   为什么集中写在这里：它们各自的 transition 只列了颜色属性，逐个补 transform 要改 13 处；
+   这里用一条并集 transition 覆盖（属性是超集，不会丢原有过渡），并集中标注尺寸档。
+   reduced-motion 下由全局守卫统一用「*:active 归零」关掉（见文件末尾降级段）。 */
+.awu-tab,
+.awu-modePill,
+.awu-loreRow,
+.awu-loreRowBtn,
+.awu-editGroupHead,
+.awu-reviewMonthHead,
+.awu-previewSegHead,
+.awu-check,
+.awu-noticeClose,
+.awu-editListRemove,
+.awu-editAdd,
+.awu-lineEdit,
+.awu-importDrop {
+  transition:
+    transform var(--awu-t-fast) var(--awu-ease),
+    color var(--awu-t-base) var(--awu-ease),
+    background var(--awu-t-base) var(--awu-ease),
+    border-color var(--awu-t-base) var(--awu-ease),
+    opacity var(--awu-t-base) var(--awu-ease);
+}
+
+/* 按钮 / 整行：.97 */
+.awu-tab:active,
+.awu-modePill:active,
+.awu-loreRow:active,
+.awu-editGroupHead:active,
+.awu-reviewMonthHead:active,
+.awu-previewSegHead:active,
+.awu-check:active,
+.awu-editAdd:active { transform: scale(.97); }
+
+/* 图标件 / 次要动作：.94（和已有的 .awu-btn / .awu-iconBtn 同档） */
+.awu-loreRowBtn:active,
+.awu-noticeClose:active,
+.awu-editListRemove:active,
+.awu-lineEdit:active { transform: scale(.94); }
+
+/* 拖放区属于"卡片族"：只给一点点下沉（它不是按钮，压太多会像被点坏了） */
+.awu-importDrop:active { transform: scale(.995); }
+
+/* ---- 退场基元（W0-B 地基 + W2 补完，与 client/motion.ts 的 usePresence 配对）----
+   React 卸载即销毁，所以"退场"永远是两件事：JS 晚 T_EXIT(160ms) 再卸载 + CSS 把这 160ms 画完。
+   分工：motion.ts 的 usePresence 负责计时与焦点释放；本段负责画面。
+   四条铁律（改任何一条之前先读）：
+     1. 必须 animation-fill-mode: both —— 否则动画跑完瞬间闪回 opacity:1 再消失；
+     2. **只动 opacity / 位移，位移一律 ≤ 12px；绝不动 filter / width / height / top / left**；
+     3. 退场永远比对应进入快（T_EXIT 对 T_ENTER/T_MID），且**不做 stagger**；
+     4. 退场期的命中策略见本段后面那条 pointer-events 规则。
+   接入方式：根节点展开 motion.ts 的 presenceAttrs(closing)，即 data-state="closing"。 */
+
+/* 通用退场：只淡出。面板 / scrim / dialog / 专注层 / 编辑器 / 确认卡都走这条。 */
+@keyframes awu-exit {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* sheet 向下退：与 awu-sheet-in 的 y24 反向，但只走 12px —— 退场位移要小于进入，
+   否则看起来像"被弹出去"，而用户的心理预期是"收回去"。 */
+@keyframes awu-exit-down {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(12px); }
+}
+
+/* 横向退场（W2，契约 §3「list→detail」）：±8px。
+   方向语义：进详情 = 内容从右侧来 → 返回列表时用 left（回右侧去）；
+   反过来（从详情退回列表 = 列表从左侧来）用 right。
+   8px 刻意小：横向一多就与"整页横滑"混读，这里只要一个方向暗示。 */
+@keyframes awu-exit-right {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(8px); }
+}
+
+@keyframes awu-exit-left {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(-8px); }
+}
+
+/* 向上退场（W2）：notice 条（"向上飘走"）与骨架→内容 用。同样 8px，纯 opacity + 位移。 */
+@keyframes awu-exit-rise {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+
+/* 大层：只淡出（160ms）。data-state 由 presenceAttrs() 提供。 */
+.awu-panel[data-state="closing"],
+.awu-scrim[data-state="closing"],
+.awu-dialog[data-state="closing"],
+.awu-focus[data-state="closing"],
+.awu-editor[data-state="closing"],
+.awu-editorConfirm[data-state="closing"] {
+  animation: awu-exit var(--awu-t-exit) var(--awu-ease-out) both;
+  /* 只在退场这 160ms 里买一次层提升，结束后随卸载一起消失 */
+  will-change: opacity;
+}
+
+/* 只给"有父层接着兜点击"的那几层关掉命中：dialog/focus/editorConfirm 在 scrim 里、
+   editor 在面板里，把它们的点击放过去只会落到仍然拦着的父层，不会漏到宿主。
+   面板与 scrim 自己**保留**命中：它们是最后一道屏，退场期漏点击 = 点到宿主聊天区。 */
+.awu-dialog[data-state="closing"],
+.awu-focus[data-state="closing"],
+.awu-editor[data-state="closing"],
+.awu-editorConfirm[data-state="closing"] { pointer-events: none; }
+
+/* 选择器权重 (0,2,0) 高于进入规则 (0,1,0)，不需要 !important */
+.awu-dialog[data-state="closing"] { animation-name: awu-exit-down; }
+
+/* ---- 详情页方向退场（契约 §3「list→detail」：进入 +8px 从右、返回 −8px 回右）----
+   两条横向 keyframes 从 W2 起就写在下面（awu-exit-right / -left），但一直只有定义没有引用
+   —— verify-ui 的 keyframes 闭环为此开了白名单。第 3 批接上：
+     · 默认（只有 data-state="closing"）：向右退。这是"从详情回列表"的方向，
+       内容往它来的方向走，列表从左侧回到视野；
+     · 需要反方向时 JSX 挂 data-exit="left"（或 "right" 显式声明），显式优先。
+   两条都带 pointer-events: none：退场期不该还能点中要消失的视图。 */
+.awu-detail[data-state="closing"] {
+  animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* 显式方向：可挂在任意视图根节点（.awu-detail / .awu-guide / 以后的子视图）。
+   写成「属性 + 类」两个选择器是为了让它在 .awu-detail[data-state] 之上（同为 (0,2,0)，靠顺序赢）。 */
+[data-exit="right"],
+.awu-detail[data-exit="right"] {
+  animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+[data-exit="left"],
+.awu-detail[data-exit="left"] {
+  animation: awu-exit-left var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* 四套折叠体的**收起**（展开见下面「折叠编排」段）。
+   ⚠️ 前提：JSX 用 usePresence 让折叠体在树上多待 160ms；React 直接卸载的话这里没有对象可动。 */
+.awu-editGroupBody[data-state="closing"],
+.awu-loreBody[data-state="closing"],
+.awu-reviewMonth > .awu-diary[data-state="closing"],
+.awu-previewText[data-state="closing"],
+.awu-previewEmpty[data-state="closing"] {
+  animation: awu-fold-out var(--awu-t-exit) var(--awu-ease-in) both;
+  pointer-events: none;
+}
+
+/* notice 条的上飘退场（进场见下面「提示条编排」段） */
+.awu-notice[data-state="closing"] {
+  animation: awu-exit-rise var(--awu-t-exit) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* 卡片退场（契约 §3「删卡」：淡出 T_FAST，随后 FLIP 用 T_BASE 塌陷）。
+   为什么是 T_FAST(120ms) 而不是 T_EXIT(160ms)：删卡是一组动作的第一步，
+   后面还接着 FLIP 位移；淡出多 40ms 就会让人觉得"点完没反应"。
+   命中权重 (0,2,0) > 卡片的进场 (0,1,0)，且本段在文件末尾，顺序上也赢。
+   📌 第 4 批：JSX 现在给删卡卡片挂了内联 opacity + 120ms 过渡当兜底，
+   本规则落地后**那段内联可以删**（保留也不冲突：内联 transition 只影响 transition 通道，
+   真正在跑的是这条 animation）。 */
+.awu-card[data-state="closing"] {
+  animation: awu-exit var(--awu-t-fast) var(--awu-ease-out) both;
+  pointer-events: none;
+}
+
+/* ---- 动画期去模糊 + 层提升（契约 §2.1 的 data-still）----
+   面板进入/退出的 320ms 里，backdrop-filter 会逐帧重算 1.12M px 的 20px 模糊
+   —— 这是"打开面板"最贵的一条路径，低端机上就是开头那一下掉帧。
+   JSX 在动画期给根节点挂 data-still="true"，animationend/transitionend 时移除。
+   同一段时间里做三件事：
+     1. 关掉 blur（省掉逐帧模糊采样）；
+     2. 买一次层提升（will-change）让 transform/opacity 走合成 ——
+        **这就是"100vmax 巨影不参与重绘"的落地方式**：巨影随层一次性栅格化，
+        动画期只翻合成层的 alpha，不再逐帧重画那 1.3M px 的压暗；
+     3. 摘掉 --awu-shadow 里那两层大模糊投影（28px/80px 与 2px/12px）。
+        它们完全被 100vmax 压暗层盖住、动画期根本看不见，但每次重新栅格化都要算一遍。
+   代价：那 320ms 里面板底更透（少了模糊兜底），观感是"淡入时更通透、落定后变实"，可接受。 */
+.awu-panel[data-still="true"],
+.awu-dialog[data-still="true"],
+.awu-scrim[data-still="true"],
+.awu-editor[data-still="true"],
+.awu-focus[data-still="true"],
+.awu-editorConfirm[data-still="true"] {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  will-change: transform, opacity;
+}
+
+.awu-panel[data-still="true"] {
+  box-shadow:
+    0 0 0 100vmax var(--awu-scrim-bg),
+    inset 0 1px 0 var(--awu-glass-edge),
+    inset 0 0 0 1px color-mix(in srgb, var(--awu-glass-edge) 40%, transparent);
+}
+
+/* ================================================================ 无障碍：降低透明度（W1-C 补齐）
+   降级 = 真·不透明。旧实现有两个问题，这里一起修：
+     1) 只点了 4 个元素（面板/弹层/专注层/确认卡），8 个模糊面里另外 4 个仍在模糊；
+     2) 用的是 background-color 覆盖 —— 卡面/输入/按钮/胶囊二十来条规则引用 --awu-glass-*，
+        逐个列举必漏（旧版就漏了 6 类，用户开了降级后卡片还是透的）。
+   新做法：**就地重写玻璃令牌**。后代全部自动变实底，新增组件也不再需要往这里加选择器；
+   再单独把 8 个 backdrop-filter 面关掉（这个没法用令牌表达）。
+   --awu-specular 用"透明 inset 零阴影"而不是 none：它常年出现在
+   box-shadow: var(--awu-shadow-card), var(--awu-specular) 这类列表里，写 none 会让整条声明失效。 */
 @media (prefers-reduced-transparency: reduce) {
-  /* 降级 = 真·不透明。旧实现写 var(--awu-surface)（本身就是半透明玻璃），
-     于是「关掉透明」还是透的，等于降级无效。 */
-  .awu-panel, .awu-dialog, .awu-focus, .awu-editorConfirmCard {
-    background-image: none;
-    background-color: var(--awu-surface-opaque);
+  :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
+    --awu-glass-1: #1e1e21;        /* 面板底 */
+    --awu-glass-2: #26262b;        /* 卡片 / 分组 / 状态带 / 输入框 */
+    --awu-glass-2-hi: #2c2c32;     /* 卡面 hover */
+    --awu-glass-3: #333338;        /* 浮起件 / 分段槽 / 小按钮底 */
+    --awu-surface-field: #1a1a1d;
+    --awu-surface-strip: #191919;  /* 左栏（保持"比右栏暗一档"的凹陷关系） */
+    --awu-surface-dialog: #232327;
+    --awu-surface-opaque: #1e1e21;
+    --awu-sheen: transparent;      /* 实底上再来一层顶部高光就是脏 */
+    --awu-specular: inset 0 0 0 0 transparent;
+    --awu-scrim-bg: rgba(0, 0, 0, .55); /* 遮罩不糊了，改由更深的压暗承担 */
+    --awu-line: rgba(255, 255, 255, .14);
+    --awu-line-soft: rgba(255, 255, 255, .07);
+  }
+
+  html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
+    --awu-glass-1: #f4f4f7;
+    --awu-glass-2: #ffffff;
+    --awu-glass-2-hi: #fbfbfd;
+    --awu-glass-3: #e9e9ee;
+    --awu-surface-field: #ececf0;
+    --awu-surface-strip: #eeeef2;
+    --awu-surface-dialog: #ffffff;
+    --awu-surface-opaque: #f6f6f8;
+    --awu-sheen: transparent;
+    --awu-specular: inset 0 0 0 0 transparent;
+    --awu-scrim-bg: rgba(18, 20, 26, .32);
+    --awu-line: rgba(60, 60, 67, .18);
+    --awu-line-soft: rgba(60, 60, 67, .10);
+  }
+
+  /* 8 个模糊面全部关掉（清单与代码里全部 backdrop-filter 出现处逐一对应）：
+     trigger / panel / editorFoot / editorConfirm / editorConfirmCard / scrim / dialog / focus */
+  .awu-trigger,
+  .awu-panel,
+  .awu-editorFoot,
+  .awu-editorConfirm,
+  .awu-editorConfirmCard,
+  .awu-scrim,
+  .awu-dialog,
+  .awu-focus {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+    background-image: none;
   }
-  /* 玻璃描边在实心底上会显得脏，换成常规分隔线 */
-  .awu-panel { border-color: var(--awu-line-strong); box-shadow: var(--awu-shadow); }
+
+  /* 实底上 1px 玻璃亮边会显脏，换常规分隔线；阴影收掉外扩的 100vmax 压暗（遮罩已由 scrim-bg 承担） */
+  .awu-panel,
+  .awu-dialog,
+  .awu-focus,
+  .awu-editorConfirmCard { border-color: var(--awu-line-strong); }
+  .awu-panel { box-shadow: 0 0 0 100vmax var(--awu-scrim-bg), 0 24px 64px rgba(0, 0, 0, .35); }
+  .awu-card,
+  .awu-section,
+  .awu-editGroup,
+  .awu-loreEntry,
+  .awu-loreRow { box-shadow: inset 0 0 0 1px var(--awu-line); }
 }
 
+/* ================================================================ 无障碍：减弱动效（全局守卫）
+   2026-11-02（W0-B）：从「逐个选择器点名」改成「全局护栏」。
+   旧清单靠手工维护，新增动画必然漏 —— 审查实测已漏 3 条（scroll-hint / .awu-editGroupBody /
+   .awu-presetHeavyConfirm），且随着动画数量增长只会继续漏。
+   现在分工：星号管住"未来的所有动画与过渡"，下面只处理星号管不到的例外。
+   注意：prefers-reduced-transparency 是另一段，W1-C 已把它补齐（8 个模糊面 + 全部半透明面）。 */
 @media (prefers-reduced-motion: reduce) {
-  .awu-panel,
-  .awu-card,
-  .awu-detail,
-  .awu-dialog,
-  .awu-editor,
-  .awu-editorConfirm,
-  .awu-scrim,
-  .awu-focus,
-  .awu-skRow,
-  .awu-card[data-live="true"],
-  .awu-status[data-status="live"]::after,
-  .awu-sigil::after,
-  .awu-panel[data-busy="true"] .awu-head::after,
-  .awu-trigger[data-live="true"] .awu-mark::after,
-  .awu-avatar[data-live="true"]::after,
-  .awu-lamp[data-on="true"],
-  .awu-iconBtn[data-spin="true"] svg {
-    animation: none !important;
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    /* 关键：animation-delay 也必须归零。卡片错峰是用 inline animation-delay 写的
+       （index.tsx 的 CARD_STAGGER，最长 272ms），配合 backwards 会让卡片在这段时间里
+       始终 opacity:0 —— 只管 duration 的话，减弱动效用户反而看到"空白 272ms 后突然出现"。 */
+    animation-delay: 0ms !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
   }
-  .awu-card, .awu-trigger, .awu-btn,
-  .awu-tab, .awu-input, .awu-line, .awu-iconBtn, .awu-navBack { transition-duration: .01ms !important; }
+
+  /* 例外①：scroll-timeline 动画不认 animation-duration（进度由滚动位置驱动，duration 恒为 auto），
+     唯一有效的关闭方式就是 animation: none。W1-C 起滚动容器有三个，逐个列上。 */
+  .awu-pane::before,
+  .awu-mainBody::before,
+  .awu-editorBody::before { animation: none !important; }
+
+  /* 例外②：几条"只跑一次"的淡入（四套折叠 + 重量确认条）。守卫压到 0.01ms 已等价瞬时，
+     这里显式关掉，省掉一次 keyframe 求值 + 一次伪元素重绘。 */
+  .awu-editGroupBody,
+  .awu-loreBody,
+  .awu-reviewMonth > .awu-diary,
+  .awu-previewText,
+  .awu-previewEmpty,
+  .awu-presetHeavyConfirm { animation: none !important; }
+
+  /* 例外③：加载转圈属于"必要信息"（停转读起来像卡死），WCAG 2.3.3 也不要求关它。 */
+  .awu-iconBtn[data-spin="true"] svg {
+    animation: awu-spin .9s linear infinite !important;
+  }
+
+  /* 例外④（W2，契约 §2.1）：指针跟随高光在减弱动效下一律退回**静态**顶部高光。
+     只压 transition 是不够的 —— 守卫管的是"时长"，而 JS 每帧写 --awu-mx/--awu-my
+     会让 background 的径向渐变中心一直变，那是逐帧重绘，比动画还贵。
+     这里把 background 换成一条不含 var() 的固定值：变量继续写、但已无人引用，paint 归零。 */
+  .awu-card::after {
+    background: radial-gradient(120% 70% at 50% -24%, var(--awu-sheen) 0%, transparent 62%);
+    animation: none !important;
+    opacity: 1;
+  }
+
+  /* 星号只管"时长"，不管"有没有动"：装饰性位移仍需显式归零。 */
   .awu-card:hover { transform: none; }
+  /* 按压反馈同理：W2 补的 13 个 :active scale 在减弱动效下必须完全失效
+     （instant 的缩放虽然不"动"，但一按一跳仍是前庭刺激）。 */
+  *:active { transform: none !important; }
+  /* 退场也只保留透明度：带位移的那条（awu-exit-down / -left / -right / -rise）本身就是运动。 */
+  .awu-dialog[data-state="closing"] { animation-name: awu-exit; }
+  .awu-notice[data-state="closing"] { animation-name: awu-exit; }
+  /* 详情页的横向退场同理：减弱动效下只淡出，不做 ±8px 位移 */
+  .awu-detail[data-state="closing"] { animation-name: awu-exit; }
+  /* 常驻合成层在降级下没有意义：别为一个不会播的动画锁住 1120x900 的层。 */
+  .awu-panel { will-change: auto; }
 }
 ${GUIDE_CSS}
 ${DISTILL_CSS}

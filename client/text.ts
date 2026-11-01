@@ -21,8 +21,10 @@ const zh = {
   'panel.title': '角色管理器',
   'panel.close': '收起面板',
   'panel.refresh': '刷新数据',
+  // ---- 渲染异常兜底（entry.tsx 的 PanelBoundary 降级按钮）----
+  'panel.crash': '角色管理器出错了',
+  'panel.crashRetry': '重试',
   // ---- 注入预览（GET /preview，只读快照）----
-  'preview.entry': '注入预览',
   'preview.entryShort': '预览',
   'preview.title': '本轮注入了什么',
   'preview.hint': '只读快照：当前会话下一次请求会拼进提示词的内容。',
@@ -53,7 +55,6 @@ const zh = {
 
   'active.none.title': '当前没有启用角色',
   'active.none.hint': '挑一张角色卡启用，人设即刻插上；退出时干净拔出，不留痕迹。',
-  'active.since': '已启用',
   'active.mode.text': '纯文本',
   'active.mode.action': '文本 + 动作',
   'active.gExit': '退出全局',
@@ -72,10 +73,23 @@ const zh = {
   'roster.never': '从未互动',
   'roster.pick': '从左栏选一张卡',
   'roster.pickHint': '点开一张卡可以看详情、改人设、翻日记',
-  'roster.enable': '启用',
-  'roster.enabled': '启用中',
-  'roster.detail': '查看',
+  'roster.enabled': '全局',
   'roster.open': '打开 {name} 的角色页',
+  'roster.boundHere': '本会话',
+  'roster.searchPlaceholder': '搜索名字 / 身份 / 来源',
+  'roster.searchEmpty': '没有匹配「{keyword}」的角色。',
+  'rail.now': '正在看',
+
+  // ---- 详情页溢出菜单 / 危险确认 / 列表搜索（第 1 批·W1-JSX）----
+  'detail.more': '更多操作',
+  'detail.export': '导出角色卡（JSON）',
+  'detail.exportDone': '已导出角色卡',
+  'detail.exportFailed': '导出失败：{reason}',
+  'detail.deleteHint': '删掉这张卡的文件；日记默认保留，可在确认弹层里勾选一起删。',
+  'detail.diaryMore': '在日记里看全部（{n}）',
+  'panel.backToList': '返回列表',
+  'common.armedHint': '再点一次确认；这一步不可恢复。',
+  'common.armedOk': '确认执行',
 
   // ---- 导入酒馆卡（PNG / CHARX / JSON）----
   // ---- 两张卡的入口（同级并排：蒸馏 / 自创）----
@@ -83,7 +97,6 @@ const zh = {
   'cta.distillHint': '从作品或设定做一张新卡',
   'cta.selfCreate': '自创角色卡',
   'cta.selfCreateHint': '从零写一张，可让 AI 补全',
-  'import.entry': '导入角色卡',
   'import.entryShort': '导入',
   'import.title': '导入角色卡',
   'import.hint': '支持酒馆 PNG 卡（tEXt / iTXt）、CHARX 压缩包和裸 JSON。解析这一步不写盘，确认后才落盘。',
@@ -136,9 +149,6 @@ const zh = {
 
 
   'stats.title': '这一册的厚度',
-  'stats.characters.full': '位角色',
-  'stats.memory.full': '条记忆',
-  'stats.turns.full': '轮对话',
   'stats.source': '角色来源',
   'stats.source.custom': '自己建的',
   'stats.source.distill': '蒸馏',
@@ -153,8 +163,8 @@ const zh = {
   'detail.personality': '性格',
   'detail.voice': '声音',
   'detail.relationship': '关系',
-  'detail.bindSession': '当前会话启用',
-  'detail.bindSessionOff': '解除本会话绑定',
+  'detail.bindSession': '绑定到本会话',
+  'detail.bindSessionOff': '解除绑定',
   'detail.globalOn': '全局启用',
   'detail.globalOff': '退出全局',
   'detail.delete': '删除',
@@ -212,7 +222,6 @@ const zh = {
   'common.cancel': '取消',
   'common.save': '保存',
   'common.unknown': '未知',
-  'common.noMemory': '0 条记忆',
   'common.busy': '处理中…',
   'common.close': '关闭',
   'notice.close': '关闭提示',
@@ -220,7 +229,6 @@ const zh = {
 
   // ---- 记忆与剧情维护 ----
   'relation.title': '关系',
-  'relation.baseline': '起点',
   'relation.turns': '{n} 轮',
   'relation.note': '档位由模型根据对话现算，这里只显示起点锚定。',
   'relation.baselineShort': '关系起点',
@@ -272,6 +280,8 @@ const zh = {
   'preset.editor.saved': '已保存（{modules} 个模块）',
   'preset.editor.saveFailed': '保存失败：{reason}',
   'preset.editor.mismatch': '保存后回读对不上：期望 {expect} 个模块，回读到 {actual} 个。',
+  'preset.editor.discardBody': '这个预设的改动还没保存，关掉就没了。',
+  'preset.import.discardBody': '导入框里粘的内容还没落库，离开就清空了。',
   'preset.editor.delete': '删除预设',
   'preset.editor.deleteConfirm': '确认删除「{name}」？这一步不可撤销。',
   'preset.editor.deleteConfirmYes': '确认删除',
@@ -326,11 +336,8 @@ const zh = {
   'preset.macros.more': '等 {n} 种',
   'relation.none': '暂无关系档案',
 
-  'opening.title': '开场',
   'opening.next': '换一句开场',
-  'opening.none': '这张卡里还没有开场白。',
   'opening.history': '已有历史档案：对话进行中不会重发开场，改由模型换声气顺口接。',
-  'opening.fresh': '已重置，下一次对话从开场白开始。',
   'opening.needGenerate': '卡里没有开场候选，需要模型先生成几句才能换。',
   'opening.rotated': '开场已换。',
 
@@ -339,7 +346,6 @@ const zh = {
   'diary.editTitle': '改写这条日记',
   'diary.editHint': '改写后的完整文字；保存后会同步更新会话摘要。',
   'diary.editDone': '已改写。',
-  'diary.editMulti': '命中了 {n} 条，写的是第一条。想改别的请用更精确的原文。',
   'diary.editRequired': '内容不能为空。',
 
   'forget.title': '忘记某事',
@@ -347,7 +353,6 @@ const zh = {
   'forget.keyword': '关键词',
   'forget.keywordPlaceholder': '例如：医院的约定',
   'forget.do': '忘记',
-  'forget.nothing': '没有找到包含该关键词的记忆。',
   'forget.done': '已忘记：{diary} 条日记、{session} 条会话记录、{card} 处角色卡。',
   'forget.keywordRequired': '先输入要忘记的关键词。',
 
@@ -508,7 +513,6 @@ const zh = {
   'guide.faq.a3': '启用期间注入的一段短声明（约 370 字）：让位的只有「我是谁、我怎么说话」，代码规范与安全约束照常。退出后它也随之消失。',
 
   // ---- 蒸馏角色卡（发送通道部分；粘贴校验的键等 CCv3 定稿再加）----
-  'distill.entry': '蒸馏',
   'distill.entryTitle': '从作品蒸馏一张角色卡',
   'distill.title': '蒸馏角色卡',
   'distill.why': 'AI 会把这件事交给一个子代理去做——它自己查资料、建卡并保存，你的对话不会被六步流程占满；你只需要回答它问的问题。',
@@ -548,8 +552,10 @@ const en: Dict = {
   'panel.title': 'Character Manager',
   'panel.close': 'Close panel',
   'panel.refresh': 'Refresh',
+  // ---- Render-crash fallback (PanelBoundary retry button in entry.tsx) ----
+  'panel.crash': 'The character manager hit an error',
+  'panel.crashRetry': 'Retry',
   // ---- Injection preview (GET /preview, read-only snapshot) ----
-  'preview.entry': 'Injection preview',
   'preview.entryShort': 'Preview',
   'preview.title': 'What goes into this turn',
   'preview.hint': 'Read-only snapshot of what the next request in this chat will inject into the prompt.',
@@ -580,7 +586,6 @@ const en: Dict = {
 
   'active.none.title': 'No character active',
   'active.none.hint': 'Pick a card and enable it — the persona plugs in instantly and unplugs cleanly.',
-  'active.since': 'Active since',
   'active.mode.text': 'Text only',
   'active.mode.action': 'Text + action',
   'active.gExit': 'Exit global',
@@ -599,10 +604,23 @@ const en: Dict = {
   'roster.never': 'Never used',
   'roster.pick': 'Pick a card on the left',
   'roster.pickHint': 'Open one to see details, edit the persona, or read its diary',
-  'roster.enable': 'Enable',
-  'roster.enabled': 'Active',
-  'roster.detail': 'View',
+  'roster.enabled': 'Global',
   'roster.open': 'Open {name}',
+  'roster.boundHere': 'This chat',
+  'roster.searchPlaceholder': 'Search name, role or source',
+  'roster.searchEmpty': 'No character matched “{keyword}”.',
+  'rail.now': 'Viewing',
+
+  // ---- Detail overflow menu / destructive confirm / list search (batch 1, W1-JSX) ----
+  'detail.more': 'More actions',
+  'detail.export': 'Export card (JSON)',
+  'detail.exportDone': 'Card exported',
+  'detail.exportFailed': 'Export failed: {reason}',
+  'detail.deleteHint': 'Removes this card file; the diary stays unless you tick it in the dialog.',
+  'detail.diaryMore': 'See all in diary ({n})',
+  'panel.backToList': 'Back to list',
+  'common.armedHint': 'Click again to confirm — this cannot be undone.',
+  'common.armedOk': 'Confirm',
 
   // ---- Importing a tavern card (PNG / CHARX / JSON) ----
   // ---- Card entries (peers in one row: distill / self-create) ----
@@ -610,7 +628,6 @@ const en: Dict = {
   'cta.distillHint': 'Make a new card from a story or a setup',
   'cta.selfCreate': 'Create card',
   'cta.selfCreateHint': 'Write one from scratch, optionally AI-filled',
-  'import.entry': 'Import card',
   'import.entryShort': 'Import',
   'import.title': 'Import character card',
   'import.hint': 'Tavern PNG cards (tEXt / iTXt), CHARX archives and plain JSON are supported. Parsing writes nothing — the card lands only after you confirm.',
@@ -663,9 +680,6 @@ const en: Dict = {
 
 
   'stats.title': 'How thick this volume is',
-  'stats.characters.full': 'characters',
-  'stats.memory.full': 'memories',
-  'stats.turns.full': 'turns',
   'stats.source': 'By source',
   'stats.source.custom': 'Created here',
   'stats.source.distill': 'Distilled',
@@ -680,8 +694,8 @@ const en: Dict = {
   'detail.personality': 'Personality',
   'detail.voice': 'Voice',
   'detail.relationship': 'Relationship',
-  'detail.bindSession': 'Enable in this chat',
-  'detail.bindSessionOff': 'Unbind this chat',
+  'detail.bindSession': 'Bind to this chat',
+  'detail.bindSessionOff': 'Unbind',
   'detail.globalOn': 'Enable globally',
   'detail.globalOff': 'Exit global',
   'detail.delete': 'Delete',
@@ -739,14 +753,12 @@ const en: Dict = {
   'common.cancel': 'Cancel',
   'common.save': 'Save',
   'common.unknown': 'Unknown',
-  'common.noMemory': '0 memories',
   'common.busy': 'Working…',
   'common.close': 'Close',
   'notice.close': 'Dismiss notice',
   'notice.warnHead': '{n} more note(s):',
 
   'relation.title': 'Relationship',
-  'relation.baseline': 'Start',
   'relation.turns': '{n} turns',
   'relation.note': 'The live band is computed by the model from the conversation; this shows only the starting anchor.',
   'relation.baselineShort': 'Starts at',
@@ -798,6 +810,8 @@ const en: Dict = {
   'preset.editor.saved': 'Saved ({modules} modules)',
   'preset.editor.saveFailed': 'Save failed: {reason}',
   'preset.editor.mismatch': 'Read-back mismatch after saving: expected {expect} modules, got {actual}.',
+  'preset.editor.discardBody': 'This preset has unsaved changes; closing loses them.',
+  'preset.import.discardBody': 'The pasted preset JSON has not been imported yet; leaving clears it.',
   'preset.editor.delete': 'Delete preset',
   'preset.editor.deleteConfirm': 'Delete “{name}”? This cannot be undone.',
   'preset.editor.deleteConfirmYes': 'Delete',
@@ -852,11 +866,8 @@ const en: Dict = {
   'preset.macros.more': 'and {n} more',
   'relation.none': 'No relationship record yet',
 
-  'opening.title': 'Opening',
   'opening.next': 'Next opening',
-  'opening.none': 'This card has no opening lines.',
   'opening.history': 'History exists: the opening is not replayed mid-conversation; the model changes tone instead.',
-  'opening.fresh': 'Reset — the next turn starts from the opening.',
   'opening.needGenerate': 'No candidate openings in the card; the model must generate some first.',
   'opening.rotated': 'Opening rotated.',
 
@@ -865,7 +876,6 @@ const en: Dict = {
   'diary.editTitle': 'Rewrite this diary line',
   'diary.editHint': 'The full replacement text; the session summary updates too.',
   'diary.editDone': 'Rewritten.',
-  'diary.editMulti': '{n} matches; the first was rewritten. Use more exact text for a different one.',
   'diary.editRequired': 'Text cannot be empty.',
 
   'forget.title': 'Forget something',
@@ -873,7 +883,6 @@ const en: Dict = {
   'forget.keyword': 'Keyword',
   'forget.keywordPlaceholder': 'e.g. the hospital promise',
   'forget.do': 'Forget',
-  'forget.nothing': 'Nothing matched that keyword.',
   'forget.done': 'Forgotten: {diary} diary lines, {session} session records, {card} card fields.',
   'forget.keywordRequired': 'Enter a keyword first.',
 
@@ -1033,7 +1042,6 @@ const en: Dict = {
   'guide.faq.a3': 'A short notice injected only while a character is active (~370 chars): only "who I am / how I speak" steps aside; code and safety rules still apply. It disappears on Exit.',
 
   // ---- Distillation (send channel only; paste-validation keys land with CCv3) ----
-  'distill.entry': 'Distill',
   'distill.entryTitle': 'Distill a card from a story',
   'distill.title': 'Distill a character card',
   'distill.why': 'The AI hands this to a sub-agent — it researches, builds and saves the card itself, so your chat is not taken over by the six-phase run. You just answer its questions.',

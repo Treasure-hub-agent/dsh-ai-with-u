@@ -18,9 +18,10 @@
  * 与角色绑定**同构**的启用模型：会话预设 > 全局预设 > 无（会话命中但预设被删 → 视为无，
  * 不回落全局）。子代理固定用全局预设，不继承本会话。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
+import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 import {
   activatePreset,
   deletePreset,
@@ -156,6 +157,34 @@ function enabledCountOf(modules: PresetModule[]): number {
 
 function charsOf(modules: PresetModule[]): number {
   return modules.reduce((sum, module) => sum + countChars(module.content), 0)
+}
+
+// ---------------------------------------------------------------- 未保存判定（脏快照）
+
+/**
+ * 脏判定的基准：**只收用户真的能改的字段**（名字 + 模块的名字/正文/启停/顺序）。
+ *
+ * `id` / `source` 不可编辑，不进快照——否则宿主回读时给的值和本地草稿略有差异就会被误判成「有改动」，
+ * 保存按钮永远亮着、关弹层永远弹确认，比不保护还烦。
+ */
+interface PresetBaseline {
+  name: string
+  /** 模块部分压成一个字符串：`JSON.stringify` 保留数组顺序，所以「拖动排序」也算改动 */
+  modules: string
+}
+
+/** 模块签名（不含名字字段，名字单独比）。 */
+function modulesSignature(modules: PresetModule[] | undefined): string {
+  return JSON.stringify((modules ?? []).map(module => ({
+    name: module.name,
+    content: module.content,
+    enabled: isEnabled(module),
+  })))
+}
+
+/** 一份详情 → 基准快照。载入 / 新建 / 保存成功 / 导入成功四处统一走它。 */
+function baselineOf(detail: PresetDetail): PresetBaseline {
+  return { name: detail.name, modules: modulesSignature(detail.modules) }
 }
 
 /** 一行的显示名：没名字就给占位（与模块编辑框的空态一致）。 */
@@ -404,8 +433,14 @@ export interface PresetPanelProps {
   /** 当前会话 id；空串 = 宿主没给 → 禁用「当前会话使用」（绝不编一个 id 写进去） */
   sessionId: string
   /**
-   * 全屏模块编辑层（FocusEditor）开/关：外壳（Overlay）据此把 Esc 让给本层，
-   * 避免一次 Esc 连关两层、未保存的模块编辑无声丢失（同 card-editor 的 loreFocus 约定）。
+   * 「本层要自己处理 Esc」的开关：外壳（`index.tsx` 的 `Overlay`）拿到 `true` 就把 Esc 让位。
+   *
+   * 三种情形都要让位，否则 Esc 会绕过本层的判断直接关掉整个弹层：
+   *  1. 全屏模块编辑层（`FocusEditor`）开着——它自己会先问「丢弃」；
+   *  2. 未保存确认层开着——Esc 归它，按一下先回到编辑；
+   *  3. **有未保存改动**——Esc 必须先弹确认，而不是把几万字草稿一起关掉。
+   *
+   * 同 `card-editor` 的 `loreFocus` / `dirty` 约定；本组件在让位期间用文档级 capture 监听接管 Esc。
    */
   onFocusLayerChange?: (open: boolean) => void
   /** 任何改动（保存 / 删除 / 启用 / 导入）之后通知外壳刷新总览 */
@@ -414,6 +449,29 @@ export interface PresetPanelProps {
 }
 
 type View = 'list' | 'edit' | 'import'
+
+/**
+ * 载入骨架：与主面板 `index.tsx:306-317` 的 `Skeleton` **同构**（同一组 `.awu-sk` / `.awu-skRow`
+ * 类名、同样 3 行、同样 `role="status"` + `aria-live` + 视觉隐藏的文字），只是把 `label` 变成必填。
+ *
+ * 为什么照抄 DOM 而不是 import：那个 `Skeleton` 是 `index.tsx` 的内部函数（没 export），
+ * 而 `index.tsx` 是并行的写域——跨模块 import 会把两边的改动绑在一起。共享的是**类名**（在
+ * `styles.ts` 里），所以复制一份 15 行的 DOM 形状是成本最低、互不影响的做法。
+ *
+ * `shape` 不传时 `.awu-sk` 只走基础行高（列表场景）；传 `detail` 时首行会撑到 140px（表单场景）。
+ */
+function PresetSkeleton(props: { label: string; shape?: 'detail' | 'cards' }): JSX.Element {
+  return (
+    <div className="awu-sk" data-shape={props.shape} role="status" aria-live="polite">
+      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
+        {props.label}
+      </span>
+      <div className="awu-skRow" />
+      <div className="awu-skRow" />
+      <div className="awu-skRow" />
+    </div>
+  )
+}
 
 export function PresetPanel(props: PresetPanelProps): JSX.Element {
   const { t, sessionId, onFocusLayerChange, onChanged, onClose } = props
@@ -441,6 +499,36 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
   /** 宿主上次给过的重量提示原文（按 preset id 缓存，下次点「使用」直接用它） */
   const heavyTextRef = useRef<Record<string, string>>({})
 
+  // ---- 未保存保护（脏判定基准 + 确认层）----
+  /** 载入 / 新建 / 保存成功 / 导入成功之后重置的基准：与当前 `detail` 不一致 = 有未保存改动 */
+  const [baseline, setBaseline] = useState<PresetBaseline>({ name: '', modules: '[]' })
+  /** 未保存确认层开着：这层盖住整个弹层，Esc / 点遮罩都归它 */
+  const [confirmLeave, setConfirmLeave] = useState(false)
+  /** 确认「放弃」之后去哪：关整个弹层 / 退回列表（两条路径落点不同，同一次确认不能混） */
+  const [leaveIntent, setLeaveIntent] = useState<'close' | 'list'>('close')
+  /** 导入视图里粘进来但还没落库的 JSON：丢了同样找不回，所以也算未保存改动 */
+  const [importDirty, setImportDirty] = useState(false)
+  const confirmRef = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * 脏判定的口径：名字与模块**分开算**。
+   *
+   * 合成一个快照也能用，但每敲一个字符都要把几百 KB 的模块正文重新序列化一遍（`useMemo` 的
+   * 依赖是 `detail.modules`，改名字时数组引用不变 → 不重算），所以拆成两份。
+   */
+  const editingModules = detail?.modules
+  const modulesSig = useMemo(() => modulesSignature(editingModules), [editingModules])
+  const editDirty = detail !== undefined
+    && (detail.name !== baseline.name || modulesSig !== baseline.modules)
+  const dirty = editDirty || importDirty
+
+  /** 一切「换了一份详情」的入口都走它：状态与基准同时更新，脏判定才有单一真源。 */
+  const applyDetail = useCallback((next: PresetDetail): void => {
+    setDetail(next)
+    setBaseline(baselineOf(next))
+    setImportDirty(false)
+  }, [])
+
   const aliveRef = useRef(true)
   useEffect(() => {
     aliveRef.current = true
@@ -467,12 +555,31 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
 
   useEffect(() => { void loadList() }, [loadList])
 
-  // 全屏模块编辑层的开关上报：外壳（index.tsx 的 Overlay）读到 true 就把 Esc 让位。
-  // 判据与编辑视图的渲染条件一致（focusIndex 指得到一条真实模块才算开着）。
+  // 全屏模块编辑层的开关：判据与编辑视图的渲染条件一致（focusIndex 指得到一条真实模块才算开着）。
   const focusLayerOpen = detail !== undefined && focusIndex >= 0 && focusIndex < detail.modules.length
+
+  /**
+   * 专注编辑层正在播 160ms 退场。
+   *
+   * 为什么需要：`FocusEditor` 现在用 `usePresence` 延迟卸载（`onCancel` 不会立刻摘掉节点），
+   * 这 160ms 里 `focusLayerOpen` 仍是 true → `escYield` 仍为 true → 外壳继续让位，
+   * 用户按 Esc 会**什么都不发生**（那一下被吞掉）。退场期一上报 false，Esc 立刻还给外壳。
+   */
+  const [focusClosing, setFocusClosing] = useState(false)
   useEffect(() => {
-    onFocusLayerChange?.(focusLayerOpen)
-  }, [focusLayerOpen, onFocusLayerChange])
+    if (focusLayerOpen) setFocusClosing(false)
+  }, [focusLayerOpen])
+
+  /**
+   * 本层要自己处理 Esc 的三种情形（见 `PresetPanelProps.onFocusLayerChange` 的说明）。
+   *
+   * 上报的是「让位」而不是单个「焦点层开着」：只要有未保存改动，Esc 就必须先弹确认。
+   * 让位期间由下面那个文档级 capture 监听接管，所以不会出现「Esc 什么都关不掉」。
+   */
+  const escYield = (focusLayerOpen && !focusClosing) || confirmLeave || dirty
+  useEffect(() => {
+    onFocusLayerChange?.(escYield)
+  }, [escYield, onFocusLayerChange])
 
   const showNotice = useCallback((text: string, tone: 'ok' | 'warn' = 'ok'): void => {
     setNotice({ text, tone })
@@ -503,7 +610,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
     void fetchPreset(id)
       .then(result => {
         if (!aliveRef.current || seq !== detailSeq.current) return
-        setDetail({
+        applyDetail({
           id: result.preset.id,
           name: result.preset.name,
           source: result.preset.source,
@@ -521,17 +628,154 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
         else setError(t('preset.loadFailed', { reason: errorText(e) }))
       })
       .finally(() => { if (aliveRef.current && seq === detailSeq.current) setEditLoading(false) })
-  }, [t])
+  }, [applyDetail, t])
 
-  /** 新建：空白草稿（不落盘，保存时才写）。 */
+  /** 新建：空白草稿（不落盘，保存时才写）。基准 = 空白，所以要打了字才算脏。 */
   const startNew = (): void => {
     setView('edit')
     setConfirmDelete(false)
     setHeavyPending(undefined)
-    setDetail({ id: '', name: '', source: 'custom', modules: [] })
+    applyDetail({ id: '', name: '', source: 'custom', modules: [] })
+    setConfirmLeave(false)
+    setFocusIndex(-1)
     setError('')
     setEditLoading(false)
   }
+
+  // ------------------------------------------------------------ 四路关闭（未保存确认）
+
+  /** 退回列表（放弃后 / 无改动时）：草稿一起丢掉，所以脏必须清干净。 */
+  const leaveToList = useCallback((): void => {
+    setView('list')
+    setDetail(undefined)
+    setFocusIndex(-1)
+    setImportDirty(false)
+    setConfirmLeave(false)
+    setError('')
+  }, [])
+
+  /**
+   * **四路关闭的唯一出口**：底部「关闭」、编辑页「返回列表」、Esc、点遮罩全走这里。
+   *
+   * 与 `card-editor.tsx:309-313` 的 `requestClose` 同一语义：有改动先问一句，没改动才真走。
+   * 这里比它多一个 `intent`——关整个弹层和退回列表的落点不同，确认后要照着这个意图执行。
+   */
+  const requestLeave = useCallback((intent: 'close' | 'list'): void => {
+    if (dirty) {
+      setLeaveIntent(intent)
+      setConfirmLeave(true)
+      return
+    }
+    if (intent === 'list') { leaveToList(); return }
+    onClose()
+  }, [dirty, leaveToList, onClose])
+
+  /** 确认层里按「放弃」：先收掉确认层，再按当初的意图落地。 */
+  const discardAndLeave = (): void => {
+    setConfirmLeave(false)
+    if (leaveIntent === 'list') { leaveToList(); return }
+    onClose()
+  }
+
+  /**
+   * Esc：让位期间（`escYield`）外壳不动手，由这里接管。
+   *
+   * 三档与 `card-editor.tsx:324-337` 一致：
+   *  - 专注编辑层在最上面 → 直接 return，Esc 归它；
+   *  - 确认层开着 → 收掉确认层（回到编辑，等价于「继续编辑」）；
+   *  - 有未保存改动 → 弹确认（intent 默认「关闭」）；
+   *  - 都没有 → 不动手，交给外壳的 Overlay 正常关弹层。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (focusLayerOpen) return
+      if (!confirmLeave && !dirty) return
+      event.stopPropagation()
+      if (confirmLeave) { setConfirmLeave(false); return }
+      setLeaveIntent('close')
+      setConfirmLeave(true)
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [confirmLeave, dirty, focusLayerOpen])
+
+  /**
+   * 点遮罩：外壳 `Overlay` 是「`mousedown` 落在遮罩上就 `onClose`」（`index.tsx:261-263`），
+   * 本组件拿不到那个回调，所以在**捕获阶段**把落在 `.awu-scrim` 上的 mousedown 先截下来，
+   * 改走同一条 `requestLeave`——否则这条路径依然是无声销毁（四路里就差它）。
+   *
+   * 判据 `target.classList.contains('awu-scrim')` 与 `Overlay` 的 `target === currentTarget` 等价：
+   * 点到弹层内部时 target 是内层元素，不会命中。只有本层挂着时才装监听（无改动不装）。
+   */
+  useEffect(() => {
+    if (!dirty && !confirmLeave) return undefined
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element) || !target.classList.contains('awu-scrim')) return
+      event.preventDefault()
+      event.stopPropagation()
+      // 确认层开着时点外面什么都不做：与 card-editor 的确认层一致（它靠遮罩层吃掉点击）
+      if (confirmLeave) return
+      requestLeave('close')
+    }
+    document.addEventListener('mousedown', onDown, true)
+    return () => document.removeEventListener('mousedown', onDown, true)
+  }, [confirmLeave, dirty, requestLeave])
+
+  // 确认层是第二层 role="dialog"：焦点压栈到它上面，Tab 只在卡里循环，关掉后回到原处。
+  // 顺序不能换（同 card-editor.tsx:270-283），且必须无条件调用 hook。
+  useRestoreFocus(confirmLeave)
+  useInitialFocus(confirmRef, confirmLeave)
+  useFocusTrap(confirmRef, confirmLeave)
+
+  /**
+   * 确认层正文：编辑视图与导入视图的草稿性质不同，分开两句。
+   *
+   * 两个 key（`preset.editor.discardBody` / `preset.import.discardBody`）还没并进 `text.ts` 时
+   * `makeTranslator` 会把 key 原样返回，这里检测到原样返回就退到角色卡那句通用文案
+   * （口径一致、不露裸 key）；文案合并后无需再改本文件（同 `distill.tsx:644-647` 的兜底写法）。
+   */
+  const discardBodyText = (): string => {
+    const key = view === 'import' && importDirty
+      ? 'preset.import.discardBody'
+      : 'preset.editor.discardBody'
+    const value = t(key)
+    return value === key ? t('edit.discardBody') : value
+  }
+
+  /**
+   * 未保存确认层（三个视图共用一份）。
+   *
+   * 结构、类名、按钮顺序与 `card-editor.tsx:448-464` 逐字对齐——`.awu-editorConfirm` 是
+   * `position: absolute; inset: 0`，而 `.awu-dialog` 是 `position: relative`，所以它自动盖住整个弹层，
+   * 不需要为弹层场景再造一层浮层。
+   */
+  const renderConfirm = (): JSX.Element | null => (confirmLeave ? (
+    <div
+      ref={confirmRef}
+      className="awu-editorConfirm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('edit.discardTitle')}
+    >
+      <div className="awu-editorConfirmCard">
+        <div className="awu-editorConfirmTitle">
+          <IconQuill size={15} />
+          {t('edit.discardTitle')}
+        </div>
+        <div className="awu-editorConfirmText">{discardBodyText()}</div>
+        <div className="awu-editorConfirmActions">
+          <button type="button" className="awu-btn" onClick={() => setConfirmLeave(false)}>
+            {t('edit.keepEditing')}
+          </button>
+          <button type="button" className="awu-btn" data-kind="danger" onClick={discardAndLeave}>
+            {t('edit.discard')}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null)
 
   const refreshAll = useCallback((nextActive?: PresetActiveState): void => {
     void loadList()
@@ -578,7 +822,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             </div>
           )}
 
-          {loading && list.length === 0 && <div className="awu-hint" role="status">{t('preset.loading')}</div>}
+          {loading && list.length === 0 && <PresetSkeleton label={t('common.loading')} />}
 
           {!loading && error === '' && list.length === 0 && (
             <div className="awu-empty" data-kind="empty">
@@ -637,8 +881,12 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
         </div>
 
         <div className="awu-dialogFoot">
-          <button type="button" className="awu-btn" onClick={onClose}>{t('common.close')}</button>
-          <button type="button" className="awu-btn" onClick={() => { setView('import'); setError('') }}>
+          <button type="button" className="awu-btn" onClick={() => requestLeave('close')}>{t('common.close')}</button>
+          <button
+            type="button"
+            className="awu-btn"
+            onClick={() => { setView('import'); setDetail(undefined); setImportDirty(false); setError('') }}
+          >
             {t('preset.import')}
           </button>
           <button type="button" className="awu-btn" data-kind="primary" onClick={startNew}>
@@ -646,6 +894,8 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             {t('preset.new')}
           </button>
         </div>
+
+        {renderConfirm()}
       </>
     )
   }
@@ -734,7 +984,9 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
               setError(t('preset.editor.mismatch', { expect: `${modules.length}/${enabled}`, actual: `${backModules}/${backEnabled}` }))
               return
             }
-            setDetail({
+            // 基准必须跟着换：宿主回读的这一份才是「已保存」的真相，
+            // 不重置的话保存成功后按钮还亮着、关弹层还要再问一次「放弃改动？」（card-editor 同做法）
+            applyDetail({
               id: savedId,
               name: fresh.preset.name,
               source: fresh.preset.source,
@@ -844,7 +1096,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
           <button
             type="button"
             className="awu-navBack"
-            onClick={() => { setView('list'); setDetail(undefined); setFocusIndex(-1) }}
+            onClick={() => requestLeave('list')}
           >
             <IconBack size={13} />
             <span>{t('preset.title')}</span>
@@ -855,6 +1107,14 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
         </div>
 
         <div className="awu-dialogBody">
+          {/*
+            正文整块等宿主回读：读的时候不能先摆一张空表单（空名字 + 0 模块），
+            那既会被误读成「这个预设是空的」，载入完还会整块跳一次。
+          */}
+          {editLoading && detail === undefined ? (
+            <PresetSkeleton label={t('common.loading')} shape="detail" />
+          ) : (
+          <>
           {notice !== undefined && (
             <div className="awu-status awu-idle" data-status={notice.tone === 'warn' ? 'warn' : 'info'} role="status" style={{ marginBottom: 10 }}>
               <span className="awu-idleDot" aria-hidden="true" />
@@ -863,7 +1123,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
           )}
           {unavailable && <div className="awu-hint" data-tone="warn" style={{ marginBottom: 10 }}>{t('preset.unavailable')}</div>}
           {error !== '' && (
-            <div className="awu-err" role="alert" style={{ marginBottom: 10 }}>
+            <div className="awu-err" role="alert">
               <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
               <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
             </div>
@@ -1062,13 +1322,23 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
               {t('preset.editor.addModule')}
             </button>
           </div>
+          </>
+          )}
         </div>
 
         <div className="awu-dialogFoot">
+          {/*
+            脏标记：与 `card-editor.tsx:430-432` 同款——同一个 `.awu-editorDirty`、同一对文案键，
+            靠 `data-dirty` 决定颜色与前导小点。`.awu-editorDirty` 自带 `margin-right: auto`，
+            所以它排第一就等于「钉在最左」，右侧仍是「删除 / 关闭 / 保存」那三枚。
+          */}
+          <span className="awu-editorDirty" data-dirty={dirty ? 'true' : 'false'}>
+            {dirty ? t('edit.dirty') : t('edit.clean')}
+          </span>
           {detail !== undefined && detail.id !== '' && (
             <>
               {confirmDelete && (
-                <span className="awu-hint" data-tone="warn" style={{ marginRight: 'auto' }}>
+                <span className="awu-hint" data-tone="warn">
                   {t('preset.editor.deleteConfirm', { name: detail.name })}
                 </span>
               )}
@@ -1089,17 +1359,21 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
               </button>
             </>
           )}
-          <button type="button" className="awu-btn" onClick={onClose}>{t('common.close')}</button>
+          <button type="button" className="awu-btn" onClick={() => requestLeave('close')}>{t('common.close')}</button>
           <button
             type="button"
             className="awu-btn"
             data-kind="primary"
             onClick={save}
-            disabled={editLoading || detail === undefined}
+            /* `!dirty` 门：与 `card-editor.tsx:441` 对齐——没改动就没有可写的东西，
+               让按钮可点只会诱发一次无意义的回读校验 */
+            disabled={editLoading || detail === undefined || !dirty}
           >
             {editLoading ? t('common.busy') : t('preset.editor.save')}
           </button>
         </div>
+
+        {renderConfirm()}
 
         {/* 全屏正文编辑：复用 editor-focus（本地缓冲 + 关层提交 + 自带焦点三件套） */}
         {focusModule !== undefined && (
@@ -1117,35 +1391,44 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             }}
             onDone={next => { patchModule(focusIndex, { content: next }); setFocusIndex(-1) }}
             onCancel={() => setFocusIndex(-1)}
+            onClosing={() => setFocusClosing(true)}
           />
         )}
+
+        {/* 未保存确认放在最后一层：与专注编辑层同为 `--awu-z-inset`，靠 DOM 顺序压在它上面 */}
+        {renderConfirm()}
       </>
     )
   }
 
   // ------------------------------------------------------------ 导入
   return (
-    <PresetImportView
-      t={t}
-      onBack={() => setView('list')}
-      onImported={(preset, warnings, unsupportedMacros) => {
-        // 落库成功后直接进编辑：让用户看到导入结果（模块清单就是他的东西）
-        setView('edit')
-        setDetail(preset)
-        // 宿主的提示（解析口径差异等）合并成一条：只有一条通知位，多行会挤爆
-        const macroLine = macrosToText(unsupportedMacros, t)
-        const extra = macroLine.total > 0
-          ? ` ${t('preset.macros.preview', { n: macroLine.total, list: macroLine.text })}`
-          : ''
-        showNotice(
-          warnings.length === 0
-            ? `${t('preset.import.done', { name: preset.name })}${extra}`
-            : `${t('preset.import.done', { name: preset.name })} ${t('preset.import.warnings', { n: warnings.length })}：${warnings.join('；')}${extra}`,
-          warnings.length === 0 && macroLine.total === 0 ? 'ok' : 'warn',
-        )
-        refreshAll()
-      }}
-    />
+    <>
+      <PresetImportView
+        t={t}
+        onBack={() => requestLeave('list')}
+        /* 粘了但没确认导入的 JSON 也是草稿：丢了同样找不回，所以按未保存改动上报（四路关闭会拦住它） */
+        onDirtyChange={setImportDirty}
+        onImported={(preset, warnings, unsupportedMacros) => {
+          // 落库成功后直接进编辑：让用户看到导入结果（模块清单就是他的东西）
+          setView('edit')
+          applyDetail(preset)
+          // 宿主的提示（解析口径差异等）合并成一条：只有一条通知位，多行会挤爆
+          const macroLine = macrosToText(unsupportedMacros, t)
+          const extra = macroLine.total > 0
+            ? ` ${t('preset.macros.preview', { n: macroLine.total, list: macroLine.text })}`
+            : ''
+          showNotice(
+            warnings.length === 0
+              ? `${t('preset.import.done', { name: preset.name })}${extra}`
+              : `${t('preset.import.done', { name: preset.name })} ${t('preset.import.warnings', { n: warnings.length })}：${warnings.join('；')}${extra}`,
+            warnings.length === 0 && macroLine.total === 0 ? 'ok' : 'warn',
+          )
+          refreshAll()
+        }}
+      />
+      {renderConfirm()}
+    </>
   )
 }
 
@@ -1154,10 +1437,12 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
 function PresetImportView(props: {
   t: Translate
   onBack: () => void
+  /** 「粘贴框里有还没落库的内容」上报：外壳据此把返回 / 关闭 / Esc / 点遮罩都拦一道确认 */
+  onDirtyChange: (dirty: boolean) => void
   /** 导入成功：回传落库后的预设 + 宿主侧的提示与未知宏统计（解析细节以宿主为准） */
   onImported: (preset: PresetDetail, warnings: string[], unsupportedMacros: Record<string, number>) => void
 }): JSX.Element {
-  const { t, onBack, onImported } = props
+  const { t, onBack, onDirtyChange, onImported } = props
 
   const [raw, setRaw] = useState('')
   const [preview, setPreview] = useState<PresetPreview | undefined>(undefined)
@@ -1166,6 +1451,13 @@ function PresetImportView(props: {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
+
+  /**
+   * 草稿判定只看「粘贴框非空」：解析失败也算（用户手里的原文还在，丢了得重新找一份）。
+   * 上报给外壳而不是自己弹确认——四路关闭（关闭/返回/Esc/遮罩）都在外壳那一层统一处理。
+   */
+  const hasDraft = raw.trim() !== ''
+  useEffect(() => { onDirtyChange(hasDraft) }, [hasDraft, onDirtyChange])
 
   const parse = useCallback((text: string): void => {
     setError('')
@@ -1326,13 +1618,16 @@ function PresetImportView(props: {
         </div>
 
         {error !== '' && (
-          <div className="awu-err" role="alert" style={{ marginTop: 10 }}>
+          <div className="awu-err" role="alert">
             <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
             <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
           </div>
         )}
 
-        {preview !== undefined && (
+        {/* 落库请求在飞：预览先让位给骨架，避免「点了确认但界面一动不动」 */}
+        {busy && <PresetSkeleton label={t('common.loading')} />}
+
+        {!busy && preview !== undefined && (
           <div className="awu-presetPreview">
             <div className="awu-importWarnHead" style={{ marginTop: 12 }}>{t('preset.import.previewTitle')}</div>
 

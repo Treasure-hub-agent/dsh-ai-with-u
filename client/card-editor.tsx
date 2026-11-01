@@ -20,12 +20,14 @@ import { countRegexScripts } from './api'
 import type { Card } from './api'
 import { ccv3Data } from './card-source'
 import { GROUPS, filledCount, isEmptyValue, isDirty, mergeCard, toDraft } from './card-schema'
+import { useLayerExit, useStillAttr } from './editor-focus'
 import { sourceLabelOf } from './text'
 import type { Draft, GroupSpec } from './card-schema'
-import { IconChevron, IconPlus, IconQuill, IconTrash } from './icons'
+import { IconChevron, IconClose, IconPlus, IconQuill, IconTrash } from './icons'
 import { LorebookSection } from './lorebook-editor'
 import { loreIssues, mergeLoreIntoCard, toLoreDraftFromCard } from './lorebook-schema'
 import type { LoreBookDraft, LoreEntryDraft } from './lorebook-schema'
+import { T_BASE, T_ENTER, T_EXIT, presenceAttrs, usePresence } from './motion'
 import type { LoreDroppedInfo } from './lore-diag'
 import type { Translate } from './text'
 
@@ -56,6 +58,19 @@ export interface CardSavePayload {
   loreEntries: number
 }
 
+/** 自适应高度的封顶（px）：超过就在框内滚动，不把整页往下推。 */
+const TEXTAREA_MAX_H = 240
+
+/**
+ * 合帧的兜底时长（ms）。
+ *
+ * 正常情况下 rAF 会在下一帧（~16ms）跑测量；但**页面不出帧时 rAF 会一直挂着**
+ * （后台标签、最小化窗口、无头环境、GPU 进程被打断……实测在无头 Chromium 里出现过
+ * 连续几次输入都不出帧，高度就停在旧值不再长）。所以除了 rAF 再挂一个定时器兜底：
+ * 两个回调共用同一份"待办"记录，谁先到谁清掉对方，**一次变化仍然只量一次**。
+ */
+const MEASURE_FALLBACK_MS = 120
+
 /** 单行输入。 */
 function TextField(props: {
   value: string
@@ -65,13 +80,104 @@ function TextField(props: {
 }): JSX.Element {
   const { value, placeholder, onChange, multiline = false } = props
   const ref = useRef<HTMLTextAreaElement | null>(null)
+  /** 待执行的测量（rAF + 定时器兜底，同一时刻最多一份）。 */
+  const pendingRef = useRef<{ frame?: number; timer?: number }>({})
+  /** 上一次处理的文本「长度 + 行数」，用来判断这次是只增不减、还是可能变矮。 */
+  const prevMetaRef = useRef<{ len: number; lines: number } | null>(null)
+  /** 上一帧是不是已经封顶（≥240px）：封顶后继续打字，目标高度必然是同一个值。 */
+  const cappedRef = useRef(false)
 
-  // textarea 自适应高度：让长文本字段随内容长高，而不是在小框里滚动
+  /**
+   * textarea 自适应高度：让长文本字段随内容长高，而不是在小框里滚动。
+   *
+   * **旧实现为什么慢**（2026-11-02 性能体检）：
+   * ```
+   * el.style.height = 'auto'                 // ① 写：把布局打脏
+   * el.style.height = min(el.scrollHeight,…) // ② 读 scrollHeight：样式脏了，必须先把
+   *                                          //    整棵树重算一遍才能回答 → forced reflow
+   * ```
+   * 这个 effect 挂在 `[value]` 上，所以是**每个字符一发**：只要当前分组里有长文本在打字，
+   * 主线程每键都要付一次同步 layout（几百 µs ~ 数 ms，取决于面板里有多少节点）。
+   * 面板一屏同时挂着 10 个分组 + 世界书，这就是编辑器"打字发涩"的直接来源。
+   *
+   * **现在的顺序（能不读就不读，能写一次就不写两次）**：
+   *  0. **零测量快路径**：上一帧已经封顶（≥240px）且这次文本「只增不减」→ 内容只会更长、
+   *     目标高度必然是同一个封顶值，于是**连 `scrollHeight` 都不读**。这条覆盖的正是
+   *     "长文本一直在打字"这个最热场景（底下实测：40 次输入 41→1 次强制布局）；
+   *  1. 必须先读的那一步，先读 `scrollHeight` / `clientHeight` 两个数：此时样式没被打脏，
+   *     浏览器可以复用上一帧的布局结果，成本 ≈ 0；
+   *  2. 只有「内容溢出」才写 height，而且**不需要先归零**：溢出的 textarea 的
+   *     `scrollHeight` 本身就是真实内容高度，一次写就够；
+   *  3. 写之前再比一次内联值，相同就**不写**（封顶后的长文本每键目标都是同一个 240px）；
+   *  4. 「变矮」是唯一需要把高度归零再量的情形（内容装得下时 `scrollHeight` 等于
+   *     `clientHeight`，量不出真实需求高度），它只发生在**删字**与**首次挂载**时；
+   *  5. 同一帧内多次触发合并成一次测量：rAF 与一个兜底定时器共用同一份待办，谁先到谁
+   *     清掉对方（页面不出帧时 rAF 会一直挂着，只靠它会"高度再也不长"——无头环境实测到过）。
+   *
+   * **行为与旧实现一致**：随内容长高、封顶 240px、超过封顶出内滚动条、删字缩回去、
+   * 首帧按内容定高；视觉兜底仍在 CSS（`.awu-editArea` 是 `height:auto` + `min-height:56px`）。
+   *
+   * 唯一有意的偏差（更好、不是回归）：用户手动拖拽 `resize: vertical` 把框拉高后继续打字，
+   * 新实现不会像旧实现那样把高度拽回 240px（旧实现每键都重算，等于吞掉用户的手动尺寸）。
+   */
   useEffect(() => {
     const el = ref.current
-    if (el === null) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
+    if (el === null) return undefined
+
+    // 行数只用来判断"有没有可能变矮"：换行数变少（或总长变短）才需要归零重量。
+    let lines = 0
+    for (const ch of value) if (ch === '\n') lines += 1
+    const prev = prevMetaRef.current
+    const shrunk = prev !== null && (value.length < prev.len || lines < prev.lines)
+    /** 首帧走一次完整测量，保证初始高度与旧实现一致。 */
+    const first = prev === null
+    prevMetaRef.current = { len: value.length, lines }
+
+    const apply = (): void => {
+      // 先清掉自己这一份待办：rAF 与兜底定时器共用同一份，谁先到谁清掉对方
+      const pending = pendingRef.current
+      if (pending.frame !== undefined) { window.cancelAnimationFrame(pending.frame); pending.frame = undefined }
+      if (pending.timer !== undefined) { window.clearTimeout(pending.timer); pending.timer = undefined }
+      try {
+        // ⓪ 零测量快路径：已封顶 + 只增不减 → 目标高度仍是封顶值，一个数都不用读
+        if (cappedRef.current && !shrunk) return
+
+        // ① 先读：样式没被打脏，走上一帧的布局缓存
+        const content = el.scrollHeight
+        const visible = el.clientHeight
+        if (content > visible) {
+          // ② 溢出：scrollHeight 就是真实内容高度，直接封顶写回（相同则不写）
+          const target = Math.min(content, TEXTAREA_MAX_H)
+          cappedRef.current = target >= TEXTAREA_MAX_H
+          const next = `${target}px`
+          if (el.style.height !== next) el.style.height = next
+          return
+        }
+        // ③ 装得下、且不是在变矮 / 首帧：当前高度已经够用，不量也不写
+        if (!shrunk && !first) return
+        // ④ 变矮 / 首帧：只有这条路径需要"归零再量"
+        el.style.height = 'auto'
+        const natural = Math.min(el.scrollHeight, TEXTAREA_MAX_H)
+        cappedRef.current = natural >= TEXTAREA_MAX_H
+        el.style.height = `${natural}px`
+      } catch (error) {
+        // 量高度失败不该影响输入（老内核 / 元素正在被卸载），留痕后跳过
+        console.warn('[ai-with-u] 编辑框自适应高度失败，已跳过', error)
+      }
+    }
+
+    // 合帧：一帧内最多量一次。先撤销上一份待办（连打 / 粘贴 / 输入法上屏会在一帧里
+    // 触发多次），再同时挂 rAF 与定时器兜底 —— 页面不出帧时后者保底。
+    const pending = pendingRef.current
+    if (pending.frame !== undefined) { window.cancelAnimationFrame(pending.frame); pending.frame = undefined }
+    if (pending.timer !== undefined) { window.clearTimeout(pending.timer); pending.timer = undefined }
+    pending.frame = window.requestAnimationFrame(apply)
+    pending.timer = window.setTimeout(apply, MEASURE_FALLBACK_MS)
+    return () => {
+      const now = pendingRef.current
+      if (now.frame !== undefined) { window.cancelAnimationFrame(now.frame); now.frame = undefined }
+      if (now.timer !== undefined) { window.clearTimeout(now.timer); now.timer = undefined }
+    }
   }, [value])
 
   if (multiline) {
@@ -165,6 +271,17 @@ function FieldGroup(props: {
 }): JSX.Element {
   const { group, values, open, onToggle, onFieldChange, t } = props
 
+  /**
+   * 折叠体退场（契约 §3「折叠展开/收起」：展开 T_BASE / 收起 T_EXIT）。
+   *
+   * 展开那条在 CSS 里（`.awu-editGroupBody { animation: awu-fold-in … }`），收起这条**必须**留 DOM：
+   * React 直接 `{open && …}` 卸载的话，`.awu-editGroupBody[data-state="closing"]` 没有对象可动。
+   * 四处折叠体（这里 / 世界书 `.awu-loreBody` / 日记按月 `.awu-diary` / 预览分段）用的是同一条
+   * `usePresence(open, T_EXIT)` + `presenceAttrs(closing)`，所以没有另抽 `useFold` ——
+   * 那只会是 `usePresence` 的别名，多一层间接却没有多一行行为（详见汇报）。
+   */
+  const bodyPresence = usePresence(open, T_EXIT)
+
   // 该组已填字段数，折叠时也能看出这块有没有内容
   const filled = group.fields.filter(field => !isEmptyValue(values[field.key] ?? '')).length
 
@@ -191,8 +308,8 @@ function FieldGroup(props: {
         </span>
       </button>
 
-      {open && (
-        <div className="awu-editGroupBody">
+      {bodyPresence.mounted && (
+        <div className="awu-editGroupBody" {...presenceAttrs(bodyPresence.closing)}>
           {group.hint !== undefined && (
             <div className="awu-editGroupHint" data-soul={group.soul === true ? 'true' : 'false'}>
               {group.hint}
@@ -267,14 +384,33 @@ export function CardEditor(props: {
   const editorRef = useRef<HTMLDivElement | null>(null)
   const confirmRef = useRef<HTMLDivElement | null>(null)
 
+  /**
+   * 编辑器本体的退场：面板用 `editing ? <CardEditor/> : <详情页>` 整块替换，
+   * 直接调 `onCancel()` 等于当场卸载 —— `.awu-editor[data-state="closing"]` 就没对象可动。
+   * `useLayerExit` 把 `onCancel` 排到 160ms 之后（契约 §2.2）。
+   */
+  const layerExit = useLayerExit(onCancel, editorRef)
+  /** 首帧带着 `data-still` 渲染 = 这次进入不做 blur（入场 `awu-slide-in` 240ms）。 */
+  const attachEditor = useStillAttr(editorRef, T_ENTER + 60)
+  /** 未保存确认层自己的退场：按「继续编辑」收掉时淡出，而不是硬切。 */
+  const confirmPresence = usePresence(confirmLeave, T_EXIT)
+  /** 同一套首帧 `data-still`：契约要求三个浮层都带（`.awu-editorConfirm` 的 CSS 规则待补，见汇报）。 */
+  const attachConfirm = useStillAttr(confirmRef, T_BASE + 60)
+
   // 焦点顺序不能换：先记「打开前焦点在哪」，再把焦点送进容器，最后才拦 Tab。
   // 未保存确认打开时压栈成为最上层，Tab 只在确认卡里循环；关掉后焦点回到编辑器。
+  //
+  // ⚠️ 这里的 `useRestoreFocus(true)` 在当前挂载路径上是**一次空操作**，不是 bug：
+  // 面板用 `editing ? <CardEditor/> : <>详情页…</>` 整块替换（index.tsx），编辑器挂载时
+  // 「编辑」按钮已随子树卸载、浏览器把焦点退回 body → hook 按「原本是 body 就不记录」
+  // 的设计跳过。还焦由面板按稳定 id（#awu-detail-edit）补，见 index.tsx 的 wasEditingRef。
+  // 三件套仍然要留：编辑器内部还有一层「未保存确认」要接管焦点。
   useRestoreFocus(true)
   useInitialFocus(editorRef, true)
-  useFocusTrap(editorRef, true)
+  useFocusTrap(editorRef, !layerExit.leaving)
   useRestoreFocus(confirmLeave)
   useInitialFocus(confirmRef, confirmLeave)
-  useFocusTrap(confirmRef, confirmLeave)
+  useFocusTrap(confirmRef, confirmLeave && !layerExit.leaving)
 
   const structureDirty = useMemo(() => isDirty(card, draft), [card, draft])
   const loreDirty = useMemo(() => JSON.stringify(lore) !== loreBase, [lore, loreBase])
@@ -301,9 +437,19 @@ export function CardEditor(props: {
   }, [])
 
   const requestClose = (): void => {
-    if (busy) return
+    if (busy || layerExit.leaving) return
     if (dirty) { setConfirmLeave(true); return }
-    onCancel()
+    layerExit.beginLeave()
+  }
+
+  /**
+   * 确认层里按「放弃」：**不**收确认层，直接把整棵编辑器送进退场。
+   *
+   * 为什么不 `setConfirmLeave(false)` 再走：那样确认卡会先硬切消失（React 卸载），
+   * 底下的编辑页再淡出 —— 同一动作里出现两次视觉事件。让父层带着它一起淡完 160ms 更干净。
+   */
+  const discardAndLeave = (): void => {
+    layerExit.beginLeave()
   }
 
   // 父级请求关闭（点侧栏入口 / 点遮罩收起面板）：不直接卸载，先走同一套未保存确认
@@ -318,17 +464,19 @@ export function CardEditor(props: {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      // 退场期（160ms）不再接 Esc：这层已经在消失，Esc 该落到外层去了
+      if (layerExit.leaving) return
       // 全屏长文本层盖在最上面：Esc 归它（它自己会处理和「返回/丢弃」），
       // 两个 capture 监听按注册顺序跑，壳层不让步就会出现「一次 Esc 关两层」。
       if (loreFocus) return
       event.stopPropagation()
       if (confirmLeave) { setConfirmLeave(false); return }
       if (dirty) { setConfirmLeave(true); return }
-      onCancel()
+      layerExit.beginLeave()
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [dirty, confirmLeave, loreFocus, onCancel])
+  }, [dirty, confirmLeave, layerExit, loreFocus])
 
   /**
    * 保存：两条链路分开走（见 `CardSavePayload` 的注释）。
@@ -349,7 +497,14 @@ export function CardEditor(props: {
   }
 
   return (
-    <div ref={editorRef} className="awu-editor" role="dialog" aria-modal="true" aria-label={t('edit.title')}>
+    <div
+      ref={attachEditor}
+      className="awu-editor"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('edit.title')}
+      {...presenceAttrs(layerExit.closing)}
+    >
       {/* 顶部：标题栏 */}
       <header className="awu-editorHead">
         <div className="awu-editorHeadMain">
@@ -371,9 +526,7 @@ export function CardEditor(props: {
             onClick={requestClose}
             disabled={busy}
           >
-            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-              <path d="M4 4l8 8M12 4l-8 8" />
-            </svg>
+            <IconClose size={15} />
           </button>
         </div>
       </header>
@@ -438,9 +591,16 @@ export function CardEditor(props: {
         </button>
       </footer>
 
-      {/* 未保存确认 */}
-      {confirmLeave && (
-        <div ref={confirmRef} className="awu-editorConfirm" role="dialog" aria-modal="true" aria-label={t('edit.discardTitle')}>
+      {/* 未保存确认：`confirmLeave` 决定"该开"、presence 决定"还留不留"（收启动画 160ms） */}
+      {confirmPresence.mounted && (
+        <div
+          ref={attachConfirm}
+          className="awu-editorConfirm"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('edit.discardTitle')}
+          {...presenceAttrs(confirmPresence.closing)}
+        >
           <div className="awu-editorConfirmCard">
             <div className="awu-editorConfirmTitle">
               <IconQuill size={15} />
@@ -451,7 +611,7 @@ export function CardEditor(props: {
               <button type="button" className="awu-btn" onClick={() => setConfirmLeave(false)}>
                 {t('edit.keepEditing')}
               </button>
-              <button type="button" className="awu-btn" data-kind="danger" onClick={onCancel}>
+              <button type="button" className="awu-btn" data-kind="danger" onClick={discardAndLeave}>
                 {t('edit.discard')}
               </button>
             </div>

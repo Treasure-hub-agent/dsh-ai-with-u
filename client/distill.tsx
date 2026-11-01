@@ -19,6 +19,17 @@
  * 历史：同一位置的可见小入口 `DockEntry` 从未注册过（主人明确要求底部托盘不留蒸馏按钮），
  * 且要填的 `dock*` 文案一起成了死代码，已删除（2026-10-31，任务 3）。
  *
+ * TODO（第 4 轮）：把自建的 scrim/dialog 换回 `Overlay`。
+ * 现状：本文件自建了一套「scrim + `.awu-dialog` + 自己的 Esc 监听 + 自己的滚动锁」
+ * （`DistillDialog` 的 return 与 `useBodyScrollLock`），因为面板的 `Overlay` 是 `index.tsx`
+ * 的内部函数、没有导出。那是第 2 批统一动效时留下的一处**副本**，代价是它天生缺 `Overlay` 身上
+ * 三条兜底，现在靠手工逐条补齐，改 `Overlay` 时必须记得同步这边：
+ *   1. 宿主拖放复位（`resetHostDropState`）—— 本文件已补「卸载时」那一条，见 `DistillDialog` 的 effect；
+ *   2. `data-still`（动画期去 blur + 层提升）—— 自建 dialog 未接，因为它没有进入/退场动画可驱动；
+ *   3. `presence` / `data-state="closing"`（退场 160ms）—— 自建 dialog 未接，关闭是硬卸载。
+ * 换回 Overlay 后这三条自动获得，同时 `.awu-distill-dialog` 的宽/圆角覆盖问题也一并消失。
+ * 归属：需要先把 `Overlay` 从 `index.tsx` 抽成 `client/overlay.tsx`（属 index.tsx 写域），不在本批。
+ *
  * 发送契约（2026-10-14 / 10-17 对已安装 desktop 0.2.0-rc.2 实测，来源：本机 dsh-story 头部注释）：
  *  - `InputActions = { captureInsertion(), insertText(text, span) → boolean, setDraft(text), …, submit() }`；
  *  - `insertText` 在「草稿版本变化 / adjudicating / submitting / 已卸载」时返回 false，**必须判返回值**；
@@ -35,7 +46,7 @@ import type { JSX } from 'react'
 import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
 import type { DistillKind } from './api'
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
-import { swallowFileDrag } from './dragdrop'
+import { resetHostDropState, swallowFileDrag } from './dragdrop'
 import { IconClose, IconQuill } from './icons'
 import type { Translate } from './text'
 
@@ -384,6 +395,17 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
 
   useBodyScrollLock(true)
 
+  /**
+   * 卸载兜底：自建 scrim 缺 `Overlay` 的那条复位（`index.tsx` 的 Overlay 有 `useEffect(() => () =>
+   * resetHostDropState(), [])`）。
+   *
+   * 为什么必须有：`.awu-scrim` 是 fixed 全屏遮罩，拖一张卡进来时 drop 落在它身上，我们 `preventDefault`
+   * 吞掉后宿主的「拖放中」计数器不会自己归零 —— 拖放若在中途被打断（Esc / 焦点切走 / 组件先卸载），
+   * drop 永远不来，聊天区的遮罩就永久卡住。这是历史真事故的同类（见 `dragdrop.ts` 文件头）。
+   * `swallowFileDrag` 只在 drop 时复位，所以这里补「卸载时」那一条。
+   */
+  useEffect(() => () => { resetHostDropState() }, [])
+
   // 焦点三件套（与 index.tsx 的 Overlay / editor-focus 同款接线，2026-11-01 补）：
   // 顺序不能换：先记「打开前焦点在哪」，再把焦点送进容器，最后拦 Tab。
   useRestoreFocus(true)
@@ -526,6 +548,14 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
                 <div
                   className="awu-distill-status"
                   data-tone={note.tone === 'err' ? 'danger' : note.tone === 'warn' ? 'warn' : 'ok'}
+                  /*
+                    播报语义（a11y 自检 ④ 此前把这行登记成"待补"）：
+                    `role="status"` 固定为 polite，**不按 tone 切 alert**——同一个节点上改 role
+                    的播报行为在 NVDA/JAWS 上不可靠（多数实现只在插入时读一次），err 也走 polite。
+                    `aria-live` 显式写上：宿主可能覆盖 role 的隐式 live 值。
+                  */
+                  role="status"
+                  aria-live="polite"
                 >
                   {note.text}
                 </div>

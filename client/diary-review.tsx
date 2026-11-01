@@ -20,7 +20,58 @@ import type { JSX } from 'react'
 
 import type { DiaryEntry } from './api'
 import { IconChevron, IconDownload, IconQuill } from './icons'
+import { T_EXIT, presenceAttrs, usePresence } from './motion'
 import type { Translate } from './text'
+
+/**
+ * 一个月的正文（`.awu-diary`，标记在 `.awu-reviewMonth` 里）。
+ *
+ * 为什么单独一个组件：折叠体的退场要 `usePresence`，而 hook 不能写在 `filtered.map` 的循环体里。
+ * 展开动画在 CSS（`.awu-reviewMonth > .awu-diray` 由 `awu-fold-in` 驱动），收起要留 DOM 160ms，
+ * 否则 React 一卸载，`.awu-reviewMonth > .awu-diary[data-state="closing"]` 就没有对象可动。
+ * 另外三处折叠体（卡编辑器分组 / 世界书条目 / 预览分段）用的是同一条 `usePresence(open, T_EXIT)`。
+ */
+function ReviewMonthBody(props: {
+  open: boolean
+  days: ReviewDay[]
+  monthKey: string
+  t: Translate
+  onEdit: (target: DiaryTarget) => void
+}): JSX.Element | null {
+  const { open, days, monthKey, t, onEdit } = props
+  const bodyPresence = usePresence(open, T_EXIT)
+  if (!bodyPresence.mounted) return null
+
+  return (
+    <div className="awu-diary" {...presenceAttrs(bodyPresence.closing)}>
+      {days.map(day => (
+        <div className="awu-day" key={`${monthKey}-${day.date}`}>
+          <div className="awu-dayDate">{day.date}</div>
+          {day.lines.map(line => (
+            <div className="awu-line" key={`${line.section}-${line.index}`}>
+              <span className="awu-lineMarker">{t(`diary.marker.${line.section}`)}</span>
+              <span style={{ flex: 1, minWidth: 0 }}>{line.text}</span>
+              <button
+                type="button"
+                className="awu-lineEdit"
+                title={t('diary.edit')}
+                aria-label={t('diary.edit')}
+                onClick={() => onEdit({
+                  date: day.date,
+                  section: line.section,
+                  index: line.index,
+                  text: line.text,
+                })}
+              >
+                {t('diary.edit')}
+              </button>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 /** 一条可改写的日记行（与原日记里的位置一一对应）。 */
 export interface DiaryTarget {
@@ -284,35 +335,14 @@ export function DiaryReview(props: {
                   <span className="awu-reviewMonthTitle">{title}</span>
                   <span className="awu-reviewMonthMeta">{t('diary.hitCount', { n: lineCount })}</span>
                 </button>
-                {open && (
-                  <div className="awu-diary">
-                    {month.days.map(day => (
-                      <div className="awu-day" key={`${month.key}-${day.date}`}>
-                        <div className="awu-dayDate">{day.date}</div>
-                        {day.lines.map(line => (
-                          <div className="awu-line" key={`${line.section}-${line.index}`}>
-                            <span className="awu-lineMarker">{t(`diary.marker.${line.section}`)}</span>
-                            <span style={{ flex: 1, minWidth: 0 }}>{line.text}</span>
-                            <button
-                              type="button"
-                              className="awu-lineEdit"
-                              title={t('diary.edit')}
-                              aria-label={t('diary.edit')}
-                              onClick={() => onEdit({
-                                date: day.date,
-                                section: line.section,
-                                index: line.index,
-                                text: line.text,
-                              })}
-                            >
-                              {t('diary.edit')}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {/* 正文抽成子组件：`usePresence` 是 hook，不能写在 `.map` 的循环体里 */}
+                <ReviewMonthBody
+                  open={open}
+                  days={month.days}
+                  monthKey={month.key}
+                  t={t}
+                  onEdit={onEdit}
+                />
               </section>
             )
           })}

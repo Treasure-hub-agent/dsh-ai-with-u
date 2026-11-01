@@ -20,6 +20,7 @@ import type { JSX } from 'react'
 
 import { FocusEditor } from './editor-focus'
 import { IconAlert, IconChevron, IconPlus, IconTrash } from './icons'
+import { T_EXIT, presenceAttrs, usePresence } from './motion'
 import {
   LORE_BUDGET,
   LORE_LIMITS,
@@ -106,6 +107,15 @@ function LoreEntryCard(props: {
 }): JSX.Element {
   const { entry, index, total, open, issues, t, onToggle, onPatch, onMove, onRemove, onFullscreen } = props
 
+  /**
+   * 条目正文的退场（契约 §3「折叠展开/收起」：展开 T_BASE / 收起 T_EXIT）。
+   * 展开那条在 CSS（`.awu-loreBody { animation: awu-fold-in … }`），收起要留 DOM 160ms，
+   * 否则 React 一卸载，`.awu-loreBody[data-state="closing"]` 就没有对象可动。
+   * 四处折叠体（本文件 / 卡编辑器 `.awu-editGroupBody` / 日记按月 / 预览分段）用的是同一条
+   * `usePresence(open, T_EXIT)`，所以没有另抽 `useFold` —— 那只是别名，见 card-editor 的说明。
+   */
+  const bodyPresence = usePresence(open, T_EXIT)
+
   // 关键词输入缓冲：数组 ↔ 逗号文本不能每敲一个字就互相覆盖
   //（"雾港, " 归一化成 ['雾港'] 再显示回去，逗号会被吃掉，用户根本打不出第二个词）。
   const [keyText, setKeyText] = useState<string>(() => entry.keys.join(', '))
@@ -174,6 +184,8 @@ function LoreEntryCard(props: {
             onClick={() => onMove(-1)}
           >
             <IconChevron size={12} style={{ transform: 'rotate(-90deg)' }} />
+            {/* 静态旋转（把右箭头转到朝上）：没有状态变化，所以不需要过渡；
+                正解是 icons.tsx 补 IconUp/IconDown（不在本批写域，已登记进汇报）。 */}
           </button>
           <button
             type="button"
@@ -197,8 +209,8 @@ function LoreEntryCard(props: {
         </span>
       </div>
 
-      {open && (
-        <div className="awu-loreBody">
+      {bodyPresence.mounted && (
+        <div className="awu-loreBody" {...presenceAttrs(bodyPresence.closing)}>
           {issues.length > 0 && (
             <ul className="awu-loreEntryIssues">
               {issues.map((issue, i) => (
@@ -349,6 +361,13 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
   const [expanded, setExpanded] = useState('')
   /** 全屏长文本层正在编辑哪一条（`''` = 没开） */
   const [focusId, setFocusId] = useState('')
+  /**
+   * 全屏长文本层已经**开始退场**（还没真正卸载）。
+   *
+   * 契约 §2.2-契约 4：退场期这层不该再吃 Esc，否则用户要按两下才关得掉外层。
+   * FocusEditor 通过新的 `onClosing` 上报；`focusId` 要等它真卸载了（160ms 后）才清空。
+   */
+  const [focusClosing, setFocusClosing] = useState(false)
   /** 「提示」级问题默认折叠（真卡动辄几十条规模提示，展开会淹没真问题） */
   const [showInfo, setShowInfo] = useState(false)
   /** 「被预算裁掉」明细默认折叠 */
@@ -356,7 +375,10 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
   // 新条目的本地 id 计数：`lore-0/1…` 已经被既有条目占用，这里换个前缀避免撞 key
   const localSeq = useRef(0)
 
-  useEffect(() => { onFocusLayerChange?.(focusId !== '') }, [focusId, onFocusLayerChange])
+  // 上报「本层要不要自己吃 Esc」：closing 期间立刻放行（不算"开着"）
+  useEffect(() => {
+    onFocusLayerChange?.(focusId !== '' && !focusClosing)
+  }, [focusId, focusClosing, onFocusLayerChange])
 
   const totals = useMemo(() => loreTotals(entries), [entries])
   /** 没有任何需要动作的问题（error=0 且 warn=0）→ 顶部只给一句「体检通过」 */
@@ -551,7 +573,7 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
               )}
 
               {infoIssues.length > 0 && (
-                <div className="awu-loreInfoBlock">
+                <div className="awu-loreInfoBlock" data-open={showInfo ? 'true' : undefined}>
                   <button
                     type="button"
                     className="awu-btn"
@@ -560,7 +582,11 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
                     aria-expanded={showInfo}
                     onClick={() => setShowInfo(current => !current)}
                   >
-                    <IconChevron size={11} style={{ transform: showInfo ? 'rotate(90deg)' : 'none' }} />
+                    {/* 旋转由 CSS `.awu-loreInfoBlock[data-open="true"]` 驱动（第 3 批补上），
+                        这里不再写内联 transform —— 内联值会盖掉 CSS 的过渡。 */}
+                    <span className="awu-editGroupChevron" aria-hidden="true">
+                      <IconChevron size={11} />
+                    </span>
                     {showInfo ? t('lore.issues.hideInfo') : t('lore.issues.showInfo', { n: infoIssues.length })}
                   </button>
                   {showInfo && (
@@ -594,7 +620,7 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
                       onPatch={patch => patchEntry(entry.id, patch)}
                       onMove={delta => onChangeEntries(moveEntry(entries, index, delta))}
                       onRemove={() => removeEntry(entry.id)}
-                      onFullscreen={() => setFocusId(entry.id)}
+                      onFullscreen={() => { setFocusClosing(false); setFocusId(entry.id) }}
                     />
                   ))}
                   <button type="button" className="awu-editAdd" onClick={addEntry}>
@@ -682,11 +708,18 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
             keepEditing: t('edit.keepEditing'),
             discard: t('edit.discard'),
           }}
+          /*
+            退场期（FocusEditor 已开始淡出、还没卸载）立刻把 Esc 让回壳层：
+            不传 onClosing 的话，那 160ms 里 card-editor 的 Esc 会被 `loreFocus` 白白吞掉，
+            用户得按两下才关得掉编辑器（契约 §2.2-契约 4）。
+          */
+          onClosing={() => setFocusClosing(true)}
           onDone={next => {
             patchEntry(focusEntry.id, { content: next })
             setFocusId('')
+            setFocusClosing(false)
           }}
-          onCancel={() => setFocusId('')}
+          onCancel={() => { setFocusId(''); setFocusClosing(false) }}
         />
       )}
     </section>

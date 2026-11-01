@@ -20,6 +20,7 @@ import type { JSX } from 'react'
 import { errorText, fetchPreview, isUnavailable } from './api'
 import type { PreviewData, PreviewSegment } from './api'
 import { IconAlert, IconChevron, IconRefresh, IconSpark } from './icons'
+import { T_EXIT, presenceAttrs, usePresence } from './motion'
 import type { Translate } from './text'
 
 /** 宿主约定里 L1 角色设定段的 id（用来算「L1 字符数」）。 */
@@ -143,14 +144,14 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
       <div className="awu-dialogBody">
         <div className="awu-hint" style={{ marginBottom: 10 }}>{t('preview.hint')}</div>
 
-        {loading && data === undefined && (
-          <div className="awu-hint" role="status">{t('preview.loading')}</div>
-        )}
+        {loading && data === undefined && <PreviewSkeleton label={t('preview.loading')} />}
 
         {unavailable && <div className="awu-hint" data-tone="warn">{t('preview.unavailable')}</div>}
 
         {error !== '' && (
-          <div className="awu-err" role="alert">
+          /* 与主面板 `ErrorBar` 同形：`.awu-status` 给几何 + `data-status="alert"` 给语气
+             （裸 `.awu-err` 只有红描边与红字，少了状态带那条中性底与左轨） */
+          <div className="awu-status awu-err" data-status="alert" role="alert">
             <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
             <span style={{ flex: 1, minWidth: 0 }}>{t('preview.failed', { reason: error })}</span>
           </div>
@@ -183,7 +184,12 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
             </div>
 
             {segments.length === 0 ? (
-              <div className="awu-hint">{t('preview.noSegments')}</div>
+              /* 主面板空态三段式：Mark + Title + Hint（原来只有一句句号结尾的 hint，读起来像报错） */
+              <div className="awu-empty">
+                <span className="awu-emptyMark"><IconSpark size={20} /></span>
+                <span className="awu-emptyTitle">{t('preview.emptySegment')}</span>
+                <span className="awu-emptyHint">{t('preview.noSegments')}</span>
+              </div>
             ) : (
               <div className="awu-previewSegs">
                 {segments.map(seg => {
@@ -207,11 +213,12 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
                           {t('preview.order', { n: seg.order })} · {t('preview.chars', { n: seg.chars })}
                         </span>
                       </button>
-                      {open && (
-                        empty
-                          ? <div className="awu-previewEmpty">{t('preview.emptySegment')}</div>
-                          : <pre className="awu-previewText">{seg.text}</pre>
-                      )}
+                      {/*
+                        正文抽成子组件：`usePresence` 是 hook，不能写在 `segments.map` 的循环体里。
+                        展开动画在 CSS（`.awu-previewText` / `.awu-previewEmpty` 走 `awu-fold-in`），
+                        收起要留 DOM 160ms，否则 `.awu-preview*[data-state="closing"]` 没有对象可动。
+                      */}
+                      <PreviewSegmentBody open={open} empty={empty} text={seg.text} t={t} />
                     </section>
                   )
                 })}
@@ -230,5 +237,47 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
         </button>
       </div>
     </>
+  )
+}
+
+/**
+ * 一个注入段的正文（`.awu-previewText` 或 `.awu-previewEmpty`）。
+ *
+ * 抽成子组件的原因同日记按月折叠：`usePresence` 是 hook，不能写进 `segments.map` 的循环体。
+ * CSS 的收起规则按这两个类名命中（`.awu-previewText[data-state="closing"]` /
+ * `.awu-previewEmpty[data-state="closing"]`），所以 attrs 必须挂在这一层，不能挂到 `.awu-previewSeg`。
+ */
+function PreviewSegmentBody(props: {
+  open: boolean
+  empty: boolean
+  text: string
+  t: Translate
+}): JSX.Element | null {
+  const { open, empty, text, t } = props
+  const bodyPresence = usePresence(open, T_EXIT)
+  if (!bodyPresence.mounted) return null
+  const attrs = presenceAttrs(bodyPresence.closing)
+  return empty
+    ? <div className="awu-previewEmpty" {...attrs}>{t('preview.emptySegment')}</div>
+    : <pre className="awu-previewText" {...attrs}>{text}</pre>
+}
+
+/**
+ * 载入骨架：与主面板 `index.tsx` 的 `Skeleton`（以及 `preset-view` 的 `PresetSkeleton`）**同构** ——
+ * 同一组 `.awu-sk` / `.awu-skRow`、同样 3 行、同样 `role="status"` + `aria-live` + 视觉隐藏的文字。
+ *
+ * 为什么不 import 主面板那个：它是 `index.tsx` 的内部函数（没 export），而 `index.tsx` 是并行写域；
+ * 共享的是**类名**（在 `styles.ts` 里），照抄 15 行 DOM 形状是成本最低、互不影响的做法。
+ */
+function PreviewSkeleton(props: { label: string }): JSX.Element {
+  return (
+    <div className="awu-sk" role="status" aria-live="polite">
+      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
+        {props.label}
+      </span>
+      <div className="awu-skRow" />
+      <div className="awu-skRow" />
+      <div className="awu-skRow" />
+    </div>
   )
 }

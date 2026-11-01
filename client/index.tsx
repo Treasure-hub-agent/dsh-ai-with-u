@@ -8,7 +8,7 @@
  * 设计语言的 CSS 在 `styles.ts`，文案与角色卡解析在 `text.ts`，接口在 `api.ts`；
  * 这个文件只管「状态机 + 布局」，尽量不写魔法数字以外的样式细节。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type {
   ChangeEvent as ReactChangeEvent,
@@ -19,6 +19,9 @@ import type {
 } from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
+// 动效单一真源（契约 §1）：时长/缓动只从这里取，不在 JSX 里写字面量。
+// pop 帧用 T_MID（= CSS 的 --awu-t-mid），退场用 T_EXIT（= --awu-t-exit）。
+import { EASE, T_BASE, T_ENTER, T_EXIT, T_MID, presenceAttrs, prefersReducedMotion, releaseFocusWithin, useFinePointer, usePresence } from './motion'
 
 import {
   activateCharacter,
@@ -99,7 +102,7 @@ import type { LoreDroppedInfo } from './lore-diag'
 import { toLoreDraftFromCard } from './lorebook-schema'
 import { PresetPanel } from './preset-view'
 import { PromptPreview } from './preview'
-import { SCOPED_ATTR, installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
+import { installStyles, CARD_STAGGER, PANEL_MAX_H, PANEL_WIDTH } from './styles'
 import {
   blurbOf,
   entriesOf,
@@ -124,8 +127,14 @@ export interface FooterActionProps {
 
 type Tab = 'roster' | 'diary' | 'stats' | 'guide'
 
+/** 面板里的弹层种类（空串 = 没有弹层）。抽成别名是为了「退场期还要渲染上一张」的 ref 好标类型。 */
+type PanelDialog = 'new' | 'import' | 'preview' | 'preset' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'
+
 /** 成功类提示条的存活时间（ms）。警告类不吃这个时间，留到用户手动关。 */
 const NOTICE_TTL_MS = 5000
+
+/** 删卡淡出的时长（= motion.ts 的 T_FAST / CSS 的 --awu-t-fast）。 */
+const T_FAST_LOCAL = 120
 
 /** 左栏的两枚模式胶囊（顺序即展示顺序）。 */
 const MODE_OPTIONS: Array<{ value: InteractionMode; labelKey: string; hintKey: string }> = [
@@ -213,6 +222,15 @@ function useScrollLock(active: boolean): void {
  * `swallowFileDrag` 现在还会在 drop 时复位宿主的拖放计数器（否则聊天区遮罩会永久卡死，
  * 见 `dragdrop.ts` 文件头），拖放区在内层先接住，所以真正的拖放不受影响。
  */
+/**
+ * 弹层「正在退场」的广播。
+ *
+ * 为什么用 context 而不是 prop：`Overlay` 有 9 处调用点（7 个确认/表单弹层 +
+ * preview + preset），逐个传 closing 既啰嗦又容易漏；而退场状态本来就是
+ * 「宿主这一批弹层」共享的，context 是它正确的粒度。
+ */
+const DialogLayerContext = createContext<boolean>(false)
+
 function Overlay(props: {
   label: string
   onClose: () => void
@@ -220,25 +238,76 @@ function Overlay(props: {
   /** 弹层里「没落在拖放区上」的文件：默认只是吞掉；传了就顺手回调（用于给一句提示） */
   onFilesDropped?: (files: FileList) => void
   /**
-   * 嵌套的专注编辑层（FocusEditor）开着时让位：Esc 处理**直接 return**，
-   * 把 Esc 留给内层（它会先出「丢弃确认」再关）。
-   * 否则一次 Esc 同时触发内层下线与 `onClose`，未保存的模块编辑无声全丢
-   * （约定见 `editor-focus.tsx:12-13`，正确做法参照 `card-editor.tsx:322-323` 的 loreFocus）。
+   * 「本层要先吃 Esc」：为 true 时 Overlay 的 Esc 处理**直接 return**，把 Esc 让给层内。
+   *
+   * 语义是「谁该处理这次 Esc」，不只等于「专注编辑层开着」（2026-11-02 与 preset 侧对齐）：
+   * 内层会自己处理的情形至少三种 —— 模块专注编辑层打开、有未保存改动、
+   * 丢弃确认弹着；三种都要求 Esc 先由内层消费（比如先弹「放弃改动？」），
+   * 否则一次 Esc 会同时触发内层下线与 `onClose`，未保存的编辑无声全丢。
+   *
+   * 所以调用方（目前是 preset 的 `onFocusLayerChange`）给的是一个**汇总后的布尔**，
+   * 而不是「专注层开关」本身。约定见 `editor-focus.tsx:12-13`，
+   * 正确做法参照 `card-editor.tsx` 的 loreFocus 让位。
    */
   escYield?: boolean
 }): JSX.Element {
   const { label, onClose, children, onFilesDropped, escYield = false } = props
   const boxRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * 退场态由宿主（CharacterPanel 的弹层宿主）通过 context 广播：
+   * `closing` 期间这一层还在 DOM 里跑 160ms 退场动画，但已经不该再吃 Esc / 抢焦点。
+   * 滚动锁仍然按 **mounted** 走（`useScrollLock(true)`，卸载时才解）——
+   * 跟着 closing 解锁会让遮罩淡出的 160ms 里底层页面能滚，比没有退场更糟（契约 §2.2 时序 2）。
+   */
+  const closing = useContext(DialogLayerContext)
+  const scrimRef = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * scrim 与 dialog 的**回调 ref**：commit 阶段同步挂 `data-still="true"`
+   * （契约 §6：带着它渲染 = 这次进入不 blur；effect 补会晚一帧，等于没做）。
+   * 摘除由下面的 effect 负责（animationend + 兜底 timer）。
+   */
+  const attachScrim = useCallback((node: HTMLDivElement | null): void => {
+    scrimRef.current = node
+    if (node !== null) node.setAttribute('data-still', 'true')
+  }, [])
+  const attachBox = useCallback((node: HTMLDivElement | null): void => {
+    boxRef.current = node
+    if (node !== null) node.setAttribute('data-still', 'true')
+  }, [])
+
   useScrollLock(true)
 
   // 焦点顺序不能换：先记回来处 → 再把焦点送进容器 → 最后拦 Tab。
   useRestoreFocus()
   useInitialFocus(boxRef, true)
   useFocusTrap(boxRef, true)
+  // 退场第一帧就把焦点请出去：否则焦点停在正在归零、且 pointer-events:none 的节点上
+  useEffect(() => {
+    if (closing) releaseFocusWithin(boxRef.current)
+  }, [closing])
+
+  /** 首帧的 data-still 由回调 ref 挂上；这里在入场动画结束（或 320ms 兜底）后摘掉。 */
+  useEffect(() => {
+    const nodes = [scrimRef.current, boxRef.current].filter((el): el is HTMLDivElement => el !== null)
+    const clear = (event: AnimationEvent): void => {
+      if (event.target instanceof HTMLElement) event.target.removeAttribute('data-still')
+    }
+    for (const node of nodes) node.addEventListener('animationend', clear)
+    const fallback = window.setTimeout(() => {
+      for (const node of nodes) node.removeAttribute('data-still')
+    }, T_ENTER + 60)
+    return () => {
+      window.clearTimeout(fallback)
+      for (const node of nodes) node.removeEventListener('animationend', clear)
+    }
+  }, [])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        // 退场中不再响应 Esc（这一层已经在走了，再 close 一次只会重置计时）
+        if (closing) return
         // 内层专注编辑层开着：Esc 归它，壳层什么都不做（也不 stopPropagation，
         // 内层自己会 stop；不同文档级监听靠注册顺序不会互相拦掉）。
         if (escYield) return
@@ -248,7 +317,7 @@ function Overlay(props: {
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose, escYield])
+  }, [onClose, escYield, closing])
 
   // 兜底：弹层卸载时再复位一次——万一拖放在中途被别的东西吃掉（Esc、焦点切换）
   // 没走到 drop，宿主的计数器也得有人归零
@@ -256,10 +325,13 @@ function Overlay(props: {
 
   return createPortal(
     <div
+      ref={attachScrim}
       className="awu-scrim"
       role="presentation"
+      /* scrim 与 dialog 都要挂 data-state：只挂 dialog 的话遮罩层会硬切消失（契约 §2.2） */
+      {...presenceAttrs(closing)}
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget && !closing) onClose()
       }}
       onDragOver={swallowFileDrag}
       onDrop={event => {
@@ -268,7 +340,17 @@ function Overlay(props: {
         if (files !== undefined && files.length > 0) onFilesDropped?.(files)
       }}
     >
-      <div ref={boxRef} className="awu-dialog" role="dialog" aria-modal="true" aria-label={label}>
+      <div
+        ref={attachBox}
+        className="awu-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        aria-hidden={closing ? true : undefined}
+        {...presenceAttrs(closing)}
+      >
+        {/* TODO（第 3 批）：`distill.tsx:483` 还有一份自建的 scrim + dialog 副本，
+            退场属性得两边同步；第 3 批把它换回这里的 Overlay 之后这段注释可删。 */}
         {children}
       </div>
     </div>,
@@ -282,15 +364,21 @@ function Dot({ on }: { on: boolean }): JSX.Element {
   return <span className="awu-lamp" data-on={on ? 'true' : 'false'} aria-hidden="true" />
 }
 
-/** 角色徽标：渐变底 + 名字首字。 */
-function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean }): JSX.Element {
-  const { name, size = 'normal', live = false } = props
+/**
+ * 角色徽标：渐变底 + 名字首字。
+ *
+ * `morph` 打上 `data-morph="avatar"`：列表卡与详情 hero **两处同名**，第 2 批的
+ * list→detail 共享元素动画（FLIP）靠这个属性配对（契约 §2.1）。
+ */
+function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean; morph?: boolean }): JSX.Element {
+  const { name, size = 'normal', live = false, morph = false } = props
   return (
     <span
       className={size === 'hero' ? 'awu-avatar awu-heroAvatar' : 'awu-avatar'}
       data-size={size}
       data-hue={String(hueOf(name))}
       data-live={live ? 'true' : 'false'}
+      data-morph={morph ? 'avatar' : undefined}
       aria-hidden="true"
     >
       {initialOf(name)}
@@ -303,9 +391,17 @@ function Avatar(props: { name: string; size?: 'normal' | 'hero'; live?: boolean 
  *  - `detail`（默认）：详情页那种竖排行；
  *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片。
  */
-function Skeleton(props: { shape?: 'detail' | 'cards'; label?: string }): JSX.Element {
+function Skeleton(props: { shape?: 'detail' | 'cards'; label?: string; closing?: boolean }): JSX.Element {
   return (
-    <div className="awu-sk" data-shape={props.shape ?? 'detail'} role="status" aria-live="polite">
+    <div
+      className="awu-sk"
+      data-shape={props.shape ?? 'detail'}
+      role="status"
+      aria-live="polite"
+      aria-hidden={props.closing === true ? true : undefined}
+      /* 退场 160ms：由调用方的 usePresence 决定何时真正卸载（契约 §2.2） */
+      {...presenceAttrs(props.closing === true)}
+    >
       <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>
         {props.label ?? '载入中…'}
       </span>
@@ -421,33 +517,65 @@ function sourceOf(card: Card | undefined): string {
 
 // ---------------------------------------------------------------- 角色卡
 
-function CharacterTile(props: {
+/**
+ * 角色卡（左栏）。
+ *
+ * 三个状态必须彼此可辨（2026-11-02 C 报告 P0-1 / P2-3）：
+ *  - `data-live="true"`     全局启用（金色呼吸，契约里保留原语义）
+ *  - `data-selected="true"` 当前正在查看的对象（静态蓝轨）—— 以前完全没做，
+ *                           于是「日记 tab 点一下别的卡」在界面上没有任何痕迹
+ *  - `boundHere`            本会话绑定（粉色 pill）—— 以前列表里看不出来
+ * `data-card-id` 是第 2 批 FLIP 的稳定身份；`Avatar` 打 `data-morph` 供共享元素配对。
+ */
+interface CharacterTileProps {
   item: CharacterSummary
+  /** 全局启用（宿主 `_active`） */
   live: boolean
+  /** 本会话绑定 */
+  boundHere: boolean
+  /** 当前正在查看（详情页 / 日记页的对象） */
+  selected: boolean
+  /** 正在淡出（删卡第 1 段） */
+  deleting?: boolean
   busy: boolean
   t: Translate
   index: number
   onOpen: (name: string) => void
-}): JSX.Element {
-  const { item, live, busy, t, index, onOpen } = props
+}
+
+function CharacterTileBase(props: CharacterTileProps): JSX.Element {
+  const { item, live, boundHere, selected, deleting = false, busy, t, index, onOpen } = props
   const role = roleOf(item.card)
   const blurb = blurbOf(item.card)
   const when = relativeDay(item.lastActive, t)
+  // 来源：接口一直带着（CharacterSummary.source），以前只在统计页用了一次（C 报告 P2-3）。
+  const source = sourceLabelOf(typeof item.source === 'string' ? item.source : '', t)
+  const meta = [role !== '' ? role : t('common.unknown'), source].filter(part => part !== '').join(' · ')
   return (
     <button
       type="button"
       className="awu-card"
+      data-card-id={item.name}
       data-live={live ? 'true' : 'false'}
-      style={{ animationDelay: `${Math.min(index, 8) * CARD_STAGGER}ms` }}
+      data-selected={selected ? 'true' : 'false'}
+      /* 删卡淡出：属性给 CSS 用（`.awu-card[data-state="closing"]`），内联 opacity/transition
+         作为属性落地前的兜底，保证两段动效（淡出 → FLIP 塌陷）在两种状态下都成立。 */
+      data-state={deleting ? 'closing' : undefined}
+      style={{
+        animationDelay: `${Math.min(index, 8) * CARD_STAGGER}ms`,
+        opacity: deleting ? 0 : undefined,
+        transition: deleting ? 'opacity 120ms linear' : undefined,
+      }}
       onClick={() => onOpen(item.name)}
+      aria-current={selected ? 'true' : undefined}
       aria-label={t('roster.open', { name: item.name })}
       disabled={busy}
     >
       <span className="awu-cardTop">
-        <Avatar name={item.name} live={live} />
+        <Avatar name={item.name} live={live} morph />
         <span className="awu-cardTitle">
           <span className="awu-cardName">{item.name}</span>
-          <span className="awu-cardRole">{role !== '' ? role : t('common.unknown')}</span>
+          <span className="awu-cardRole">{meta}</span>
         </span>
         <span className="awu-cardChevron" aria-hidden="true">
           <IconChevron size={13} />
@@ -456,6 +584,7 @@ function CharacterTile(props: {
       <span className="awu-cardBlurb">{blurb !== '' ? blurb : t('roster.never')}</span>
       <span className="awu-cardFoot">
         {live && <span className="awu-pill" data-tone="live">{t('roster.enabled')}</span>}
+        {boundHere && <span className="awu-pill" data-tone="rose">{t('roster.boundHere')}</span>}
         <span className="awu-pill" data-tone={item.memoryCount > 0 ? 'teal' : 'none'}>
           {t('roster.memory', { n: item.memoryCount })}
         </span>
@@ -464,6 +593,33 @@ function CharacterTile(props: {
     </button>
   )
 }
+
+/**
+ * 卡片的重渲染闸门（第 2 批性能项）。
+ *
+ * 为什么不能只 `memo(CharacterTile)`：每次 `reload` / 5s 轮询都返回**全新**的 item 对象，
+ * 浅比较永远不等，等于没 memo。所以这里按「真正会被渲染的字段」比较：
+ * 名字 / 来源 / 最近活跃 / 记忆数 / 各种态 + 两个派生字符串（身份、一句话背景）。
+ * 派生字符串用 roleOf/blurbOf 现算：纯字段挑选，比一次 React 重渲染便宜得多，
+ * 而且卡片被编辑后（同一 name、内容变了）也能正确重渲。
+ */
+function areTilePropsEqual(prev: CharacterTileProps, next: CharacterTileProps): boolean {
+  if (prev.item.name !== next.item.name) return false
+  if (prev.item.source !== next.item.source) return false
+  if (prev.item.lastActive !== next.item.lastActive) return false
+  if (prev.item.memoryCount !== next.item.memoryCount) return false
+  if (prev.live !== next.live) return false
+  if (prev.boundHere !== next.boundHere) return false
+  if (prev.selected !== next.selected) return false
+  if (prev.deleting !== next.deleting) return false
+  if (prev.busy !== next.busy) return false
+  if (prev.index !== next.index) return false
+  if (prev.t !== next.t) return false
+  if (prev.onOpen !== next.onOpen) return false
+  return roleOf(prev.item.card) === roleOf(next.item.card) && blurbOf(prev.item.card) === blurbOf(next.item.card)
+}
+
+const CharacterTile = memo(CharacterTileBase, areTilePropsEqual)
 
 // ---------------------------------------------------------------- 自创角色卡弹层
 
@@ -692,7 +848,8 @@ function NewCharacterDialog(props: {
               <div className="awu-hint" style={{ color: 'var(--awu-gold)', marginTop: 8 }}>{t('distill.noDock')}</div>
             )}
 
-            {error !== '' && <div className="awu-hint" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
+            {/* role="alert"：重名 / 必填 / 保存失败都是「提交后才知道」的结果，读屏必须念 */}
+            {error !== '' && <div className="awu-hint" role="alert" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
           </>
         ) : (
           <>
@@ -973,6 +1130,20 @@ function ImportDialog(props: {
       <div className="awu-dialogBody">
         <div className="awu-hint" style={{ marginBottom: 10 }}>{t('import.hint')}</div>
 
+        {/*
+          错误条必须放在「阶段判断」**外面**：选文件阶段的三条校验（类型不对 / 空文件 /
+          超限，见上面 accept()）都会写 error 然后 return，压根不会进 preview ——
+          从前 error 只在 preview 分支渲染，于是那三种失败是**完全静默**的：
+          用户拖错文件，界面上一个字都不出现。
+          role="alert" 顺带让读屏把原因念出来（原来只靠视觉）。
+        */}
+        {error !== '' && (
+          <div className="awu-err" role="alert" style={{ marginBottom: 10 }}>
+            <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+            <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
+          </div>
+        )}
+
         {stage === 'pick' ? (
           <div
             className="awu-importDrop"
@@ -1019,13 +1190,6 @@ function ImportDialog(props: {
 
             {busy && parsed === undefined && error === '' && (
               <div className="awu-hint" role="status">{t('import.parsing')}</div>
-            )}
-
-            {error !== '' && (
-              <div className="awu-err" role="alert">
-                <IconAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-                <span style={{ flex: 1, minWidth: 0 }}>{error}</span>
-              </div>
             )}
 
             {parsed !== undefined && (
@@ -1136,6 +1300,13 @@ function DeleteDialog(props: {
 }): JSX.Element {
   const { name, busy, onCancel, onConfirm, t } = props
   const [withMemory, setWithMemory] = useState(false)
+  /**
+   * 两步确认（C 报告 P1-6）：覆盖导入早就是「先点一次，再确认一次」，
+   * 而删除 / 彻底重置只点一下就写盘 —— 最不可恢复的两个操作反而最少确认。
+   * 这里把删除也改成两步：第一次只上膛（按钮变成「确认执行」并出现红字提示），
+   * 第二次才真的删。勾选框与提示不参与上膛，改动选项会自动复位。
+   */
+  const [armed, setArmed] = useState(false)
   return (
     <Overlay label={t('delete.title')} onClose={onCancel}>
       <div className="awu-dialogHead">
@@ -1148,11 +1319,16 @@ function DeleteDialog(props: {
           <input
             type="checkbox"
             checked={withMemory}
-            onChange={event => setWithMemory(event.target.checked)}
+            onChange={event => { setWithMemory(event.target.checked); setArmed(false) }}
           />
           <span>{t('delete.withMemory')}</span>
         </label>
         {!withMemory && <div className="awu-hint" style={{ marginTop: 8 }}>{t('delete.keepMemory')}</div>}
+        {armed && (
+          <div className="awu-hint" role="alert" style={{ marginTop: 8, color: 'var(--awu-danger)' }}>
+            {t('common.armedHint')}
+          </div>
+        )}
       </div>
       <div className="awu-dialogFoot">
         <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('delete.cancel')}</button>
@@ -1160,10 +1336,13 @@ function DeleteDialog(props: {
           type="button"
           className="awu-btn"
           data-kind="danger"
-          onClick={() => onConfirm(withMemory)}
+          onClick={() => {
+            if (!armed) { setArmed(true); return }
+            onConfirm(withMemory)
+          }}
           disabled={busy}
         >
-          {busy ? t('common.busy') : t('delete.confirm')}
+          {busy ? t('common.busy') : (armed ? t('common.armedOk') : t('delete.confirm'))}
         </button>
       </div>
     </Overlay>
@@ -1231,6 +1410,8 @@ function EditDiaryDialog(props: {
 }): JSX.Element {
   const { target, busy, error, onCancel, onSave, t } = props
   const [text, setText] = useState(target.text)
+  /** 本地校验提示：空内容点保存时给「下一步」而不是静默失效（`diary.editRequired` 一直没被引用过）。 */
+  const [local, setLocal] = useState('')
   const ref = useRef<HTMLTextAreaElement | null>(null)
   useEffect(() => {
     const el = ref.current
@@ -1239,7 +1420,8 @@ function EditDiaryDialog(props: {
     el.setSelectionRange(el.value.length, el.value.length)
   }, [])
   const submit = (): void => {
-    if (text.trim() === '') return
+    if (text.trim() === '') { setLocal(t('diary.editRequired')); return }
+    setLocal('')
     onSave(text.trim())
   }
   return (
@@ -1247,23 +1429,26 @@ function EditDiaryDialog(props: {
       <div className="awu-dialogHead">
         <IconQuill size={16} />
         <span>{t('diary.editTitle')}</span>
-        <span className="awu-count" style={{ marginLeft: 'auto', fontFamily: 'var(--awu-mono)', fontSize: 10.5, color: 'var(--awu-gold)' }}>
-          {target.date} · {t(`diary.marker.${target.section}`)}
-        </span>
       </div>
       <div className="awu-dialogBody">
         <div className="awu-hint" style={{ marginBottom: 8 }}>{t('diary.editHint')}</div>
+        {/* 日期/归类原本塞在标题右端（还借了 .awu-count 的类 + 4 条内联样式）：
+            降级成正文第一行的元信息，标题回到「icon + 标题」的统一结构。 */}
+        <div className="awu-sectionLabel" style={{ marginBottom: 6 }}>
+          {target.date} · {t(`diary.marker.${target.section}`)}
+        </div>
         <textarea
           ref={ref}
           className="awu-input awu-textarea"
           value={text}
           rows={4}
-          onChange={event => setText(event.target.value)}
+          onChange={event => { setText(event.target.value); if (local !== '') setLocal('') }}
           onKeyDown={event => {
             if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); submit() }
           }}
         />
-        {error !== '' && <div className="awu-hint" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
+        {local !== '' && <div className="awu-hint" role="alert" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{local}</div>}
+        {error !== '' && <div className="awu-hint" role="alert" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
       </div>
       <div className="awu-dialogFoot">
         <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
@@ -1272,7 +1457,7 @@ function EditDiaryDialog(props: {
           className="awu-btn"
           data-kind="primary"
           onClick={submit}
-          disabled={busy || text.trim() === ''}
+          disabled={busy}
         >
           {busy ? t('common.busy') : t('common.save')}
         </button>
@@ -1319,7 +1504,7 @@ function ForgetDialog(props: {
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); submit() } }}
         />
         {(local !== '' || error !== '') && (
-          <div className="awu-hint" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{local !== '' ? local : error}</div>
+          <div className="awu-hint" role="alert" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{local !== '' ? local : error}</div>
         )}
       </div>
       <div className="awu-dialogFoot">
@@ -1345,6 +1530,8 @@ function ResetAllDialog(props: {
 }): JSX.Element {
   const { name, busy, scope, onCancel, onConfirm, t } = props
   const fresh = scope === 'session'
+  /** 两步确认：与 DeleteDialog / ImportDialog 同一口径（见 DeleteDialog 里的说明）。 */
+  const [armed, setArmed] = useState(false)
   return (
     <Overlay label={t('reset.title')} onClose={onCancel}>
       <div className="awu-dialogHead">
@@ -1353,15 +1540,199 @@ function ResetAllDialog(props: {
       </div>
       <div className="awu-dialogBody">
         <div className="awu-confirmText">{fresh ? t('reset.sessionBody') : t('reset.confirmBody')}</div>
+        {armed && (
+          <div className="awu-hint" role="alert" style={{ marginTop: 8, color: 'var(--awu-danger)' }}>
+            {t('common.armedHint')}
+          </div>
+        )}
       </div>
       <div className="awu-dialogFoot">
         <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
-        <button type="button" className="awu-btn" data-kind="danger" onClick={onConfirm} disabled={busy}>
-          {busy ? t('common.busy') : (fresh ? t('reset.sessionWord') : t('reset.confirmWord'))}
+        <button
+          type="button"
+          className="awu-btn"
+          data-kind="danger"
+          onClick={() => {
+            if (!armed) { setArmed(true); return }
+            onConfirm()
+          }}
+          disabled={busy}
+        >
+          {busy ? t('common.busy') : (armed ? t('common.armedOk') : (fresh ? t('reset.sessionWord') : t('reset.confirmWord')))}
         </button>
       </div>
     </Overlay>
   )
+}
+
+// ---------------------------------------------------------------- 溢出菜单（⋯）
+
+/** ⋯ 菜单里的一项。 */
+interface CardMenuItem {
+  key: string
+  label: string
+  onSelect: () => void
+  /** 在这一项之前画一条 `.awu-menuSep` 分隔线（按语义分组，不按数量硬塞） */
+  sepBefore?: boolean
+  /** 危险项（红字 + 红 hover），目前详情页把删除下沉到 dangerZone，留着给以后用 */
+  danger?: boolean
+}
+
+/**
+ * 详情页的「⋯」溢出菜单（契约 §2.5 `.awu-menuBtn` / `.awu-menu`）。
+ *
+ * 三条行为：
+ *  - **Esc 关菜单且不再往上传**：面板自己在 document 捕获阶段监听 Esc 收起整块面板；
+ *    菜单若不 stopPropagation，「关菜单」会连带把面板一起关掉。这正是 `Overlay` 里
+ *    `escYield` 要解决的同一类冲突，这里沿用同一套「内层先吃掉」的让位协议；
+ *  - 点外部（pointerdown 捕获）关菜单；滚动/缩放也关（菜单是 absolute 锚点，不跟滚）；
+ *  - 关掉后焦点回到 ⋯ 按钮；点菜单项时**先**还焦再执行动作 —— 若动作打开弹层，
+ *    弹层自己的 initialFocus/restoreFocus 会接力，不会把焦点抢回来。
+ *
+ * 布局归属（2026-11-02 与 CSS 侧对表后确定）：菜单**就地渲染**在 `.awu-heroActions` 里，
+ * 定位完全交给 CSS（`.awu-menu{ position:absolute; top:100%; right:0 }`，锚点是
+ * `.awu-heroActions{ position:relative }`）。JSX 不写任何内联定位/外观；
+ * `aria-expanded` 是 CSS 的选中态钩子（`.awu-menuBtn[aria-expanded="true"]`），开合必须同步。
+ */
+function CardMenu(props: {
+  label: string
+  items: CardMenuItem[]
+  busy: boolean
+  /** 给内层让位（与 Overlay 的 escYield 同义；详情页里目前恒为 false） */
+  escYield?: boolean
+}): JSX.Element {
+  const { label, items, busy, escYield = false } = props
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  useInitialFocus(menuRef, open)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (menuRef.current?.contains(target) === true) return
+      if (btnRef.current?.contains(target) === true) return
+      setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || escYield) return
+      event.preventDefault()
+      // 必须 stopPropagation：面板自己在 **document 捕获** 阶段监听 Esc 收起整块面板，
+      // 而同一节点上的其它捕获监听不会被 stopPropagation 拦（只有 stopImmediatePropagation 能）。
+      // 所以这条监听挂在 **window 捕获** 上（捕获顺序 window → document），
+      // 才能真正做到「内层先吃 Esc」——与 Overlay 的 escYield 是同一套让位协议。
+      event.stopPropagation()
+      setOpen(false)
+      btnRef.current?.focus()
+    }
+    const closeNow = (): void => { setOpen(false) }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKeyDown, true)
+    document.addEventListener('scroll', closeNow, true)
+    window.addEventListener('resize', closeNow)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      document.removeEventListener('scroll', closeNow, true)
+      window.removeEventListener('resize', closeNow)
+    }
+  }, [open, escYield])
+
+  /**
+   * 菜单内的方向键导航（`role="menu"` 的配套义务：↑↓ 换项、Home/End 首尾）。
+   * 不实现这段的话，`role="menu"` 只是给读屏的一个假承诺 —— Tab 仍能走，但键盘用户
+   * 会按 ↑↓ 期待移动却毫无反应。
+   */
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+    const root = menuRef.current
+    if (root === null) return
+    const nodes = Array.from(root.querySelectorAll<HTMLButtonElement>('.awu-menuItem'))
+    if (nodes.length === 0) return
+    event.preventDefault()
+    const current = nodes.indexOf(document.activeElement as HTMLButtonElement)
+    const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? nodes.length - 1
+        : (current + step + nodes.length) % nodes.length
+    nodes[next].focus()
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="awu-menuBtn"
+        title={label}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => { if (!busy) setOpen(current => !current) }}
+        disabled={busy}
+      >
+        <span aria-hidden="true">⋯</span>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          className="awu-menu"
+          role="menu"
+          aria-label={label}
+          onKeyDown={onMenuKeyDown}
+        >
+          {items.map(item => (
+            <Fragment key={item.key}>
+              {item.sepBefore === true && <div className="awu-menuSep" role="separator" />}
+              <button
+                type="button"
+                role="menuitem"
+                className="awu-menuItem"
+                data-kind={item.danger === true ? 'danger' : undefined}
+                onClick={() => {
+                  setOpen(false)
+                  btnRef.current?.focus()
+                  item.onSelect()
+                }}
+              >
+                {item.label}
+              </button>
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+/** 详情页「最近日记」只给这么多行（跨天累加，超出由「在日记里看全部」接手）。 */
+const DETAIL_DIARY_LINES = 8
+
+/**
+ * 取最近 N 行日记（天倒序，行内先时间线后札记）。
+ *
+ * `DiaryList` 按天分组渲染，所以这里返回的仍是「按天的 DiaryEntry」，只是每天的
+ * 行数被裁剪过；调用方不需要知道裁剪细节。
+ */
+function recentDiaryLines(entries: DiaryEntry[], maxLines: number): DiaryEntry[] {
+  const out: DiaryEntry[] = []
+  let used = 0
+  for (const day of sortedDiary(entries)) {
+    if (used >= maxLines) break
+    const room = maxLines - used
+    const timeline = day.timeline.slice(0, room)
+    const notes = day.notes.slice(0, Math.max(0, room - timeline.length))
+    if (timeline.length === 0 && notes.length === 0) continue
+    out.push({ date: day.date, timeline, notes })
+    used += timeline.length + notes.length
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- 角色详情
@@ -1390,17 +1761,26 @@ function CharacterDetailView(props: {
   onDeactivate: () => void
   onDelete: () => void
   onEdit: () => void
+  /** 跳到「日记」tab 看这位的全量日记 */
+  onOpenDiary: () => void
+  /** 导出这张卡的 CCv3 JSON（纯前端 Blob，不碰接口） */
+  onExport: () => void
+  /** ⋯ 菜单：切交互模式 */
+  onSwitchMode: () => void
+  /** ⋯ 菜单：换一句开场 */
+  onNextOpening: () => void
 }): JSX.Element {
   const {
     detail, loading, error, relation, live, boundHere, sessionId, busy, t,
     onBack, onRetry, onBindSession, onUnbindSession, onActivate, onDeactivate, onDelete, onEdit,
+    onOpenDiary, onExport, onSwitchMode, onNextOpening,
   } = props
 
   if (loading) return <Skeleton label={t('common.loading')} />
 
   // 加载失败：detail 已被清空，必须显式给出「空态 + 重试」，否则只会永远转圈
   if (detail === undefined) {
-    if (error === '') return <Skeleton />
+    if (error === '') return <Skeleton label={t('common.loading')} />
     return (
       <div className="awu-detail">
         <div className="awu-detailNav">
@@ -1409,7 +1789,8 @@ function CharacterDetailView(props: {
             <span>{t('detail.back')}</span>
           </button>
         </div>
-        <div className="awu-empty" data-kind="error">
+        {/* role="alert"：整块视图被换成错误态时，读屏要主动念一次（a11y 脚本 ④ 的 skip 项） */}
+        <div className="awu-empty" data-kind="error" role="alert">
           <span className="awu-emptyMark"><IconAlert size={20} /></span>
           <span className="awu-emptyTitle">{t('detail.loadFailed')}</span>
           <span className="awu-emptyHint">{error}</span>
@@ -1432,6 +1813,8 @@ function CharacterDetailView(props: {
   const voice = entriesOf(card.voice)
   const relationship = entriesOf(card.relationship)
   const turns = Number(detail.session?.turn_count ?? 0) || 0
+  // 标题写「最近日记」就得真的只给最近几条（C 报告 P1-5：以前是整份日记全渲染）。
+  const recentDiary = recentDiaryLines(detail.diary, DETAIL_DIARY_LINES)
 
   return (
     <div className="awu-detail">
@@ -1454,7 +1837,7 @@ function CharacterDetailView(props: {
       </div>
 
       <div className="awu-detailHero">
-        <Avatar name={detail.name} size="hero" live={live} />
+        <Avatar name={detail.name} size="hero" live={live} morph />
         <div className="awu-heroBody">
           <div className="awu-heroName">{detail.name}</div>
           <div className="awu-heroSub">
@@ -1471,7 +1854,8 @@ function CharacterDetailView(props: {
           */}
           <div className="awu-heroMeta">
             {relation !== undefined && relation.baseline !== '' && (
-              <span className="awu-heroMetaItem" data-role="relation">
+              /* title 挂 relation.note：这句话解释了「起点 ≠ 当前档」，以前它是个零引用死键 */
+              <span className="awu-heroMetaItem" data-role="relation" title={t('relation.note')}>
                 {t('relation.baselineShort')}
                 <b>{relation.baseline}</b>
               </span>
@@ -1485,9 +1869,38 @@ function CharacterDetailView(props: {
           </div>
         </div>
         <div className="awu-heroActions">
-          {/* 编辑是中性动作：既不是主操作（启用）也不是危险操作（删除），单独一档样式 */}
+          {/*
+            动作收敛成「1 主 + 1 次 + ⋯」（契约 §2.5，C 报告 P1-4）：
+            - 主：本会话绑定（已绑定时**同位置**变「解除绑定」，不再并排两枚）
+            - 次：编辑
+            - ⋯：全局启用 / 退出全局、切模式、换开场、导出（危险项不在这里）
+            主按钮同时写 `data-tone="primary"`（契约给 CSS 的钩子）与 `data-kind="primary"`
+            （现有 .awu-btn 主色规则）：两边都在，样式合并期任一侧都不会丢样子。
+          */}
+          {boundHere ? (
+            <button type="button" className="awu-btn" data-size="md" onClick={onUnbindSession} disabled={busy}>
+              <IconEject size={12} />
+              {t('detail.bindSessionOff')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="awu-btn"
+              data-size="md"
+              data-kind="primary"
+              data-tone="primary"
+              onClick={onBindSession}
+              disabled={busy || sessionId === ''}
+              title={sessionId === '' ? t('bind.noSession') : t('bind.hint.session')}
+            >
+              <IconPower size={12} />
+              {t('detail.bindSession')}
+            </button>
+          )}
           <button
             type="button"
+            /* 稳定 id：编辑器关闭后按它还焦（见 CharacterPanel 里的 wasEditingRef 说明） */
+            id="awu-detail-edit"
             className="awu-btn awu-editEntry" data-kind="edit"
             data-size="md"
             onClick={onEdit}
@@ -1496,43 +1909,18 @@ function CharacterDetailView(props: {
             <IconQuill size={12} />
             {t('detail.edit')}
           </button>
-          {/*
-            双态动作组：本会话绑定 / 全局启用，**互不覆盖**两条通道。
-            - 当前会话启用：只影响这个会话（拿不到 sessionId 时禁用，不瞎编 id）
-            - 全局启用：所有未绑定会话都用它；已绑定会话不变
-          */}
-          <button
-            type="button"
-            className="awu-btn"
-            data-size="md"
-            data-kind={boundHere ? undefined : 'primary'}
-            onClick={onBindSession}
-            disabled={busy || sessionId === '' || boundHere}
-          >
-            <IconPower size={12} />
-            {t('detail.bindSession')}
-          </button>
-          {boundHere && (
-            <button type="button" className="awu-btn" data-size="md" onClick={onUnbindSession} disabled={busy}>
-              <IconEject size={12} />
-              {t('detail.bindSessionOff')}
-            </button>
-          )}
-          {live ? (
-            <button type="button" className="awu-btn" data-size="md" onClick={onDeactivate} disabled={busy}>
-              <IconEject size={12} />
-              {t('detail.globalOff')}
-            </button>
-          ) : (
-            <button type="button" className="awu-btn" data-size="md" onClick={onActivate} disabled={busy}>
-              <IconPower size={12} />
-              {t('detail.globalOn')}
-            </button>
-          )}
-          <button type="button" className="awu-btn" data-size="md" data-kind="danger" onClick={onDelete} disabled={busy}>
-            <IconTrash size={12} />
-            {t('detail.delete')}
-          </button>
+          <CardMenu
+            label={t('detail.more')}
+            busy={busy}
+            items={[
+              live
+                ? { key: 'global', label: t('detail.globalOff'), onSelect: onDeactivate }
+                : { key: 'global', label: t('detail.globalOn'), onSelect: onActivate },
+              { key: 'mode', label: t('active.mode.switch'), onSelect: onSwitchMode, sepBefore: true },
+              { key: 'opening', label: t('opening.next'), onSelect: onNextOpening },
+              { key: 'export', label: t('detail.export'), onSelect: onExport, sepBefore: true },
+            ]}
+          />
         </div>
       </div>
 
@@ -1583,8 +1971,43 @@ function CharacterDetailView(props: {
         </Section>
       )}
       <Section title={t('detail.diary')} count={detail.diary.length}>
-        <DiaryList entries={detail.diary} t={t} />
+        {detail.diary.length === 0 ? (
+          <div className="awu-emptyHint" style={{ padding: '10px 0' }}>{t('detail.diaryEmpty')}</div>
+        ) : (
+          <>
+            <DiaryList entries={recentDiary} t={t} />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 0 10px' }}>
+              <button type="button" className="awu-btn" data-size="sm" data-kind="ghost" onClick={onOpenDiary}>
+                {t('detail.diaryMore', { n: detail.diary.length })}
+              </button>
+            </div>
+          </>
+        )}
       </Section>
+
+      {/*
+        危险操作下沉到页面最底部、与「改点什么」彻底分开（C 报告 P1-4）：
+        hero 里只留 1 主 + 1 次 + ⋯，删除改在这里，复用日记页那套 dangerZone 样式。
+      */}
+      <div className="awu-dangerZone">
+        <div className="awu-sectionHead">{t('diary.actions')}</div>
+        <div className="awu-dangerRow">
+          <div className="awu-dangerText">
+            <b data-danger="true">{t('detail.delete')}</b>
+            <span>{t('detail.deleteHint')}</span>
+          </div>
+          <button
+            type="button"
+            className="awu-btn"
+            data-size="sm"
+            data-kind="danger"
+            onClick={onDelete}
+            disabled={busy}
+          >
+            {t('detail.delete')}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1595,7 +2018,7 @@ function CharacterDetailView(props: {
  * 日记页内容。
  *
  * 抽出来是因为「空」有**三种**，之前混成一种：没选角色 / 选了但没日记 / 加载失败。
- * 真机上「选了卡没启用」被错显示成「先启用或选择一位角色」，根因是上游 `viewName` 只认启用角色；
+ * 真机上「选了卡没启用」被错显示成「先启用或选择一位角色」，根因是上游只认启用角色；
  * 这里按名字渲染，并把「没日记」单独给一句话，别让用户以为选错了卡。
  */
 function DiaryView(props: {
@@ -1661,9 +2084,10 @@ function DiaryView(props: {
         <DiaryReview name={entry.name} entries={entry.diary} t={t} onEdit={onEdit} />
       )}
 
-      {/* 维护：全新开始 / 彻底重置 */}
+      {/* 维护：全新开始 / 彻底重置。标题用 `diary.actions`（「维护」）——
+          原来复用了 `reset.title`（「重新开始」），等于把区块标题和其中一行按钮写成了同一个词。 */}
       <div className="awu-dangerZone">
-        <div className="awu-sectionHead">{t('reset.title')}</div>
+        <div className="awu-sectionHead">{t('diary.actions')}</div>
         <div className="awu-dangerRow">
           <div className="awu-dangerText">
             <b>{t('reset.session')}</b>
@@ -1718,6 +2142,19 @@ function DiaryView(props: {
  */
 const RAIL_MAX_WIDTH = 96
 
+/**
+ * 判断侧栏是否处于「宽态」。
+ *
+ * **实测宽度是唯一真源**，`propWide` 只在「量不到宽度」时兜底（首帧、display:none、SSR）：
+ *  - 量到宽度 < RAIL_MAX_WIDTH → 窄轨；
+ *  - 量到足够宽 → 宽态；
+ *  - 量不到 → 用 prop；prop 也没有就按窄轨（宁可少显示文字，也不能把布局撑破）。
+ *
+ * 2026-11-02 收敛（C 报告 P1-11）：原先这里还有第二个 effect，在 `propWide !== undefined`
+ * 时**无条件** `setWide(propWide)`，把实测值覆盖掉 —— 只要宿主在收起动画中先传了
+ * `wide: true`，36px 轨道就会重新塞进 44px 的两行按钮（正是这段注释描述过的线上事故）。
+ * 现在只剩一条来源：`measure()`；prop 只参与「量不到时」的兜底。
+ */
 function useWideLayout(ref: React.RefObject<HTMLElement | null>, propWide: boolean | undefined): boolean {
   // 首帧用 prop 猜；拿不到 prop 时先按窄轨渲染，量完再纠正
   const guess = propWide === undefined ? false : propWide
@@ -1732,12 +2169,9 @@ function useWideLayout(ref: React.RefObject<HTMLElement | null>, propWide: boole
 
     const measure = (): void => {
       const width = el.getBoundingClientRect().width
-      if (width > 0) {
-        setWide(width >= RAIL_MAX_WIDTH)
-        return
-      }
-      // 量不到宽度时按 prop 决定；prop 也没有就保持窄轨
-      setWide(propWide === undefined ? false : propWide)
+      const next = width > 0 ? width >= RAIL_MAX_WIDTH : (propWide === undefined ? false : propWide)
+      // 同值不落 state：ResizeObserver 每次回调都 setWide 会白排一次渲染
+      setWide(current => (current === next ? current : next))
     }
 
     measure()
@@ -1749,14 +2183,211 @@ function useWideLayout(ref: React.RefObject<HTMLElement | null>, propWide: boole
     }
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [ref, guess, propWide])
-
-  // prop 明确给了值时，跟随 prop（宿主主动告诉我们的比测量更权威）
-  useEffect(() => {
-    if (propWide !== undefined) setWide(propWide)
-  }, [propWide])
+  }, [ref, propWide, guess])
 
   return wide
+}
+
+/** 与 `styles.ts` 唯一断点一致：<900 收单栏。 */
+const NARROW_VIEWPORT = 900
+
+/** 每帧只写一次（多次 pointermove 合到一帧），避免 50 张卡的网格上逐事件触发布局。 */
+interface GlassPoint { el: HTMLElement; x: number; y: number }
+
+/**
+ * 指针跟随玻璃高光（契约 §2.1 / §6 的「指针高光」条目）。
+ *
+ * CSS 侧已就绪：`.awu-card::after` 用 `radial-gradient(240px circle at var(--awu-mx,50%) var(--awu-my,-20%), …)`
+ * —— 没有变量时它就是原来那束「顶部中央静态高光」，所以 JS 不写变量 = 退化成旧观感，绝不会坏。
+ *
+ * 三个约束（都是「不这么做就会卡」的）：
+ *  1. **事件委托在网格容器上**，不给 50 张卡各挂一份监听；
+ *  2. **rAF 合帧**：同一帧内只写最后一次坐标，`pointermove` 本身不再触发布局；
+ *  3. 只在 `fine pointer` 且用户没要求 reduced-motion 时绑定（触摸屏上这束光不会动，绑了纯烧 CPU）。
+ *
+ * 复位：`pointerleave` 走捕获阶段（该事件不冒泡），把两个自定义属性**删掉**而不是写回 50%/-20%，
+ * 这样 CSS 的 `var(…, 默认值)` 兜底语义才成立。
+ */
+function useCardGlassFx(rootRef: React.RefObject<HTMLElement | null>, enabled: boolean, mounted: boolean): void {
+  useEffect(() => {
+    const root = rootRef.current
+    if (!enabled || !mounted || root === null) return undefined
+    let raf = 0
+    let watchdog = 0
+    let pending: GlassPoint | undefined
+
+    const flush = (): void => {
+      raf = 0
+      if (watchdog !== 0) { window.clearTimeout(watchdog); watchdog = 0 }
+      const point = pending
+      pending = undefined
+      if (point === undefined) return
+      point.el.style.setProperty('--awu-mx', `${point.x}%`)
+      point.el.style.setProperty('--awu-my', `${point.y}%`)
+    }
+
+    /**
+     * rAF 合帧 + **64ms 看门狗**。
+     *
+     * 只用 rAF 会有一个真机可见的坑：首帧/长任务/后台标签页时 rAF 可能迟迟不来，
+     * 那束光就"卡住不动"（CDP 里就复现了：pointermove 已经进了 handler，变量却没写上）。
+     * 看门狗保证最坏 64ms 也会落一次写；正常路径仍然是一帧一次。
+     */
+    const schedule = (): void => {
+      if (raf !== 0) return
+      const frame = window.requestAnimationFrame(() => { flush() })
+      raf = frame
+      watchdog = window.setTimeout(() => {
+        if (raf !== frame) return
+        window.cancelAnimationFrame(frame)
+        flush()
+      }, 64)
+    }
+
+    const cardOf = (target: EventTarget | null): HTMLElement | null => {
+      if (!(target instanceof Element)) return null
+      const card = target.closest('.awu-card')
+      if (!(card instanceof HTMLElement)) return null
+      return root.contains(card) ? card : null
+    }
+
+    const onMove = (event: PointerEvent): void => {
+      const card = cardOf(event.target)
+      if (card === null) return
+      const rect = card.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
+      pending = {
+        el: card,
+        x: Math.round(((event.clientX - rect.left) / rect.width) * 100),
+        y: Math.round(((event.clientY - rect.top) / rect.height) * 100),
+      }
+      schedule()
+    }
+
+    const onLeave = (event: PointerEvent): void => {
+      const card = cardOf(event.target)
+      if (card === null) return
+      card.style.removeProperty('--awu-mx')
+      card.style.removeProperty('--awu-my')
+    }
+
+    root.addEventListener('pointermove', onMove, { passive: true })
+    root.addEventListener('pointerleave', onLeave, true)
+    root.addEventListener('pointercancel', onLeave, true)
+    return () => {
+      if (raf !== 0) window.cancelAnimationFrame(raf)
+      if (watchdog !== 0) window.clearTimeout(watchdog)
+      root.removeEventListener('pointermove', onMove)
+      root.removeEventListener('pointerleave', onLeave, true)
+      root.removeEventListener('pointercancel', onLeave, true)
+    }
+  }, [rootRef, enabled, mounted])
+}
+
+/**
+ * 列表 FLIP（契约 §3「删卡 / 排序」）：用 WAAPI 把「顺序或数量变了」这件事画出来。
+ *
+ * 只做 Y 轴：卡片墙是单列/两列竖向流，X 位移在换列时会显得很吵（而且和 hover 上浮撞）。
+ * 与 `.awu-card:hover { transform: translateY(-2px) }` 的冲突：WAAPI 动画在运行期**优先于**
+ * CSS transform（animations 覆盖普通声明），但动画结束后残留的 hover 位移仍会让卡片跳 2px，
+ * 所以期间给卡片挂 `data-flipping="true"`，CSS 侧据此临时关掉 hover 位移（本文件不写这条规则）。
+ *
+ * `enabled=false`（reduced-motion）时整段跳过，并把上一帧快照清掉，避免恢复动效时补一段旧位移。
+ */
+function useListFlip(
+  rootRef: React.RefObject<HTMLElement | null>,
+  deps: readonly unknown[],
+  enabled: boolean,
+): void {
+  const prevRects = useRef<Map<string, DOMRect> | null>(null)
+
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (root === null) return
+    if (!enabled) { prevRects.current = null; return }
+
+    const nodes = Array.from(root.querySelectorAll<HTMLElement>('.awu-card[data-card-id]'))
+    const next = new Map<string, DOMRect>()
+    for (const el of nodes) {
+      const id = el.getAttribute('data-card-id')
+      if (id !== null) next.set(id, el.getBoundingClientRect())
+    }
+    const prev = prevRects.current
+    prevRects.current = next
+    if (prev === null) return
+
+    for (const el of nodes) {
+      const id = el.getAttribute('data-card-id')
+      if (id === null) continue
+      const before = prev.get(id)
+      const after = next.get(id)
+      if (before === undefined || after === undefined) continue
+      const dy = before.top - after.top
+      if (Math.abs(dy) < 1) continue
+      el.setAttribute('data-flipping', 'true')
+      const animation = el.animate(
+        [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+        { duration: T_BASE, easing: EASE },
+      )
+      /**
+       * 兜底计时器 + 事件双保险：元素如果被重渲染/隐藏打断，WAAPI 的 finish/cancel
+       * 不一定会来，属性会永久留在卡上（hover 位移就永远被关掉了）。
+       */
+      let timer = 0
+      const clear = (): void => {
+        if (timer !== 0) { window.clearTimeout(timer); timer = 0 }
+        el.removeAttribute('data-flipping')
+      }
+      animation.onfinish = clear
+      animation.oncancel = clear
+      timer = window.setTimeout(clear, T_BASE + 60)
+    }
+    // 注意：deps 必须**展开**。直接传 `deps` 会因为它每次 render 都是新数组而每次都跑一遍
+    // 布局测量（50 张卡 = 每帧 50 次 getBoundingClientRect），那是比不动画更贵的事。
+  }, [rootRef, enabled, ...deps])
+}
+
+
+/**
+ * 视口是否窄于 `maxWidth`。
+ *
+ * 为什么 JSX 必须自己知道窄不窄：`<900` 的「单栏导航栈」是**状态机**
+ * （契约 §2.1 `data-nav=split|push|pop`），不是 CSS 藏一藏就能对的东西 ——
+ * 被藏起来的那一列里，滚动位置、焦点、tablist 都还活着，会出现
+ * 「tab 点不到」「焦点跑到看不见的地方」这类问题。所以这里量视口，
+ * 由 JSX 决定 `data-nav` 取值、以及 tablist 放进哪一列。
+ */
+function useNarrowViewport(maxWidth: number): boolean {
+  const query = `(max-width: ${maxWidth}px)`
+  const [narrow, setNarrow] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+    try {
+      return window.matchMedia(query).matches
+    } catch {
+      return false
+    }
+  })
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined
+    let media: MediaQueryList
+    try {
+      media = window.matchMedia(query)
+    } catch {
+      return undefined
+    }
+    const onChange = (): void => { setNarrow(media.matches) }
+    onChange()
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', onChange)
+      return () => media.removeEventListener('change', onChange)
+    }
+    // 老 WebView 只有已废弃的 addListener
+    media.addListener(onChange)
+    return () => media.removeListener(onChange)
+  }, [query])
+
+  return narrow
 }
 
 /**
@@ -1774,6 +2405,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   const layerRef = useRef<HTMLDivElement | null>(null)
   const wide = useWideLayout(layerRef, typeof props.wide === 'boolean' ? props.wide : undefined)
+  /** 视口是否 <900（单栏导航栈只在窄屏生效）。 */
+  const narrow = useNarrowViewport(NARROW_VIEWPORT)
 
   const [open, setOpen] = useState(false)
   // 首次打开面板时把「指南」当一次落地页（读 localStorage 标记，隐私模式下按已看过处理）
@@ -1792,6 +2425,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'warn' } | undefined>(undefined)
   const noticeTimer = useRef<number | undefined>(undefined)
+  /** 提示条是否在退场（配合 data-state）。 */
+  const [noticeClosing, setNoticeClosing] = useState(false)
 
   /**
    * 交互模式。
@@ -1829,7 +2464,51 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 详情单独持有一份错误：失败时 detail 会被清空，只靠全局 error 的话详情区会永久停在骨架屏
   const [detailError, setDetailError] = useState('')
 
-  const [dialog, setDialog] = useState<'' | 'new' | 'import' | 'preview' | 'preset' | 'delete' | 'mode' | 'editDiary' | 'forget' | 'resetAll' | 'resetSession'>('')
+  /**
+   * 单栏导航栈（契约 §2.1 `data-nav`）。
+   *
+   * - `split`：宽屏 = 两栏并排；窄屏 = 「列表列」。
+   * - `push` ：窄屏 = 内容列（详情 / 日记 / 统计 / 指南）覆盖列表。
+   * - `pop`  ：从内容退回列表的过渡帧（`T_MID`），到点自动落回 `split`。
+   *
+   * 为什么是 JS 状态机而不是 CSS 断点：窄屏下两列不再是「同时可见」，而是「谁在上面」。
+   * 两列各自有滚动位置与焦点，被 CSS 藏起来的那列仍活着 —— 所以栈必须由这里推。
+   */
+  const [navState, setNavState] = useState<'split' | 'push' | 'pop'>('split')
+  const popTimer = useRef<number | undefined>(undefined)
+
+  const clearPopTimer = useCallback((): void => {
+    if (popTimer.current !== undefined) {
+      window.clearTimeout(popTimer.current)
+      popTimer.current = undefined
+    }
+  }, [])
+  useEffect(() => () => { clearPopTimer() }, [clearPopTimer])
+
+  /**
+   * 骨架退场（契约 §3「骨架 → 内容」）：`loading` 结束后骨架再留 160ms 淡出，
+   * 与内容的 `awu-rise` 交叉。直接同帧硬切会看到「骨架 → 内容」的瞬移。
+   */
+  const skeletonPresence = usePresence(loading, T_EXIT)
+
+  /** 左栏过滤词（名字 / 身份 / 来源 / 一句话背景）。 */
+  const [query, setQuery] = useState('')
+  /** 正在淡出的卡名（删卡第 1 段；空串 = 没有在删）。 */
+  const [deletingName, setDeletingName] = useState('')
+
+  const [dialog, setDialog] = useState<'' | PanelDialog>('')
+  /**
+   * 弹层宿主的退场（契约 §2.2）。
+   *
+   * 退场要求「关掉之后还在 DOM 里待 160ms」，但弹层的渲染分支是 `dialog === 'x'` ——
+   * `setDialog('')` 一执行分支就没了，动画无从谈起。所以这里记住**上一次的弹层种类**，
+   * 退场期继续渲染它（各弹层自己的 deleteTarget / editTarget 等数据都还在 state 里）。
+   */
+  const dialogPresence = usePresence(dialog !== '', T_EXIT)
+  const lastDialogRef = useRef<PanelDialog>('new')
+  useEffect(() => {
+    if (dialog !== '') lastDialogRef.current = dialog
+  }, [dialog])
   const [deleteTarget, setDeleteTarget] = useState('')
   const [editTarget, setEditTarget] = useState<DiaryTarget | undefined>(undefined)
   const [dialogError, setDialogError] = useState('')
@@ -1839,8 +2518,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 角色卡编辑器
   const [editing, setEditing] = useState(false)
   const [editError, setEditError] = useState('')
-  // 预设弹层里的专注编辑层（FocusEditor）开关：开着时 Overlay 的 Esc 要让位
-  // （约定同 card-editor 的 loreFocus，见 editor-focus.tsx:12-13）。
+  // 「本层要 Esc」的汇总开关（preset 的 `onFocusLayerChange`）：专注层打开、
+  // 有未保存改动、或确认弹着 都为 true —— 这时 Overlay 的 Esc 必须让位。
+  // 命名保留旧名避免大面积改名，语义以 Overlay 里 escYield 的注释为准。
   const [presetFocusOpen, setPresetFocusOpen] = useState(false)
   // 编辑器草稿是否脏：面板收起/卸载前必须据此拦一道，否则一屏编辑无声丢失
   const [editorDirty, setEditorDirty] = useState(false)
@@ -1859,6 +2539,37 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     if (!editing) setEditorDirty(false)
   }, [editing])
 
+  /**
+   * 关掉编辑器后把焦点还给「编辑」按钮。
+   *
+   * 为什么通用 hook 做不到：编辑态是**整块替换**（下面渲染处的
+   * `editing && currentDetail ? <CardEditor/> : <>详情页…</>`），「编辑」按钮随详情页子树
+   * 一起卸载；`a11y.ts` 的 `useRestoreFocus` 在编辑器挂载的 effect 里读 `activeElement`，
+   * 那一刻浏览器已经把焦点退回 `body`，于是它按「原本就是 body → 不记录」的设计跳过，
+   * 焦点就留在 body 上（读屏用户失去上下文）。这里用按钮的稳定 id 补一次：关编辑器时
+   * 详情页已经重新挂载，按 id 取到的是**新节点**，正好可以接住焦点。
+   *
+   * 两条兜底：保存成功那条路径会先 `setDetail(fresh)` 再关编辑器，节点可能晚一帧 →
+   * 再补一帧 rAF；仍取不到就放弃（绝不瞎抢别处的焦点）。
+   */
+  const wasEditingRef = useRef(false)
+  useEffect(() => {
+    if (editing) { wasEditingRef.current = true; return undefined }
+    if (!wasEditingRef.current) return undefined
+    wasEditingRef.current = false
+    if (typeof document === 'undefined') return undefined
+    const focusEdit = (): boolean => {
+      const el = document.getElementById('awu-detail-edit')
+      if (el === null) return false
+      try { el.focus({ preventScroll: true }) } catch { el.focus() }
+      return true
+    }
+    if (focusEdit()) return undefined
+    if (typeof window === 'undefined') return undefined
+    const raf = window.requestAnimationFrame(() => { focusEdit() })
+    return () => window.cancelAnimationFrame(raf)
+  }, [editing])
+
   // 有未保存草稿时拦一下页面关闭/刷新（宿主关窗也走 beforeunload）
   useEffect(() => {
     if (!open || !editing || !editorDirty) return undefined
@@ -1872,13 +2583,88 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
   const buttonRef = useRef<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * 面板根的**回调 ref**：在 commit 阶段同步挂 `data-still="true"`。
+   *
+   * CSS 的语义是「带着 data-still 渲染 = 这次进入不要 blur」，所以这个属性必须出现在
+   * 首帧的 DOM 上。用 effect 去补一定晚一帧（passive effect 在首帧之后才跑），那就没意义了；
+   * 回调 ref 在 commit 里同步执行，是能拿到的最早时机。摘除仍交给 animationend + 兜底 timer。
+   */
+  const attachPanelRef = useCallback((node: HTMLDivElement | null): void => {
+    panelRef.current = node
+    if (node !== null) node.setAttribute('data-still', 'true')
+  }, [])
   const aliveRef = useRef(true)
+  /** 角色卡网格容器：FLIP 的测量根（高光的事件委托点在面板根，见 useCardGlassFx 的调用处）。 */
+  const gridRef = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * 面板延迟卸载：`open=false` 后先留 160ms 让 CSS 画完退场，再摘 DOM（契约 §2.2）。
+   * 焦点释放由 hook 负责（传了 root），滚动锁必须按 `mounted` 而不是 `open`。
+   */
+  const panelPresence = usePresence(open, T_EXIT, panelRef)
+  useScrollLock(panelPresence.mounted)
 
   // 面板本身也要有焦点语义：打开时把焦点送进去、Tab 不跑回宿主、关闭后还回触发按钮。
   // 编辑器/弹层打开时它们的陷阱会压在栈顶，这里不用额外处理。
   useRestoreFocus(open)
   useInitialFocus(panelRef, open)
   useFocusTrap(panelRef, open)
+
+  /**
+   * 面板动效期去模糊（契约 §2.1 的 `data-still`）。
+   *
+   * 只在**面板自身**的 animationstart/end 上挂摘：`animationstart` 会从子元素冒上来
+   * （卡片的错峰进入、发光），所以必须用 `event.target === el` 过滤，否则卡片一动就把
+   * 整个面板的 backdrop-filter 摘了。
+   */
+  useEffect(() => {
+    const el = panelRef.current
+    if (el === null) return undefined
+    const clearStill = (): void => { el.removeAttribute('data-still') }
+    const onStart = (event: AnimationEvent): void => {
+      if (event.target === el) el.setAttribute('data-still', 'true')
+    }
+    const onEnd = (event: AnimationEvent): void => {
+      if (event.target === el) clearStill()
+    }
+    el.addEventListener('animationstart', onStart)
+    el.addEventListener('animationend', onEnd)
+    /*
+      首次挂载时入场动画**已经开始**了：passive effect 在首帧之后才执行，
+      等它挂监听会漏掉 animationstart（实测 data-still 一直不出现）。
+      所以挂载即视为"正在动画"，再由 animationend 或兜底计时器摘掉；
+      兜底计时器同时覆盖「动画被 prefers-reduced-motion 压到 0.01ms 后 animationend 也没来」
+      这种边角（那种情况下属性留着才是 bug：backdrop-filter 会永久关掉）。
+    */
+    // 首帧的 'true' 由 attachPanelRef 在 commit 里挂好；这里只负责摘。
+    const fallback = window.setTimeout(clearStill, T_ENTER + 60)
+    return () => {
+      window.clearTimeout(fallback)
+      el.removeEventListener('animationstart', onStart)
+      el.removeEventListener('animationend', onEnd)
+      clearStill()
+    }
+  }, [panelPresence.mounted])
+
+  // -------------------------------------------------------- 指针高光 / 列表 FLIP 的开关
+  /** 细指针（鼠标/触控板）才跟随；触摸屏上这束光不会动，绑了纯烧 CPU。 */
+  const finePointer = useFinePointer()
+  /** 用户要求减弱动效：高光与 FLIP 都直接不绑（CSS 那边还有一层全局守卫）。 */
+  const reducedMotion = useMemo(() => prefersReducedMotion(), [])
+
+  /**
+   * 玻璃高光的总开关（契约 §2.1 `[data-fx="off"]` 的 JSX 侧）。
+   *
+   * 现在**恒为开**：主人还没定「关掉高光」的入口放哪（预计第 3 批的设置项）。
+   * 留这个常量 + `data-fx` 的接线，是为了将来接一个开关时只改一行；
+   * 关闭时面板根挂 `data-fx="off"`，CSS 会把 `.awu-card::after` 退回静态顶部高光。
+   */
+  const GLASS_FX_ENABLED = true
+  const glassFxOn = GLASS_FX_ENABLED && finePointer && !reducedMotion
+  // 挂点用**面板根**而不是网格：网格会随 loading 反复挂卸（骨架↔内容），
+  // 监听绑在网格上就会在第二次 loading 时丢掉。面板根的生命周期与开关一致。
+  useCardGlassFx(panelRef, glassFxOn, panelPresence.mounted)
 
   useEffect(() => {
     aliveRef.current = true
@@ -1894,26 +2680,54 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     }
   }, [])
 
+  /**
+   * 提示条的退场（契约 §2.3 notice 条目）：先挂 `data-state="closing"` 让它淡出 160ms，
+   * 再从 state 里删。直接 `setNotice(undefined)` 是硬切，等于没有退场。
+   * reduced-motion 下直接删（CSS 退场被全局守卫压到 0.01ms，等 160ms 只会像"点了没反应"）。
+   */
+  const noticeExitTimer = useRef<number | undefined>(undefined)
+  const clearNoticeExit = useCallback((): void => {
+    if (noticeExitTimer.current !== undefined) {
+      window.clearTimeout(noticeExitTimer.current)
+      noticeExitTimer.current = undefined
+    }
+  }, [])
+
   const dismissNotice = useCallback((): void => {
     clearNoticeTimer()
-    setNotice(undefined)
+    // 已经在退场：不要重置计时（连点关闭按钮会把退场无限后推）
+    if (noticeExitTimer.current !== undefined) return
+    if (prefersReducedMotion()) { setNotice(undefined); setNoticeClosing(false); return }
+    setNoticeClosing(true)
+    noticeExitTimer.current = window.setTimeout(() => {
+      noticeExitTimer.current = undefined
+      setNotice(undefined)
+      setNoticeClosing(false)
+    }, T_EXIT)
   }, [clearNoticeTimer])
+
+  /** TTL 到点时调用最新的 dismiss（避免 showNotice 依赖 dismissNotice 形成循环）。 */
+  const dismissNoticeRef = useRef(dismissNotice)
+  useEffect(() => { dismissNoticeRef.current = dismissNotice }, [dismissNotice])
 
   const showNotice = useCallback((text: string, tone: 'ok' | 'warn' = 'ok'): void => {
     if (text === '') return
     // 新提示覆盖旧提示：先把旧计时器清掉，否则旧计时器会提前把新提示卷走
     clearNoticeTimer()
+    // 上一轮还没退完就来了新提示：中断退场，直接换成"已打开"
+    clearNoticeExit()
+    setNoticeClosing(false)
     setNotice({ text, tone })
     if (tone === 'ok') {
       noticeTimer.current = window.setTimeout(() => {
         noticeTimer.current = undefined
-        setNotice(undefined)
+        dismissNoticeRef.current()
       }, NOTICE_TTL_MS)
     }
-  }, [clearNoticeTimer])
+  }, [clearNoticeTimer, clearNoticeExit])
 
-  // 卸载时把计时器收掉，别让它去 setState 一个已经死掉的组件
-  useEffect(() => () => { clearNoticeTimer() }, [clearNoticeTimer])
+  // 卸载时把两个计时器都收掉，别让它去 setState 一个已经死掉的组件
+  useEffect(() => () => { clearNoticeTimer(); clearNoticeExit() }, [clearNoticeTimer, clearNoticeExit])
 
   /** 带软警告的「保存成功」：有警告整条转警示色并附逐条明细（不拦保存，也不是红条）。 */
   const notifySaved = useCallback((base: string, warnings: string[]): void => {
@@ -1992,17 +2806,50 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     }
   }, [])
 
-  // 详情页看「选中的角色」，日记页看「选中的角色 → 否则当前启用角色」
-  // （原来日记页只看启用角色，「选了卡但没启用」就会错显示成空态——真机反馈 #1）
-  const viewName = tab === 'diary'
-    ? (detailName !== '' ? detailName : (active.enabled ? (active.character ?? '') : ''))
-    : detailName
-  /** 日记页真正要展示的角色名（空串 = 既没选也没启用）。 */
-  const diaryTarget = tab === 'diary' ? viewName : ''
+  /**
+   * 「正在看谁」= `detailName`，**唯一真源**（C 报告 P0-1 → 本批 A2 的核心）。
+   *
+   * 从前这里是 `viewName = tab === 'diary' ? (detailName || 启用角色) : detailName`，
+   * 而三个写盘动作（改写日记 / 忘记 / 彻底重置）都拿它当操作对象。于是「在日记 tab
+   * 点一下左栏另一张卡」会**静默**换掉操作对象：界面上没有选中痕迹，用户以为还在原来那位，
+   * 一次「彻底重置」就清错了卡。
+   *
+   * 现在只有一条路：切到日记 tab 时**显式**把默认对象写进 `detailName`（默认值 effect 在
+   * `sessionName` 算出来之后，见下方），此后所有读写都用 `detailName`；
+   * tab 不再参与「对象是谁」的推断。
+   */
+  const subjectName = detailName
+  /** 日记页要展示的角色名（空串 = 既没选也没启用）。 */
+  const diaryTarget = tab === 'diary' ? subjectName : ''
   useEffect(() => {
-    if (viewName === '') { setDetail(undefined); return }
-    void loadDetail(viewName)
-  }, [viewName, loadDetail])
+    if (subjectName === '') { setDetail(undefined); return }
+    void loadDetail(subjectName)
+  }, [subjectName, loadDetail])
+
+  /**
+   * 头部「刷新」按钮。
+   *
+   * 从前的写法是 `onClick={() => { void reload(); if (viewName !== '') void loadDetail(viewName) }}`：
+   * 两个请求都发，但**不驱动 busy、也不重开 loading** —— 图标不转、骨架不出、界面毫无反应，
+   * 而且按钮没有防连点，用户以为没生效就会连点（每点一次两发请求）。
+   *
+   * 现在：busy 驱动图标转圈（`data-spin` + `IconSpinner` 早就在位），loading 让角色簿骨架
+   * 重新出现一次作为"正在取数"的明确信号；busy 期间的重复点击直接吃掉。
+   */
+  const onRefresh = useCallback((): void => {
+    if (busy) return
+    setBusy(true)
+    setLoading(true)
+    void (async () => {
+      try {
+        await reload()
+        if (subjectName !== '') await loadDetail(subjectName)
+      } finally {
+        // reload 自己会把 loading 收掉；这里兜住 loadDetail 抛错/卸载的情况
+        if (aliveRef.current) { setBusy(false); setLoading(false) }
+      }
+    })()
+  }, [busy, reload, loadDetail, subjectName])
 
   /**
    * 静默刷新：只更新列表与总览，不动 loading / error / notice。
@@ -2012,6 +2859,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    * 失败**不打扰用户**（下一轮再试），但要在 console 留痕，方便排查接口挂了。
    */
   const reloadQuietly = useCallback(async (): Promise<void> => {
+    // 页面在后台（切走标签页 / 面板被遮住）：这一轮什么都不会被看到，直接不请求。
+    // 回到前台时 panel 的 focus 监听会补一次刷新，不会漏数据。
+    if (typeof document !== 'undefined' && document.hidden) return
     try {
       const [chars, ov] = await Promise.all([
         fetchCharacters(),
@@ -2022,14 +2872,27 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       // 5 秒轮询：数据没变就别 setState（否则整棵树每 5 秒白重渲染一次）。
       // 签名必须覆盖**整份 overview 的会话相关部分**（active / bindings / stats / preset）：
       // 漏了的话 stats 页与绑定徽标在轮询路径上永远不更新（2026-11-01 审查低危项）。
-      const signature = JSON.stringify([
-        chars,
-        ov?.active ?? null,
+      /*
+        轻量签名（第 2 批性能项）：从前这里是 `JSON.stringify([chars, …])`，
+        而每张 `chars[i]` 都带**整份 card**（世界书 / 长文本）—— 50 张卡就是每 5 秒
+        序列化一次全量卡片，弱机上足够掉帧。现在只取「界面上会变的那几个标量」：
+        名字 / 来源 / 最近活跃 / 记忆数，加上 overview 的会话相关部分。
+        卡片正文被改动时 lastActive 会跟着变，所以不会漏刷。
+      */
+      const rosterSig = chars
+        .map(item => `${item.name}|${item.source}|${item.lastActive}|${item.memoryCount}`)
+        .join(',')
+      const signature = [
+        rosterSig,
+        ov?.active?.character ?? '',
+        ov?.active?.enabled === true ? '1' : '0',
+        ov?.active?.mode ?? '',
         ov?.sessionId ?? '',
-        ov?.bindings ?? null,
-        ov?.stats ?? null,
-        ov?.preset ?? null,
-      ])
+        ov?.bindings === undefined ? '' : JSON.stringify(ov.bindings),
+        ov?.stats === undefined ? '' : `${ov.stats.characters}|${ov.stats.memoryEntries}|${ov.stats.turns}|${JSON.stringify(ov.stats.bySource)}`,
+        ov?.preset === undefined ? '' : JSON.stringify(ov.preset),
+        (ov?.recent ?? []).map(item => `${item.name}|${item.lastActive}|${item.memoryCount}`).join(','),
+      ].join('#')
       if (signature === quietSig.current) return
       quietSig.current = signature
       setList(chars)
@@ -2195,9 +3058,25 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     const target = deleteTarget
     setDialog('')
     void run(async () => {
-      await deleteCharacter(target, withMemory)
-      if (detailName === target) { setDetailName(''); setDetail(undefined) }
-      showNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'), 'ok')
+      /*
+        删卡的两段动效（契约 §3「删卡」）：
+          1. 先给这张卡 `data-state="closing"`（+ T_FAST=120ms 的淡出），让"它要没了"看得见；
+          2. 请求回来后列表少一项，`useListFlip` 量到别人的位置变了，自动做 Y 轴塌陷。
+        第 1 步必须**在请求之前**：请求一回来列表就重排，卡片直接消失，淡出没机会播。
+        reduced-motion 下整段跳过（不让用户为 120ms 的淡出多等一次往返）。
+      */
+      const fade = prefersReducedMotion() ? 0 : T_FAST_LOCAL
+      if (fade > 0) {
+        setDeletingName(target)
+        await new Promise<void>(resolve => { window.setTimeout(resolve, fade) })
+      }
+      try {
+        await deleteCharacter(target, withMemory)
+        if (detailName === target) { setDetailName(''); setDetail(undefined) }
+        showNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'), 'ok')
+      } finally {
+        setDeletingName('')
+      }
     })
   }
 
@@ -2256,14 +3135,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     setBusy(true)
     setDialogError('')
     // 改的是「正在看的那位」的日记，不是启用角色的（看别人的日记时别改错人）
-    void editDiary(viewName, {
+    void editDiary(detailName, {
       text,
       date: editTarget.date,
       section: editTarget.section,
       index: editTarget.index,
     }).then(() => {
       setDialog('')
-      dismissNotice()
+      // 改写成功要给一句反馈：原来只 `dismissNotice()` 就静默关层，用户看不出来存没存住。
+      // `diary.editDone` 这个 key 字典里早就有（zh/en 各一条）但一直是零引用，正好用上。
+      showNotice(t('diary.editDone'), 'ok')
       return reload()
     }).catch((error: unknown) => {
       setDialogError(errorText(error))
@@ -2274,7 +3155,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     setBusy(true)
     setDialogError('')
     // 同理：显式带上正在看的那位，否则「忘记」会落到启用角色身上（改错人）
-    void forgetKeyword(keyword, viewName === '' ? undefined : viewName).then(result => {
+    void forgetKeyword(keyword, detailName === '' ? undefined : detailName).then(result => {
       setDialog('')
       showNotice(
         result.changed
@@ -2298,7 +3179,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     // 重置的是「正在看的那位」（日记页里展示的角色），不是启用角色 ——
     // 开着角色 A、翻角色 B 的日记点「彻底重置」，被清的必须是 B。
     // 与同页 forgetKeyword / editDiary 同一口径：看不了谁就不带 name，宿主回落当前启用角色。
-    void resetSession(scope, viewName === '' ? undefined : viewName).then(result => {
+    void resetSession(scope, detailName === '' ? undefined : detailName).then(result => {
       setDialog('')
       if (scope === 'session') showNotice(t('reset.sessionDone', { n: result.diaryKept ?? 0 }), 'ok')
       else showNotice(t('reset.allDone', { n: result.diaryRemoved ?? 0 }), 'ok')
@@ -2420,7 +3301,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }, [liveName])
 
   const currentDetail = detailName !== '' && detailName === detail?.name ? detail : undefined
-  // 日记页用的是 viewName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
+  // 日记页用的是 detailName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
   const diaryDetail = diaryTarget !== '' && detail !== undefined && detail.name === diaryTarget ? detail : undefined
 
   /**
@@ -2455,6 +3336,125 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const sessionBound = boundName !== ''
   /** 同一张卡既绑了本会话又是全局角色：只显示一次，标「本会话 / 全局」 */
   const bothSame = boundName !== '' && boundName === globalName
+
+  /**
+   * 切到日记 tab 且还没指定对象 → **显式**落到「本会话实际生效的角色」。
+   *
+   * 必须写 state，而不是在渲染期用 `tab==='diary' ? … : …` 推断：推断式写法会让
+   * 「对象是谁」随 tab 漂移，而三个写盘动作读的正是它 —— 这就是 P0-1 的根因。
+   * 只在 `detailName === ''` 时写一次，用户之后点左栏换人不会被覆盖回去。
+   */
+  useEffect(() => {
+    if (tab !== 'diary' || detailName !== '' || sessionName === '') return
+    setDetailName(sessionName)
+  }, [tab, detailName, sessionName])
+
+  /** 窄屏 → 宽屏：两栏同时可见，栈清空。 */
+  useEffect(() => {
+    if (narrow) return
+    clearPopTimer()
+    setNavState('split')
+  }, [narrow, clearPopTimer])
+
+  /** 窄屏下「选中了某张卡」= 详情在栈顶（返回时先清 detailName，所以两条不会打架）。 */
+  useEffect(() => {
+    if (narrow && tab === 'roster' && detailName !== '') setNavState('push')
+  }, [narrow, tab, detailName])
+
+  /**
+   * 左栏点卡 = 「选谁」。
+   *
+   * 三个 tab 三种含义，必须一次说清（否则就是审查里那条「死点击 / 静默换人」）：
+   *  - 角色簿：打开详情（窄屏 push）；
+   *  - 日记：只换选中对象，留在日记页（页内会显示「正在看：X」）；
+   *  - 统计 / 指南：这两个页面跟「谁」无关，点卡必须**跳到角色簿**再打开详情 ——
+   *    以前这里什么都不发生，用户会以为面板卡死了。
+   */
+  const openCharacter = useCallback((name: string): void => {
+    clearPopTimer()
+    setDetailName(name)
+    if (tab === 'stats' || tab === 'guide') setTab('roster')
+    if (narrow) setNavState('push')
+  }, [clearPopTimer, narrow, tab])
+
+  /** 退回列表（窄屏 pop 一帧再落 split）；**不清**选中对象。 */
+  const returnToList = useCallback((): void => {
+    if (!narrow) return
+    clearPopTimer()
+    setNavState('pop')
+    popTimer.current = window.setTimeout(() => {
+      popTimer.current = undefined
+      setNavState('split')
+    }, T_MID)
+  }, [clearPopTimer, narrow])
+
+  /** 详情页「返回」：清掉选中对象再退回列表。 */
+  const closeDetail = useCallback((): void => {
+    setDetailName('')
+    setDetail(undefined)
+    setDetailError('')
+    returnToList()
+  }, [returnToList])
+
+  /**
+   * 切 tab。
+   *
+   * 窄屏上 tab 切的是「内容列」，所以 push；唯独「角色簿 + 还没选卡」留在列表
+   * （这时内容列只有一句「从左栏选一张卡」，把用户推过去没有意义）。
+   */
+  const onTabPick = useCallback((next: Tab): void => {
+    clearPopTimer()
+    setTab(next)
+    if (!narrow) return
+    setNavState(next === 'roster' && detailName === '' ? 'split' : 'push')
+  }, [clearPopTimer, narrow, detailName])
+
+  /** 左栏过滤：名字 / 身份 / 一句话背景 / 来源，小写包含匹配。 */
+  const visibleRoster = useMemo(() => {
+    const keyword = query.trim().toLowerCase()
+    if (keyword === '') return roster
+    return roster.filter(item => {
+      const role = roleOf(item.card)
+      const blurb = blurbOf(item.card)
+      const source = typeof item.source === 'string' ? item.source : ''
+      return `${item.name} ${role} ${blurb} ${source}`.toLowerCase().includes(keyword)
+    })
+  }, [roster, query])
+
+  // 列表 FLIP：筛选/搜索/删卡导致的顺序或数量变化，用 Y 轴位移画出来（reduced-motion 跳过）
+  useListFlip(gridRef, [visibleRoster], !reducedMotion)
+
+  /**
+   * 导出这张卡：纯前端 Blob，不碰任何接口（因此也不改数据流）。
+   *
+   * 优先导 `ccv3`（完整规范对象，含世界书 / extensions），宿主没给才退 `card`。
+   * 文件名滤掉 Windows 非法字符，否则会静默失败。
+   */
+  const onExportDetail = useCallback((): void => {
+    if (detail === undefined) return
+    const safeName = detail.name.replace(/[\\/:*?"<>|]/g, '_')
+    try {
+      const payload = detail.ccv3 ?? detail.card
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${safeName}.ccv3.json`
+      anchor.click()
+      window.setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
+      showNotice(t('detail.exportDone'), 'ok')
+    } catch (e) {
+      showNotice(t('detail.exportFailed', { reason: errorText(e) }), 'warn')
+    }
+  }, [detail, showNotice, t])
+
+  /** 详情页「最近日记」的出口：带着这位进日记 tab。 */
+  const onOpenDiaryOf = useCallback((name: string): void => {
+    clearPopTimer()
+    setDetailName(name)
+    setTab('diary')
+    if (narrow) setNavState('push')
+  }, [clearPopTimer, narrow])
 
   /** 详情页这张卡是否已绑定在本会话（优先 bindings 表，其次详情数据自带的绑定信号） */
   const isBoundHere = (name: string): boolean => {
@@ -2572,17 +3572,104 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     if (delta === 0 && jump < 0) return
     event.preventDefault()
     const next = jump >= 0 ? jump : (tabIndex + delta + TAB_IDS.length) % TAB_IDS.length
-    setTab(TAB_IDS[next].id)
+    onTabPick(TAB_IDS[next].id)
     document.getElementById(TAB_IDS[next].node)?.focus()
   }
 
   // -------------------------------------------------------- 渲染
+
+  /**
+   * 窄屏「单栏导航栈」的对外取值（契约 §2.1 `.awu-workspace[data-nav]`）。
+   * 宽屏恒为 `split`：两栏同时可见，栈没有意义。
+   */
+  const navAttr: 'split' | 'push' | 'pop' = narrow ? navState : 'split'
+  /**
+   * 窄屏列表态：tablist 必须跟到左栏。
+   *
+   * 这不是「把 tab 藏起来」——恰恰相反：窄屏 `split` 时内容列整体不在视口里，
+   * tablist 若留在 `mainHead` 里就跟着一起不可达，用户永远切不了 tab。
+   * 所以 tablist 同一时刻只存在于**可见的那一列**（宽屏恒在 mainHead）。
+   */
+  const showTabsInRail = narrow && navState === 'split'
+  /** 内容列是否覆盖在列表上（决定 mainHead 出不出「返回列表」）。 */
+  const contentOnTop = narrow && navState !== 'split'
+  /** 退场期继续渲染「刚关掉的那一层」（见 dialogPresence 的说明）。 */
+  const shownDialog: '' | PanelDialog = dialog !== '' ? dialog : (dialogPresence.closing ? lastDialogRef.current : '')
+  /** 契约 §2.3：滑块位置由 JSX 写这两个内联变量，CSS 只读。 */
+  const tabsStyle = { '--awu-tab-i': tabIndex, '--awu-tab-n': TAB_IDS.length } as CSSProperties
+  const tabsNode = (
+    <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey} style={tabsStyle}>
+      {TAB_IDS.map(item => (
+        <button
+          key={item.id}
+          id={item.node}
+          type="button"
+          role="tab"
+          className="awu-tab"
+          data-on={tab === item.id ? 'true' : 'false'}
+          aria-selected={tab === item.id}
+          aria-controls="awu-tabpanel"
+          tabIndex={tab === item.id ? 0 : -1}
+          onClick={() => onTabPick(item.id)}
+        >
+          {t(`panel.tab.${item.id}`)}
+        </button>
+      ))}
+    </div>
+  )
+  /*
+    视图进入动画**不在这里挂**（2026-11-02 与 CSS 侧对齐）：CSS 把 `awu-view-in`（120ms，只 opacity，
+    fill-mode:both）写在 `.awu-mainBody > *` 上 —— 视图根节点换人时自然播一次，零 JSX 依赖。
+    原先我打算打一帧 `data-view-state="enter"` 再下一帧摘，但那是 transition 路线；
+    animation 路线上「下一帧摘属性」会把动画一起摘掉，淡入被截断 = 等于没做。所以这里删干净。
+    代价：同一个视图根节点内的内容变化（例如详情页换了张卡）不会重播 —— 这条由
+    `<CharacterDetailView key={detailName}>` 的重挂载补上（见下面 tab === 'roster' 那段）。
+  */
+
+  /** 右栏头部右侧的全局动作：窄屏「返回列表」+ 刷新 + 关闭。 */
+  const mainHeadActions = (
+    <div className="awu-headActions">
+      {contentOnTop && !(tab === 'roster' && detailName !== '') && (
+        <button
+          type="button"
+          className="awu-btn"
+          data-size="sm"
+          data-kind="ghost"
+          onClick={returnToList}
+        >
+          <IconBack size={12} />
+          {t('panel.backToList')}
+        </button>
+      )}
+      <button
+        type="button"
+        className="awu-iconBtn"
+        title={t('panel.refresh')}
+        aria-label={t('panel.refresh')}
+        data-spin={busy ? 'true' : 'false'}
+        aria-busy={busy}
+        onClick={onRefresh}
+        disabled={busy}
+      >
+        {busy ? <IconSpinner size={15} /> : <IconRefresh size={15} />}
+      </button>
+      <button
+        type="button"
+        className="awu-iconBtn"
+        title={t('panel.close')}
+        aria-label={t('panel.close')}
+        onClick={() => setOpen(false)}
+      >
+        <IconClose size={15} />
+      </button>
+    </div>
+  )
+
   return (
     <div
       ref={layerRef}
       className="awu-layer"
       data-rail={wide ? 'false' : 'true'}
-      {...{ [SCOPED_ATTR]: '' }}
     >
       <button
         ref={buttonRef}
@@ -2617,16 +3704,28 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         {wide && <Dot on={sessionName !== ''} />}
       </button>
 
-      {open && typeof document !== 'undefined' && createPortal(
+      {/* 退场期仍 mounted（160ms）：`open` 一翻转就摘 DOM 的话，CSS 退场根本没有机会播 */}
+      {panelPresence.mounted && typeof document !== 'undefined' && createPortal(
         <div
-          ref={panelRef}
+          ref={attachPanelRef}
           className="awu-panel awu-scope"
           style={panelStyle}
           data-busy={busy ? 'true' : 'false'}
+          /* 契约 §2.2：退场由 data-state="closing" 驱动（CSS 侧已有 awu-exit / awu-exit-down） */
+          {...presenceAttrs(panelPresence.closing)}
+          aria-hidden={panelPresence.closing ? true : undefined}
+          /* 契约 §2.1：托盘级开关。现在恒开（GLASS_FX_ENABLED），关掉时挂 "off" 让 CSS 退回静态高光 */
+          data-fx={glassFxOn ? undefined : 'off'}
           role="dialog"
-          aria-modal="false"
+          /*
+            这里是 `aria-modal="true"`：面板**行为上已经是模态**（Tab 被 `useFocusTrap`
+            关在里面、Esc 收起、点外面收起、`box-shadow: 0 0 0 100vmax` 铺一层压暗），
+            从前的 `"false"` 会让读屏以为「背景还能操作」，与键盘行为自相矛盾。
+            （2026-11-02 无障碍检查 D 报告 §1.3 第一条；a11y-merge.md §5 当时的设计是
+            「面板不加陷阱、Tab 放出去」，实际实现走了模态，所以语义跟着行为走。）
+          */
+          aria-modal="true"
           aria-label={t('panel.title')}
-          {...{ [SCOPED_ATTR]: '' }}
           /*
             面板自己也吞掉文件拖放：不吞的话，卡文件会冒到宿主 composer 被当附件发出去。
             `swallowFileDrag` 在 drop 时还会复位宿主的拖放计数器 —— 否则聊天区的
@@ -2660,14 +3759,20 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             />
           ) : (
           <>
-          {/* 头部 */}
+          {/*
+            头部只留「这是什么 + 一行总量」。刷新/关闭这类全局动作归右栏 `awu-mainHead`
+            （契约 §2.4）—— 1120px 宽的头部原来只放两枚图标、而主 CTA 挤在 340px 左栏，
+            空间分配是反的（C 报告 P1-1）。
+            标题改走字典：`panel.title` 早就存在，但这里以前是硬编码「角色管理器」，
+            英文界面下最显眼的 H1 一直是中文（C 报告 P1-8）。
+          */}
           <div className="awu-head">
             <div className="awu-headMain">
               <div className="awu-kicker">{t('panel.kicker')}</div>
-              <div className="awu-title">角色<em>管理器</em></div>
+              <div className="awu-title">{t('panel.title')}</div>
               {/*
                 三个总量指标：原来占右栏顶部一整条，视觉重量和正文打架（主人反馈「太大了」）。
-                收成标题下方一行紧凑元信息，右栏空间全部还给内容。
+                收成标题下方一行紧凑元信息；「统计」tab 里不再重复这三个数字（C 报告 P2-1）。
               */}
               <div className="awu-counts" role="group" aria-label={t('stats.title')}>
                 <span className="awu-countItem" data-metric="characters">
@@ -2682,27 +3787,6 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   <b>{stats.turns}</b>{t('stats.turns')}
                 </span>
               </div>
-            </div>
-            <div className="awu-headActions">
-              <button
-                type="button"
-                className="awu-iconBtn"
-                title={t('panel.refresh')}
-                aria-label={t('panel.refresh')}
-                data-spin={busy ? 'true' : 'false'}
-                onClick={() => { void reload(); if (viewName !== '') void loadDetail(viewName) }}
-              >
-                {busy ? <IconSpinner size={15} /> : <IconRefresh size={15} />}
-              </button>
-              <button
-                type="button"
-                className="awu-iconBtn"
-                title={t('panel.close')}
-                aria-label={t('panel.close')}
-                onClick={() => setOpen(false)}
-              >
-                <IconClose size={15} />
-              </button>
             </div>
           </div>
 
@@ -2721,15 +3805,19 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     <span className="awu-pill" data-tone="live" style={{ marginLeft: 6 }}>{t('active.both')}</span>
                   )}
                 </div>
+                {/*
+                  标点不再硬编码全角括号/冒号（英文界面会露出中文标点，C 报告 P2-15）：
+                  两段 span + 「·」分隔，各语言各自自己的写法。
+                */}
                 <div className="awu-sigilMeta">
-                  {t('active.session')}
-                  {sessionBound ? `（${t('active.sessionBound')}）` : `（${t('active.sessionInherit')}）`}
-                  {' · '}
-                  {active.mode === 'text' ? t('active.mode.text') : t('active.mode.action')}
+                  <span>{t('active.session')}</span>
+                  <span>{' · '}{sessionBound ? t('active.sessionBound') : t('active.sessionInherit')}</span>
+                  <span>{' · '}{active.mode === 'text' ? t('active.mode.text') : t('active.mode.action')}</span>
                 </div>
                 {!bothSame && (
                   <div className="awu-sigilMeta">
-                    {t('active.global')}：{globalName !== '' ? globalName : t('active.globalNone')}
+                    <span>{t('active.global')}</span>
+                    <span>{' · '}{globalName !== '' ? globalName : t('active.globalNone')}</span>
                   </div>
                 )}
                 {openingNote !== '' && (
@@ -2741,40 +3829,14 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   </div>
                 )}
               </div>
-              <div className="awu-sigilBtns">
-                <button
-                  type="button"
-                  className="awu-btn"
-                  data-size="sm"
-                  data-kind="ghost"
-                  title={t('active.mode.switch')}
-                  onClick={() => openDialog('mode')}
-                  disabled={busy}
-                >
-                  {active.mode === 'text' ? <IconText size={12} /> : <IconMotion size={12} />}
-                </button>
-                <button
-                  type="button"
-                  className="awu-btn"
-                  data-size="sm"
-                  title={t('opening.next')}
-                  onClick={onNextOpening}
-                  disabled={busy}
-                >
-                  <IconRefresh size={12} />
-                </button>
-                {/* 取消入口按状态给：会话绑定 → 解除本会话绑定；全局 → 退出全局 */}
-                {sessionBound && (
-                  <button type="button" className="awu-btn" data-size="sm" onClick={onUnbindSession} disabled={busy}>
-                    {t('detail.bindSessionOff')}
-                  </button>
-                )}
-                {globalName !== '' && (
-                  <button type="button" className="awu-btn" data-size="sm" onClick={onDeactivate} disabled={busy}>
-                    {t('active.gExit')}
-                  </button>
-                )}
-              </div>
+              {/*
+                状态带**只显示状态**，不再放动作（第 2 批收口，契约 §6「退出全局入口」）。
+                原因：这里是「谁在生效」的仪表，放按钮会让同一件事有两个入口
+                （「退出全局」原先在状态带和详情页 ⋯ 菜单各一份）。
+                现在取消类动作唯一的入口是详情页的 hero（解除绑定）/ ⋯ 菜单（退出全局）。
+                代价：没打开任何卡时没有"退出全局"的入口 —— 已淘汰的卡点进去就有，
+                第 3 批如果要做"全局开关"设置项，应该做在 ⋯ 菜单而不是这里。
+              */}
             </div>
           ) : (
             <div className="awu-status awu-idle" data-status="idle">
@@ -2791,7 +3853,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 data-size="sm"
                 data-kind="ghost"
                 style={{ marginLeft: 'auto' }}
-                onClick={() => setTab('roster')}
+                onClick={() => onTabPick('roster')}
               >
                 {t('roster.pick')}
                 <span aria-hidden="true"> →</span>
@@ -2804,6 +3866,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             <div
               className="awu-status awu-idle"
               data-status={notice.tone === 'warn' ? 'warn' : 'info'}
+              /* 退场：先挂 closing 淡出 160ms，再从 state 删（见 dismissNotice） */
+              {...presenceAttrs(noticeClosing)}
               role="status"
               aria-live="polite"
               style={{ marginTop: -4 }}
@@ -2824,10 +3888,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
           {/*
             两栏骨架（iOS Split View）：左栏是「选谁」，右栏是「看什么」。
-            head 与状态带全宽；工具行/分段器归左栏（它们操作的对象就是左栏那张列表），
-            统计条归右栏顶部当仪表行。窄屏（<900px）由 CSS 断点自动收成单栏。
+            head 与状态带全宽；`awu-mainHead`（tabs + 全局动作）在右栏顶部。
+            `data-nav` 是契约 §2.1 的窄屏导航栈语义：宽屏恒 `split`，
+            `<900` 时由 JSX 推 `push` / `pop`（CSS 只负责按这个值画，见 styles.ts 的 <900 段）。
           */}
-          <div className="awu-workspace">
+          <div className="awu-workspace" data-nav={navAttr}>
             <aside className="awu-rail">
               {/*
                 左栏头部（自带内边距的容器）：两张卡的入口 → 分段器 → 计数 / 模式 / 导入。
@@ -2858,29 +3923,53 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   </div>
                 </div>
 
-                <div className="awu-tabs" role="tablist" aria-label={t('panel.title')} onKeyDown={onTabKey}>
-                  {TAB_IDS.map(item => (
-                    <button
-                      key={item.id}
-                      id={item.node}
-                      type="button"
-                      role="tab"
-                      className="awu-tab"
-                      data-on={tab === item.id ? 'true' : 'false'}
-                      aria-selected={tab === item.id}
-                      aria-controls="awu-tabpanel"
-                      tabIndex={tab === item.id ? 0 : -1}
-                      onClick={() => setTab(item.id)}
-                    >
-                      {t(`panel.tab.${item.id}`)}
-                    </button>
-                  ))}
-                </div>
+                {/*
+                  分段器归位右栏（契约 §2.4）：宽屏时它渲染在 `.awu-mainHead` 里，
+                  只有窄屏「列表态」才临时搬到左栏 —— 否则内容列被整体移出视口时
+                  tab 会跟着不可达。切 tab 走 `onTabPick`（窄屏顺手 push 内容列）。
+                */}
+                {showTabsInRail && tabsNode}
+                {/*
+                  窄屏列表态没有内容列 → mainHead 不在了，刷新/关闭会跟着一起消失。
+                  这两个是面板级动作（关掉整个面板、重取数据），不能让它们依赖"哪一列在显示"，
+                  所以在列表态把它们跟 tabs 一起搬到左栏头部（同一时刻只存在一处）。
+                */}
+                {showTabsInRail && mainHeadActions}
 
                 <div className="awu-toolbar" data-wrap="true">
-                  <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
-                    {t('roster.count', { n: roster.length })}
-                  </span>
+                  {/*
+                    过滤行（契约 §2.4 说的「过滤」）：50+ 张卡时左栏是单列，没有搜索只能人肉滚
+                    （C 报告 P2-4）。用现成的 `.awu-input.awu-reviewInput` 尺寸，不新造类名。
+                    有词时计数变成「命中 / 全部」，让过滤结果可验证。
+                  */}
+                  <input
+                    type="search"
+                    className="awu-input awu-reviewInput"
+                    value={query}
+                    placeholder={t('roster.searchPlaceholder')}
+                    aria-label={t('roster.searchPlaceholder')}
+                    onChange={event => setQuery(event.target.value)}
+                  />
+                  {query !== '' ? (
+                    <>
+                      <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
+                        {`${visibleRoster.length}/${roster.length}`}
+                      </span>
+                      <button
+                        type="button"
+                        className="awu-btn"
+                        data-size="sm"
+                        data-kind="ghost"
+                        onClick={() => setQuery('')}
+                      >
+                        {t('diary.searchClear')}
+                      </button>
+                    </>
+                  ) : (
+                    <span className="awu-statLabel" style={{ fontFamily: 'var(--awu-mono)' }}>
+                      {t('roster.count', { n: roster.length })}
+                    </span>
+                  )}
 
                   {/*
                     模式胶囊：主人反馈「改模式的地方藏在启用状态条的小图标里，没启用就看不见」。
@@ -2947,10 +4036,27 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     </button>
                   </div>
                 </div>
+
+                {/*
+                  「正在看：<名字>」（契约 §2.4 `.awu-railNow`）。
+                  这是 P0-1 的**第二道保险**：选中态高亮解决「看得到」，这一行解决
+                  「当前对象是谁一目了然」—— 尤其日记 tab 下，卡片可能已经滚出视口。
+                  注意 `data-empty` 只在**真空**时才写：CSS 用的是 `[data-empty]`（属性存在性）
+                  匹配，若写成 `data-empty="false"`，React 会把 false 序列化成字符串，
+                  属性照样存在 → 这一行会被永远隐藏。
+                */}
+                {tab === 'diary' && (
+                  <div className="awu-railNow" data-empty={detailName === '' ? 'true' : undefined}>
+                    <span className="awu-sectionLabel">{t('rail.now')}</span>
+                    <b>{detailName !== '' ? detailName : '—'}</b>
+                  </div>
+                )}
               </div>
 
               <div className="awu-pane">
-                {loading && <Skeleton shape="cards" label={t('common.loading')} />}
+                {skeletonPresence.mounted && (
+                  <Skeleton shape="cards" label={t('common.loading')} closing={skeletonPresence.closing} />
+                )}
 
                 {/* 接口失败时不要再显示「角色簿还是空的」——那会把错误误导成「你没建卡」 */}
                 {!loading && error === '' && roster.length === 0 && (
@@ -2958,20 +4064,56 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     <span className="awu-emptyMark"><IconBook size={20} /></span>
                     <span className="awu-emptyTitle">{t('roster.empty.title')}</span>
                     <span className="awu-emptyHint">{t('roster.empty.hint')}</span>
+                    {/* 空态给真按钮（C 报告 P2-6）：原来只有一句话，行动入口在 32px 之外的头部 */}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+                      <button
+                        type="button"
+                        className="awu-btn"
+                        data-kind="primary"
+                        onClick={() => openDialog('new')}
+                        disabled={busy}
+                      >
+                        <IconPlus size={12} />
+                        {t('cta.selfCreate')}
+                      </button>
+                      <button type="button" className="awu-btn" onClick={() => openDialog('import')} disabled={busy}>
+                        <IconImport size={12} />
+                        {t('import.entryShort')}
+                      </button>
+                    </div>
                   </div>
                 )}
 
-                {!loading && roster.length > 0 && (
-                  <div className="awu-grid">
-                    {roster.map((item, index) => (
+                {/* 有过滤词但零命中：要说清「是过滤没中」，别让用户以为卡全丢了 */}
+                {!loading && error === '' && roster.length > 0 && visibleRoster.length === 0 && (
+                  <div className="awu-empty" data-kind="empty">
+                    <span className="awu-emptyHint">{t('roster.searchEmpty', { keyword: query.trim() })}</span>
+                    <button type="button" className="awu-btn" data-size="sm" onClick={() => setQuery('')}>
+                      {t('diary.searchClear')}
+                    </button>
+                  </div>
+                )}
+
+                {!loading && visibleRoster.length > 0 && (
+                  <div
+                    ref={gridRef}
+                    className="awu-grid"
+                    /* 骨架 → 内容的登场：骨架先退 160ms（presence），内容这一层再 rise 200ms，
+                       不同帧硬切。keyframes `awu-rise` 是 CSS 侧的全局真源，这里只引用。 */
+                    style={{ animation: 'awu-rise 200ms var(--awu-ease) both' }}
+                  >
+                    {visibleRoster.map((item, index) => (
                       <CharacterTile
                         key={item.name}
                         item={item}
                         index={index}
                         live={live && item.name === liveName}
+                        boundHere={isBoundHere(item.name)}
+                        selected={detailName !== '' && item.name === detailName}
+                        deleting={deletingName !== '' && item.name === deletingName}
                         busy={busy}
                         t={t}
-                        onOpen={setDetailName}
+                        onOpen={openCharacter}
                       />
                     ))}
                   </div>
@@ -2979,9 +4121,29 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               </div>
             </aside>
 
-            <main className="awu-main">
+            {/*
+              窄屏导航栈的「栈」真的在这里生效：`split` / `pop` 只挂列表列，内容列不渲染。
+              为什么不留给 CSS：styles.ts 里只定义了 `[data-nav="push"]` 覆盖列表规则，
+              `split` 下两列会回到「上下堆叠」，而那正是要修的那个洞（滚过 20 张卡才看到详情）。
+              这里也**没有**用 hidden 属性把 rail 摘掉 —— 那是 CSS 的 visibility 负责的。
+            */}
+            {/*
+              `pop` 期间也要挂着内容列：退场位移得先看得见才谈得上"退"。
+              （`split` 仍然不挂 —— 那才是「列表是根」的形态。）
+            */}
+            {(!narrow || navState === 'push' || navState === 'pop') && (
+            <main className="awu-main" data-nav-state={narrow ? navState : undefined}>
+              {/*
+                右栏头部（契约 §2.4）：tabs 归位到这里，右端放全局动作。
+                窄屏列表态下 tablist 会临时搬到左栏（见 `showTabsInRail`），
+                这里就只剩动作区。
+              */}
+              <div className="awu-mainHead">
+                {!showTabsInRail && tabsNode}
+                {mainHeadActions}
+              </div>
               <div
-                className="awu-pane"
+                className="awu-mainBody"
                 id="awu-tabpanel"
                 role="tabpanel"
                 aria-labelledby={tabNode}
@@ -2990,6 +4152,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               >
                 {tab === 'roster' && (detailName !== '' ? (
                   <CharacterDetailView
+                    /* 换卡就重挂：`.awu-detail` 的 CSS 进场（awu-slide-in，从右 +8px）才会真的重播；
+                       否则同一个 tab 内换对象只是内容替换，没有任何"进去了"的手感。 */
+                    key={detailName}
                     detail={currentDetail}
                     loading={detailLoading}
                     error={detailError}
@@ -2999,7 +4164,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     sessionId={sessionId}
                     busy={busy}
                     t={t}
-                    onBack={() => { setDetailName(''); setDetail(undefined); setDetailError('') }}
+                    onBack={closeDetail}
                     onRetry={() => { void loadDetail(detailName) }}
                     onBindSession={() => onBindSession(detailName)}
                     onUnbindSession={onUnbindSession}
@@ -3007,20 +4172,50 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                     onDeactivate={onDeactivate}
                     onDelete={() => openDelete(detailName)}
                     onEdit={() => { setEditError(''); setEditing(true) }}
+                    onOpenDiary={() => onOpenDiaryOf(detailName)}
+                    onExport={onExportDetail}
+                    onSwitchMode={() => openDialog('mode')}
+                    onNextOpening={onNextOpening}
                   />
                 ) : (
+                  /* 未选卡：给「往左看」的箭头指引 + 一个次级行动（C 报告 P2-6 / A5） */
                   <div className="awu-empty" data-kind="pick">
                     <span className="awu-emptyMark"><IconBook size={20} /></span>
-                    <span className="awu-emptyHint">{t('roster.pick')}</span>
+                    <span className="awu-emptyHint">
+                      <span aria-hidden="true">← </span>
+                      {t('roster.pick')}
+                    </span>
                     <span className="awu-emptySub">{t('roster.pickHint')}</span>
+                    <button
+                      type="button"
+                      className="awu-btn"
+                      data-size="sm"
+                      style={{ marginTop: 4 }}
+                      onClick={() => openDialog('new')}
+                      disabled={busy}
+                    >
+                      <IconPlus size={12} />
+                      {t('cta.selfCreate')}
+                    </button>
                   </div>
                 ))}
 
             {tab === 'diary' && (diaryTarget === '' ? (
-              /* ① 既没选也没启用：告诉他去哪挑卡 */
+              /* ① 既没选也没启用：告诉他去哪挑卡 —— 给箭头 + 一个真按钮（A5） */
               <div className="awu-empty" data-kind="diary">
                 <span className="awu-emptyMark"><IconQuill size={20} /></span>
-                <span className="awu-emptyHint">{t('diary.pick')}</span>
+                <span className="awu-emptyHint">
+                  <span aria-hidden="true">← </span>
+                  {t('diary.pick')}
+                </span>
+                <button
+                  type="button"
+                  className="awu-btn"
+                  data-size="sm"
+                  onClick={() => onTabPick('roster')}
+                >
+                  {t('roster.pick')}
+                </button>
               </div>
             ) : diaryDetail !== undefined ? (
               /* ② 选中了（无论启用与否）就走正常日记页；「没日记」由 DiaryView 自己给空态 */
@@ -3037,7 +4232,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               <Skeleton label={t('common.loading')} />
             ) : detailError !== '' ? (
               /* ③ 加载失败：给错误原文 + 重试，别伪装成「没有日记」 */
-              <div className="awu-empty" data-kind="error">
+              <div className="awu-empty" data-kind="error" role="alert">
                 <span className="awu-emptyMark"><IconAlert size={20} /></span>
                 <span className="awu-emptyTitle">{t('diary.loadFailed')}</span>
                 <span className="awu-emptyHint">{detailError}</span>
@@ -3054,15 +4249,14 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 </div>
               </div>
             ) : (
-              <Skeleton />
+              <Skeleton label={t('common.loading')} />
             ))}
             {tab === 'stats' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-                <Section title={t('stats.title')}>
-                  <Field k={t('stats.characters')} v={String(stats.characters)} />
-                  <Field k={t('stats.memory')} v={String(stats.memory)} />
-                  <Field k={t('stats.turns')} v={String(stats.turns)} />
-                </Section>
+                {/*
+                  「统计」tab 不再重复头部的三个数字（C 报告 P2-1）：那里已经是仪表盘，
+                  这里只给分项（来源分布 / 最近活跃）与去向（存放位置 + 备份说明）。
+                */}
                 <Section title={t('stats.source')}>
                   {Object.keys(overview?.stats.bySource ?? {}).length === 0
                     ? <div className="awu-hint">{t('stats.none')}</div>
@@ -3090,6 +4284,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   <div className="awu-hint" style={{ fontFamily: 'var(--awu-mono)', fontSize: 10.5, wordBreak: 'break-all' }}>
                     {overview?.root !== undefined && overview.root !== '' ? overview.root : '—'}
                   </div>
+                  {/* 数据位置 + 备份口径放在一起：这是「统计」这一页唯一能直接指导动作的信息 */}
+                  <div className="awu-hint" style={{ marginTop: 6 }}>{t('guide.data.backup')}</div>
                 </Section>
               </div>
             )}
@@ -3097,10 +4293,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 {tab === 'guide' && <GuideView t={t} />}
               </div>
             </main>
+            )}
           </div>
 
+          {/*
+            弹层宿主（契约 §2.2）：退场期继续渲染「刚关掉的那一层」，并用 context 把
+            closing 广播给 Overlay（scrim 与 dialog 都要挂 data-state，否则遮罩硬切）。
+          */}
+          {dialogPresence.mounted && (
+          <DialogLayerContext.Provider value={dialogPresence.closing}>
           {/* 弹层 */}
-          {dialog === 'new' && (
+          {shownDialog === 'new' && (
             <NewCharacterDialog
               existing={list.map(item => item.name)}
               panelBusy={busy}
@@ -3109,7 +4312,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'import' && (
+          {shownDialog === 'import' && (
             <ImportDialog
               panelBusy={busy}
               onCancel={() => setDialog('')}
@@ -3118,13 +4321,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
             />
           )}
           {/* 注入预览：只读快照，内容本体在 preview.tsx（遮罩/焦点用这里的 Overlay） */}
-          {dialog === 'preview' && (
+          {shownDialog === 'preview' && (
             <Overlay label={t('preview.title')} onClose={() => setDialog('')}>
               <PromptPreview t={t} onClose={() => setDialog('')} />
             </Overlay>
           )}
           {/* 预设：列表 / 编辑 / 导入三态，内容本体在 preset-view.tsx */}
-          {dialog === 'preset' && (
+          {shownDialog === 'preset' && (
             <Overlay label={t('preset.title')} onClose={() => setDialog('')} escYield={presetFocusOpen}>
               <PresetPanel
                 t={t}
@@ -3135,7 +4338,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               />
             </Overlay>
           )}
-          {dialog === 'delete' && (
+          {shownDialog === 'delete' && (
             <DeleteDialog
               name={deleteTarget}
               busy={busy}
@@ -3144,7 +4347,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'mode' && (
+          {shownDialog === 'mode' && (
             <ModeDialog
               current={mode}
               busy={busy}
@@ -3153,7 +4356,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'editDiary' && editTarget !== undefined && (
+          {shownDialog === 'editDiary' && editTarget !== undefined && (
             <EditDiaryDialog
               target={editTarget}
               busy={busy}
@@ -3163,7 +4366,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'forget' && (
+          {shownDialog === 'forget' && (
             <ForgetDialog
               busy={busy}
               error={dialogError}
@@ -3172,10 +4375,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'resetAll' && (
+          {shownDialog === 'resetAll' && (
             <ResetAllDialog
               // 名字用「正在看的角色」：弹窗标题必须与实际被重置的对象一致（同 onReset 的口径）
-              name={viewName}
+              name={detailName}
               busy={busy}
               scope="all"
               onCancel={() => setDialog('')}
@@ -3183,15 +4386,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               t={t}
             />
           )}
-          {dialog === 'resetSession' && (
+          {shownDialog === 'resetSession' && (
             <ResetAllDialog
-              name={viewName}
+              name={detailName}
               busy={busy}
               scope="session"
               onCancel={() => setDialog('')}
               onConfirm={() => onReset('session')}
               t={t}
             />
+          )}
+          </DialogLayerContext.Provider>
           )}
           </>
           )}
