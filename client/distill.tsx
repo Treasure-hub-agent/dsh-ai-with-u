@@ -34,6 +34,7 @@ import type { JSX } from 'react'
 
 import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillState } from './api'
 import type { DistillKind } from './api'
+import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
 import { swallowFileDrag } from './dragdrop'
 import { IconClose, IconQuill } from './icons'
 import type { Translate } from './text'
@@ -152,6 +153,24 @@ export function useComposerReady(): boolean {
 /** 当前 sink 绑定的会话 id（多会话时用于提示；空串 = 没绑定）。 */
 export function composerSessionId(): string {
   return sinkSession
+}
+
+/**
+ * 订阅「当前 sink 会话 id」的 React 版本（同 `useComposerReady` 的做法）：
+ * DockSink 挂上 / 切会话时会 notifySink，面板据此拿到宿主给的真实 sessionId。
+ *
+ * `sidebar.footer.action` 这个席位拿不到 `sessionId` prop（只有会话作用域插槽有），
+ * 所以主面板要接会话时都是从这里借（同一份真源，不自己猜 id）。
+ */
+export function useComposerSession(): string {
+  const [sessionId, setSessionId] = useState<string>(() => composerSessionId())
+  useEffect(() => {
+    const update = (): void => setSessionId(composerSessionId())
+    sinkListeners.add(update)
+    update()
+    return () => { sinkListeners.delete(update) }
+  }, [])
+  return sessionId
 }
 
 // ---------------------------------------------------------------- 发送
@@ -361,8 +380,15 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
   const [savedNote, setSavedNote] = useState('')
   /** 指令是否真的发出去了 —— 决定关弹层时该 onDone() 还是 disarm()。 */
   const sentRef = useRef(false)
+  const boxRef = useRef<HTMLDivElement | null>(null)
 
   useBodyScrollLock(true)
+
+  // 焦点三件套（与 index.tsx 的 Overlay / editor-focus 同款接线，2026-11-01 补）：
+  // 顺序不能换：先记「打开前焦点在哪」，再把焦点送进容器，最后拦 Tab。
+  useRestoreFocus(true)
+  useInitialFocus(boxRef, true)
+  useFocusTrap(boxRef, true)
 
   // 开门先看一眼窗口状态：上一次刚存过卡就给一句上下文，别让用户以为要重来
   useEffect(() => {
@@ -462,7 +488,7 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
       onDragOver={swallowFileDrag}
       onDrop={swallowFileDrag}
     >
-      <div className="awu-dialog awu-distill-dialog" role="dialog" aria-modal="true" aria-label={t('distill.title')}>
+      <div ref={boxRef} className="awu-dialog awu-distill-dialog" role="dialog" aria-modal="true" aria-label={t('distill.title')}>
         <div className="awu-dialogHead">
           <IconQuill size={16} />
           <span>{t('distill.title')}</span>

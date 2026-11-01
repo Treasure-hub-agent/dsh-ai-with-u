@@ -44,7 +44,16 @@ export interface LoreBookDraft {
   name: string
   description: string
   scanDepth: number
-  tokenBudget: number
+  /**
+   * `token_budget`（token）。**可选：原书没写就是 undefined，绝不回填默认值。**
+   *
+   * 为什么：宿主语义是「没写该字段 → 关键词预算走默认 6000 字（参见 `src/tavern.ts:1634-1641`，
+   * `LORE_DEFAULTS.budgetChars`）；写了才按 token×1.5 换算。以前草稿层无条件回填 500，
+   * 结果一本没写过 token_budget 的书只要在面板里改一次并保存，预算就从 6000 字悄悄变 750 字，
+   * 大规模 dropped 与页面显示自相矛盾 —— 这也正是本文件纪律 3 禁止的「给遗漏字段塞默认值」。
+   * 未设置时 `mergeLore` 一并保持「不写这个键」，宿主继续用默认预算。
+   */
+  tokenBudget?: number
   recursiveScanning: boolean
   unknown: Record<string, unknown>
 }
@@ -129,7 +138,8 @@ export const BOOK_DEFAULTS = {
   name: '',
   description: '',
   scanDepth: 2,
-  tokenBudget: 500,
+  // ⚠️ 故意不给 tokenBudget 默认值（与纪律 3 同源）：宿主语义「没有该字段 = 默认 6000 字预算」，
+  // 塞 500 一保存就把别人的书砍到 750 字。原书没写就保持没写（tokenBudget?: undefined）。
   recursiveScanning: false,
 } as const
 
@@ -177,6 +187,21 @@ function asNumber(value: unknown, fallback: number): number {
     if (Number.isFinite(parsed)) return parsed
   }
   return fallback
+}
+
+/**
+ * 读「可选数值」：原书写了（数字或数字字符串）才给出数值，没写 / 非法 → undefined。
+ *
+ * 与 `asNumber` 的差别就是缺省**不落默认值** —— `token_budget` 这类「未设置 
+ * 语义由宿主定义」的字段必须用它（见 `LoreBookDraft.tokenBudget` 的注释）。
+ */
+function asOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
 }
 
 function asBoolean(value: unknown, fallback: boolean): boolean {
@@ -277,7 +302,9 @@ export function toLoreDraft(ccv3OrBook: unknown, seed = 'lore'): { book: LoreBoo
     name: asText(source['name']),
     description: asText(source['description']),
     scanDepth: asNumber(source['scan_depth'], BOOK_DEFAULTS.scanDepth),
-    tokenBudget: asNumber(source['token_budget'], BOOK_DEFAULTS.tokenBudget),
+    // token_budget 只在原书写了时才带回来（数字 / 数字字符串都认）；
+    // 没写就是 undefined —— 宿主会用默认 6000 字预算，我们绝不替它回填。
+    tokenBudget: asOptionalNumber(source['token_budget']),
     recursiveScanning: asBoolean(source['recursive_scanning'], BOOK_DEFAULTS.recursiveScanning),
     unknown: pickUnknown(source, BOOK_MANAGED),
   }
@@ -337,7 +364,11 @@ export function mergeLore(original: unknown, book: LoreBookDraft, entries: LoreE
   out['name'] = book.name
   out['description'] = book.description
   out['scan_depth'] = Math.max(0, Math.round(book.scanDepth))
-  out['token_budget'] = Math.max(0, Math.round(book.tokenBudget))
+  // token_budget：原书没写（tokenBudget === undefined）就**保持没写这个键** ——
+  // 宿主语义「未设置 = 默认 6000 字预算」（tavern.ts:1634-1641）；硬塞 500 会把
+  // 整本书的注入预算从 6000 字砍到 750 字。写了才按草稿的值更新。
+  if (book.tokenBudget === undefined) delete out['token_budget']
+  else out['token_budget'] = Math.max(0, Math.round(book.tokenBudget))
   out['recursive_scanning'] = book.recursiveScanning
   out['entries'] = entries.map(toEntryRaw)
 

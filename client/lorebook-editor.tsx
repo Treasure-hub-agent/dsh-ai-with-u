@@ -72,6 +72,17 @@ function limitOf(code: LoreIssue['code']): number {
   return 0
 }
 
+/**
+ * 数值输入（token_budget 专用）：空串 / 清空 → 「未设置」（undefined），
+ * 宿主会退回默认预算 6000 字；原书没写时输入框显示空，不会冒出一个假默认值。
+ */
+function asOptionalInt(raw: string, fallback: number | undefined): number | undefined {
+  if (raw.trim() === '') return undefined
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.round(parsed)
+}
+
 /** 数值输入：空串按 0 处理，其它按最近的整数（规范里这两个字段都是整数）。 */
 function asInt(raw: string, fallback: number): number {
   if (raw.trim() === '') return fallback
@@ -627,11 +638,16 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
                     </label>
                     <label className="awu-editField">
                       <span className="awu-editFieldKey">{t('lore.tokenBudget')}</span>
+                      {/*
+                        可选字段（宿主语义：没写 = 默认 6000 字预算）：
+                        原书没写显示空（placeholder 说明含义），清空即恢复「未设置」——不塞假默认值。
+                      */}
                       <input
                         className="awu-input awu-editInput"
                         type="number"
-                        value={String(book.tokenBudget)}
-                        onChange={event => onChangeBook({ tokenBudget: asInt(event.target.value, book.tokenBudget) })}
+                        placeholder={t('lore.tokenBudgetOptional')}
+                        value={book.tokenBudget === undefined ? '' : String(book.tokenBudget)}
+                        onChange={event => onChangeBook({ tokenBudget: asOptionalInt(event.target.value, book.tokenBudget) })}
                       />
                     </label>
                   </div>

@@ -24,6 +24,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { makeReq, makeRes, restCall } from './helpers.mjs'
 
 const root0 = new URL('..', import.meta.url).pathname
 const root = process.platform === 'win32' ? root0.replace(/^\/([A-Za-z]:)/, '$1') : root0
@@ -32,8 +33,9 @@ const lib = (name) => pathToFileURL(join(root, 'lib', name)).href
 let failed = 0
 let passed = 0
 const ok = (msg) => { passed += 1; console.log(`  ✓ ${msg}`) }
-const fail = (msg) => { failed += 1; console.error(`  ✗ ${msg}`) }
-const check = (cond, msg) => (cond ? ok(msg) : fail(msg))
+// detail 是可选的定位信息（期望/实际值、堆栈摘要）；现有调用点可不传，风格对齐 verify-tavern 的 fail
+const fail = (msg, detail) => { failed += 1; console.error(`  ✗ ${msg}${detail === undefined ? '' : `\n      ${detail}`}`) }
+const check = (cond, msg, detail) => (cond ? ok(msg) : fail(msg, detail))
 const section = (title) => console.log(`\n${title}`)
 
 // ---------------------------------------------------------------- 临时存储根
@@ -55,47 +57,10 @@ const {
 const store = new Store(sandbox)
 const NAME = '测试角色'
 
-// ---------------------------------------------------------------- 新增断言共用的夹具
+// ---------------------------------------------------------------- 调用点
 
-/** 假 ServerResponse：把状态码与 JSON 体收进普通对象。 */
-const restRes = () => {
-  const out = { status: 0, body: undefined }
-  return {
-    out,
-    res: {
-      setHeader: () => {},
-      writeHead: (status) => { out.status = status },
-      end: (bytes) => {
-        try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes ?? '') }
-      },
-    },
-  }
-}
-
-/** 假 IncomingMessage：带本机 Host（来源栅栏放行）与可选 JSON 请求体。 */
-const restReq = (opts = {}) => {
-  const body = opts.body === undefined ? '' : JSON.stringify(opts.body)
-  return {
-    method: opts.method ?? 'GET',
-    url: opts.url ?? '/',
-    headers: {
-      host: '127.0.0.1:50143',
-      ...(body === '' ? {} : { 'content-type': 'application/json' }),
-      ...(opts.headers ?? {}),
-    },
-    socket: { localAddress: '127.0.0.1' },
-    async *[Symbol.asyncIterator]() { if (body !== '') yield Buffer.from(body) },
-  }
-}
-
-/** 调一条已注册的 REST 路由（路径只写 / 之后的部分）。 */
-const restCall = async (routes, method, suffix, opts = {}) => {
-  const route = routes.find(r => r.path === `/_dsh/ai-with-u${suffix}`)
-  if (route === undefined) return { status: -1, body: undefined }
-  const { out, res } = restRes()
-  await route.handler(restReq({ method, ...opts }), res)
-  return out
-}
+// HTTP fake 夹具（makeRes / makeReq / restCall）已统一抽到 scripts/helpers.mjs：
+// 带 socket.localAddress（来源栅栏将来读 socket 时不静默假绿），单一真源。
 
 /**
  * 造一个最小的提示词宿主（收集 section 注册）并启用 {@link NAME}。
@@ -568,32 +533,7 @@ section('11. REST 来源栅栏：跨站写/删与 DNS rebinding 都要挡住')
     refresh: async () => {},
   }
   const routes = buildRoutes(store, fakePrompt)
-  const routeOf = (suffix) => routes.find(r => r.path === `/_dsh/ai-with-u${suffix}`)
-  const makeRes = () => {
-    const out = { status: 0, body: '' }
-    return {
-      out,
-      res: { setHeader: () => {}, writeHead: s => { out.status = s }, end: b => { out.body = String(b ?? '') } },
-    }
-  }
-  const makeReq = (opts = {}) => {
-    const body = opts.body ?? ''
-    const headers = { host: '127.0.0.1:50143', ...(opts.headers ?? {}) }
-    return {
-      method: opts.method ?? 'POST',
-      url: '/x',
-      headers,
-      socket: { localAddress: '127.0.0.1' },
-      async *[Symbol.asyncIterator]() { if (body !== '') yield Buffer.from(body) },
-    }
-  }
-  const call = async (method, suffix, opts = {}) => {
-    const route = routeOf(suffix)
-    if (route === undefined) return { status: -1, body: '' }
-    const { out, res } = makeRes()
-    await route.handler(makeReq({ method, ...opts }), res)
-    return out
-  }
+  const call = (method, suffix, opts = {}) => restCall(routes, method, suffix, opts)
 
   check((await call('GET', '/distill/state')).status === 200, '同源本机请求放行')
   check((await call('GET', '/distill/state', { headers: { host: 'evil.example' } })).status === 403, '陌生 Host 被拒（DNS rebinding）')

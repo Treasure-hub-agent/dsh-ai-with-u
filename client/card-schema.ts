@@ -440,8 +440,6 @@ export const LEGACY_GROUP_TITLES: Record<string, string> = {
 export const LENGTH_LIMITS = {
   /** `description` 投影后 */
   descriptionChars: 1200,
-  /** L1 静态块（1–12 段合计） */
-  l1Chars: 3000,
 } as const
 
 export type ExportIssueLevel = 'bad' | 'warn' | 'info'
@@ -451,7 +449,6 @@ export interface ExportIssue {
     | 'empty-description'
     | 'empty-first-mes'
     | 'description-too-long'
-    | 'l1-too-long'
     | 'legacy-extra'
     | 'unmapped-native'
   level: ExportIssueLevel
@@ -492,7 +489,6 @@ export function exportIssues(card: Card | undefined, ccv3?: Card): ExportIssue[]
   const aiwu = asObject(extensions['aiwu'])
   const legacy = asObject(aiwu['legacy'])
   const imported = asObject(aiwu['imported'])
-  const lengthInfo = asObject(aiwu['length'])
 
   const basic = asObject(card?.['basic'])
   const openingBucket = card ?? {}
@@ -514,11 +510,13 @@ export function exportIssues(card: Card | undefined, ccv3?: Card): ExportIssue[]
     issues.push({ code: 'empty-first-mes', level: 'bad', groupId: 'opening', key: 'opening' })
   }
 
-  // L1 预算：优先用后端现算的值（架构稿 §8.2），拿不到就不猜
-  const l1Chars = typeof lengthInfo['l1Chars'] === 'number' ? lengthInfo['l1Chars'] : undefined
-  if (l1Chars !== undefined && l1Chars > LENGTH_LIMITS.l1Chars) {
-    issues.push({ code: 'l1-too-long', level: 'warn', detail: String(l1Chars) })
-  }
+  /*
+   * ⚠️ `l1-too-long` 分支已删（2026-11-01，审查低危项）：它读
+   * `extensions.aiwu.length.l1Chars`，但宿主后端**从不写这个键**（tavern.ts 的
+   * lengthWarnings 不落盘）→ 判断条件永远为假，是死分支。要本地按 L1 投影估算
+   * 代价又大（得拼全渲染流程），而且 `exportIssues` 目前没有 UI 调用方 ——
+   * 删掉比养着一条永不触发的告警便宜。将来宿主若开始给 `l1Chars`，再连数据源一起接。
+   */
 
   if (Object.keys(asObject(legacy['extra'])).length > 0) {
     issues.push({ code: 'legacy-extra', level: 'info', detail: String(Object.keys(asObject(legacy['extra'])).length) })

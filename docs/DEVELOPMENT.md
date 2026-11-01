@@ -269,7 +269,7 @@ ellipsis 没有裁切上下文。
 }
 ```
 
-`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 九套自检`，
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 全链自检（八套，见下方自检一节）`，
 另有独立的 `npm run typecheck:client`。
 
 > 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
@@ -503,24 +503,27 @@ dsh-ai-with-u/
 
 ```bash
 npm install
-npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 九套自检（合计 981 项）
+npm run build          # tsc(宿主) + tsc(前端类型) + 前端打包 + 全链自检（各套通过项总数以 verify 输出为准）
 npm run build:host     # 只编宿主
 npm run build:client   # 只打包前端
 npm run typecheck:client # 只查前端类型（noEmit）
-npm run verify         # 产物自检（15 项）
-npm run verify:wiring  # 接线体检（18 项）
-npm run verify:session # 会话/指令自检（184 项）
-npm run verify:host    # 真实 cordis 宿主验证（55 项）
+npm run verify         # 产物自检
+npm run verify:wiring  # 接线体检
+npm run verify:session # 会话/指令自检
+npm run verify:host    # 真实 cordis 宿主验证
 ```
 
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
 > **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
-> `npm run build` 现在依次跑 **产物自检 → `verify-tavern`(218 项) → `verify-import`(49 项) → `verify-session`(184 项) → `verify-host`(55 项)**，
+> `npm run build` 现在依次跑 **产物自检 → `verify-tavern` → `verify-import` → `verify-session` → `verify-host`**，
 > 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
+> （历史快照里的各套项数已删除：断言增减是常态，各套总数以当次 verify 输出为准。）
 
-> **2026-10-31 追加**：`verify-bundle`(9 项) 与 `verify-wiring`(18 项) 也进了 `build` 串，位置在 `verify-bundle` 之后；
-> 九套合计 **1025 项**（截至预设重量/宏口径轮）。README 徽章按这个口径计（旧徽章的 515 只数六套，不含 `verify` 与 `verify-wiring`）。
+> **2026-10-31 追加**：`verify-bundle` 与 `verify-wiring` 也进了 `build` 串，位置在产物自检（`verify.mjs`）之前——bundle 先验产物可加载，wiring 随后做接线体检；
+> 合计数以 verify 输出实测为准（旧徽章的 515 只数六套，不含 `verify` 与 `verify:wiring`，口径变更曾导致图表数字跳变）。
+
+> **2026-11-01 快照**：全链 `npm run build` 实测各套 `verify 16 + bundle 9 + wiring 72 + tavern 306 + distill 121 + import 58 + session 324 + host 126 = 1032`，README 徽章按它回填；断言再增减时重测回填，此处快照不再逐次更新。
 
 ### 安装到 DSH（desktop profile）
 
@@ -828,9 +831,9 @@ document 级：dragover/drop    → preventDefault() + stopPropagation()   // �
 > **AI 补全的名字一致性**——`awu_card_save` 的 `overwrite:true` 按名字匹配，AI 若按自己推断的名字落盘，
 > 结果不是补全而是**多出一张壳卡**；现在 `flow-create.md` 里写死了「按给定名字 + overwrite 覆盖」，`[14]` 守着它。
 
-### 集成验收记录（F2，九套全量）
+### 集成验收记录（F2，全链自检）
 
-`npm run build` 一次过，九套自检合计 **720 项通过 / 0 失败**（日志里 ✓ 720、✗ 0，`exit=0`）：
+`npm run build` 一次过，全链自检合计 **720 项通过 / 0 失败**（日志里 ✓ 720、✗ 0，`exit=0`）：
 
 | 自检 | 通过项 |
 |---|---|
@@ -999,7 +1002,7 @@ window.addEventListener('dragend', reset)     // ← 唯一的「拖拽结束」
 > **卸载兜底** `useEffect(() => () => resetHostDropState(), [])`。三处调用点分别是 document 捕获监听的
 > drop 分支、`open` effect 的 cleanup、组件卸载。多调没有副作用（宿主 `reset` 幂等，只把深度归零 + 关遮罩）。
 
-### 集成验收记录（G4，九套全量）
+### 集成验收记录（G4，全链自检）
 
 `npm run build` 一次过，**784 项通过 / 0 失败**（日志 ✓784 / ✗0，`exit=0`）。build 串 11 步 = `tsc`×2 + esbuild + 8 个自检脚本：
 
@@ -1188,7 +1191,7 @@ README 的矩阵里，「支持」全部对应**代码里真的生效**；下面
 **一句话口径**：「不报错」≠「支持」；「字段保留」≠「功能生效」。矩阵里只有标 ✅ 的那几行属于真正生效。
 这条已进项目纪律；判 `position` 数字值、`probability` 顶层位置两条在修好之前，矩阵里保持 ⚠️ 半支持，不许提前升级。
 
-### 集成验收记录（I4，九套全量）
+### 集成验收记录（I4，全链自检）
 
 `npm run build` 一次过，**840 项通过 / 0 失败**（`exit=0`）：`bundle 9 + wiring 54 + verify 15 + tavern 289 + distill 121 + import 58 + session 212 + host 82`。
 产物抽查 18 项全命中（`lib/import-card.js` 里 `data['regex_scripts']` / `extensions['regex_scripts']` / 「本插件不执行酒馆正则脚本」/「深度提示（depth_prompt」；`lib/tavern.js` 里 `constantBudgetChars` / `constantDropped` / `keywordDropped` / `expandKeyList` / `lorePositionOf`；`lib/client.js` 里 `data-level` / `lore.level.` / `constantDropped`）。
@@ -1299,7 +1302,7 @@ export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示�
 2. **任何「按会话」的状态都要有上限与失效策略**：`Map` + LRU（32）+ 明确淘汰；绑定表用内存镜像，渲染路径零读盘（否则每次组装读五次盘）。
 3. **本地隔离的不变量要同时覆盖三层**：提示词（段渲染）、工具（写日记/查关系）、存储（`session.json`/日记按决议角色落盘）。只改一层的「隔离」是假隔离，而且比不隔离更难排查。
 
-### 集成验收记录（L1，九套全量）
+### 集成验收记录（L1，全链自检）
 
 `npm run build` 一次过，**914 项通过 / 0 失败**：`bundle 9 + wiring 63 + verify 15 + tavern 303 + distill 121 + import 58 + session 251 + host 94`。
 `verify-wiring` 23 组 / 63 项全绿；新增两组：
@@ -1407,10 +1410,10 @@ export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示�
 > （第一次跑我读错了返回字段 `r.preset.modules`，结果全是 0——`ConvertedPreset` 的字段是 `modules` 直挂，
 > 不在 `preset` 下面。丢数列因为读的是 `r.dropped` 所以与我无关地对了，正好反证「只对一半时最容易信」。）
 
-### 集成验收记录（M3，九套全量）
+### 集成验收记录（M3，全链自检）
 
-`npm run build` 一次过，**981 项通过 / 0 失败**：`bundle 9 + wiring 72 + verify 16 + tavern 303 + distill 121 + import 58 + session 286 + host 116`。
-`verify-wiring` **25 组 / 72 项全绿、0 skip**（新增 `[24]` 预设接线 5 条、`[25]` ST 判据对齐 4 条）。
+`npm run build` 一次过，全链通过 / 0 失败（**历史快照**：当时的 `981 项 = bundle 9 + wiring 72 + verify 16 + tavern 303 + distill 121 + import 58 + session 286 + host 116`；v0.5.0 起各套计数随断言增减，现行总数以 verify 输出实测为准，不再回填到这里）。
+`verify-wiring` 全绿、0 skip（新增 `[24]` 预设接线 5 条、`[25]` ST 判据对齐 4 条）。
 
 产物抽查 16 项全命中：
 - `lib/client.js`（352.2 KB）：`preset.title`、`/presets`、`/preset/import`、「预设」、`结构占位`（丢弃原因文案）

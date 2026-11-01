@@ -55,6 +55,7 @@ import {
   createArm,
   sendFailureText,
   useComposerReady,
+  useComposerSession,
 } from './distill'
 import {
   dragHasFiles,
@@ -146,26 +147,40 @@ const MODE_OPTIONS: Array<{ value: InteractionMode; labelKey: string; hintKey: s
  * 面板据此知道该发 `card`、发 `ccv3`，还是两步都发（见 `onSaveCard`）。
  */
 /**
- * 读 `/overview.bindings`（`sessionId → 角色名`）。
+ * 读 `/overview.bindings`（转成面板用的 `sessionId → 角色名` 表）。
  *
- * 容错到底：宿主可能给 `Record<string,string>`、也可能给 `{sessionId,name}[]`；
+ * 三种形状都认（容错到底，2026-11-01 对齐宿主后补第三分支，见审查 H5）：
+ *  1. 宿主本体：包装对象 `{count, current, effective, items:[{sessionId, character, boundAt}]}` —— **items 的角色键叫 `character`**；
+ *  2. 纯数组：`[{sessionId, name|character}]`；
+ *  3. 旧扁平 map：`Record<sessionId, 角色名>`。
  * 认不出来就返回空表 —— 空表等于「不知道」，界面据此只显示全局，绝不瞎猜。
  */
 function readBindings(value: unknown): Record<string, string> {
   const out: Record<string, string> = {}
   if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item !== 'object' || item === null) continue
-      const row = item as { sessionId?: unknown; name?: unknown; character?: unknown }
-      const key = typeof row.sessionId === 'string' ? row.sessionId : ''
-      const name = typeof row.name === 'string' ? row.name : typeof row.character === 'string' ? row.character : ''
-      if (key !== '' && name !== '') out[key] = name
-    }
-    return out
+    return readBindingRows(value)
   }
   if (typeof value !== 'object' || value === null) return out
-  for (const [key, name] of Object.entries(value as Record<string, unknown>)) {
+  const record = value as Record<string, unknown>
+  // 宿主形状：`items` 是摘要数组；认出他就取 items，别落到第 3 分支把 count 之类的数字键当会话 id
+  if (Array.isArray(record['items'])) {
+    return readBindingRows(record['items'])
+  }
+  for (const [key, name] of Object.entries(record)) {
     if (key !== '' && typeof name === 'string' && name !== '') out[key] = name
+  }
+  return out
+}
+
+/** 绑定行数组 → `sessionId → 角色名`（行的角色键 `character` / `name` 都认）。 */
+function readBindingRows(rows: unknown[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const item of rows) {
+    if (typeof item !== 'object' || item === null) continue
+    const row = item as { sessionId?: unknown; name?: unknown; character?: unknown }
+    const key = typeof row.sessionId === 'string' ? row.sessionId : ''
+    const name = typeof row.name === 'string' ? row.name : typeof row.character === 'string' ? row.character : ''
+    if (key !== '' && name !== '') out[key] = name
   }
   return out
 }
@@ -204,8 +219,15 @@ function Overlay(props: {
   children: JSX.Element | JSX.Element[]
   /** 弹层里「没落在拖放区上」的文件：默认只是吞掉；传了就顺手回调（用于给一句提示） */
   onFilesDropped?: (files: FileList) => void
+  /**
+   * 嵌套的专注编辑层（FocusEditor）开着时让位：Esc 处理**直接 return**，
+   * 把 Esc 留给内层（它会先出「丢弃确认」再关）。
+   * 否则一次 Esc 同时触发内层下线与 `onClose`，未保存的模块编辑无声全丢
+   * （约定见 `editor-focus.tsx:12-13`，正确做法参照 `card-editor.tsx:322-323` 的 loreFocus）。
+   */
+  escYield?: boolean
 }): JSX.Element {
-  const { label, onClose, children, onFilesDropped } = props
+  const { label, onClose, children, onFilesDropped, escYield = false } = props
   const boxRef = useRef<HTMLDivElement | null>(null)
   useScrollLock(true)
 
@@ -217,13 +239,16 @@ function Overlay(props: {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        // 内层专注编辑层开着：Esc 归它，壳层什么都不做（也不 stopPropagation，
+        // 内层自己会 stop；不同文档级监听靠注册顺序不会互相拦掉）。
+        if (escYield) return
         event.stopPropagation()
         onClose()
       }
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose])
+  }, [onClose, escYield])
 
   // 兜底：弹层卸载时再复位一次——万一拖放在中途被别的东西吃掉（Esc、焦点切换）
   // 没走到 drop，宿主的计数器也得有人归零
@@ -1786,6 +1811,18 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [sessionId, setSessionId] = useState('')
   const [bindings, setBindings] = useState<Record<string, string>>({})
 
+  /**
+   * 面板自己的会话 id 来源（审查 H4 修复的另一半）：
+   * 面板在 `sidebar.footer.action` 席位拿不到 `sessionId` prop，只能借 DockSink
+   * 的模块级 sink 转交（与输入框能力同一份真源）。拿它去拼 `?sessionId=` 请求，
+   * 宿主识别后会在 `overview.sessionId` 原样回显，回显值才写进上面的 `sessionId` state
+   * ——宿主不认的 id 不会变成「可用」。
+   */
+  const sinkSessionId = useComposerSession()
+  /** 会话 id 的镜像 ref：loadDetail 要在稳定的 useCallback 里读最新值，不让回调身份跟着变。 */
+  const sessionIdRef = useRef('')
+  useEffect(() => { sessionIdRef.current = sinkSessionId }, [sinkSessionId])
+
   const [detailName, setDetailName] = useState('')
   const [detail, setDetail] = useState<CharacterDetail | undefined>(undefined)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -1802,6 +1839,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 角色卡编辑器
   const [editing, setEditing] = useState(false)
   const [editError, setEditError] = useState('')
+  // 预设弹层里的专注编辑层（FocusEditor）开关：开着时 Overlay 的 Esc 要让位
+  // （约定同 card-editor 的 loreFocus，见 editor-focus.tsx:12-13）。
+  const [presetFocusOpen, setPresetFocusOpen] = useState(false)
   // 编辑器草稿是否脏：面板收起/卸载前必须据此拦一道，否则一屏编辑无声丢失
   const [editorDirty, setEditorDirty] = useState(false)
   // 递增信号：面板要求编辑器「走一遍未保存确认」（点入口/点遮罩时用）
@@ -1886,14 +1926,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     try {
       const [chars, ov] = await Promise.all([
         fetchCharacters(),
-        fetchOverview().catch(() => undefined),
+        // 带上「面板所在会话」：宿主只认 query（web.ts:222-223），不带的运行是全局视角；
+        // sink 还没就绪时原样按空串发（宿主回显空 → 界面走「当前会话不可识别」降级）。
+        fetchOverview(sinkSessionId).catch(() => undefined),
       ])
       if (!aliveRef.current) return
       setList(chars)
       if (ov !== undefined) {
         setOverview(ov)
         setActive(ov.active ?? { enabled: false })
-        // 会话绑定：老宿主没有这两个字段 → 空串 / 空表（界面自动退化成只用全局）
+        // 会话绑定：老宿主没有这几个字段 → 空串 / 空表（界面自动退化成只用全局）
         setSessionId(typeof ov.sessionId === 'string' ? ov.sessionId : '')
         setBindings(readBindings(ov.bindings))
       }
@@ -1904,7 +1946,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     } finally {
       if (aliveRef.current) setLoading(false)
     }
-  }, [])
+  }, [sinkSessionId])
 
   useEffect(() => { void reload() }, [reload])
 
@@ -1933,7 +1975,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     detailSeq.current = seq
     setDetailLoading(true)
     try {
-      const body = await fetchCharacter(name)
+      // 详情页的绑定兜底（binding.boundHere）是宿主按 query 上的 sessionId 算的，
+      // 不带就把那格退化成全局视角 —— 这里带上面板所在会话（ref，防止回调身份抖动）。
+      const body = await fetchCharacter(name, sessionIdRef.current)
       if (!aliveRef.current || seq !== detailSeq.current) return
       setDetail(body)
       setDetailError('')
@@ -1969,10 +2013,23 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const reloadQuietly = useCallback(async (): Promise<void> => {
     try {
-      const [chars, ov] = await Promise.all([fetchCharacters(), fetchOverview().catch(() => undefined)])
+      const [chars, ov] = await Promise.all([
+        fetchCharacters(),
+        // 同 reload：带上「面板所在会话」，5 秒轮询也要按会话视角刷新绑定 / 预设
+        fetchOverview(sinkSessionId).catch(() => undefined),
+      ])
       if (!aliveRef.current) return
-      // 5 秒轮询：数据没变就别 setState（否则整棵树每 5 秒白重渲染一次）
-      const signature = JSON.stringify([chars, ov?.active ?? null])
+      // 5 秒轮询：数据没变就别 setState（否则整棵树每 5 秒白重渲染一次）。
+      // 签名必须覆盖**整份 overview 的会话相关部分**（active / bindings / stats / preset）：
+      // 漏了的话 stats 页与绑定徽标在轮询路径上永远不更新（2026-11-01 审查低危项）。
+      const signature = JSON.stringify([
+        chars,
+        ov?.active ?? null,
+        ov?.sessionId ?? '',
+        ov?.bindings ?? null,
+        ov?.stats ?? null,
+        ov?.preset ?? null,
+      ])
       if (signature === quietSig.current) return
       quietSig.current = signature
       setList(chars)
@@ -1985,7 +2042,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     } catch (error) {
       console.warn('[ai-with-u] 面板静默刷新失败（下轮重试）：', error)
     }
-  }, [])
+  }, [sinkSessionId])
 
   useEffect(() => {
     if (!open) return undefined
@@ -2238,7 +2295,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const onReset = (scope: 'session' | 'all'): void => {
     setBusy(true)
     setDialogError('')
-    void resetSession(scope).then(result => {
+    // 重置的是「正在看的那位」（日记页里展示的角色），不是启用角色 ——
+    // 开着角色 A、翻角色 B 的日记点「彻底重置」，被清的必须是 B。
+    // 与同页 forgetKeyword / editDiary 同一口径：看不了谁就不带 name，宿主回落当前启用角色。
+    void resetSession(scope, viewName === '' ? undefined : viewName).then(result => {
       setDialog('')
       if (scope === 'session') showNotice(t('reset.sessionDone', { n: result.diaryKept ?? 0 }), 'ok')
       else showNotice(t('reset.allDone', { n: result.diaryRemoved ?? 0 }), 'ok')
@@ -2319,10 +2379,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }
 
   const onNextOpening = (): void => {
-    if (liveName === '') return
+    // 换的是「本会话实际生效的角色」：绑定优先，其次全局。
+    // 按钮只长在状态带（sessionName 非空才渲染）里，以前判 liveName 导致
+    // 「绑定了但没全局启用」时点了没反应（宿主 /opening/next 支持显式 name，web.ts:812-824）。
+    if (sessionName === '') return
     setBusy(true)
     setOpeningNote('')
-    void nextOpening(liveName).then(result => {
+    void nextOpening(sessionName).then(result => {
       if (result.needGenerate === true) setOpeningNote(t('opening.needGenerate'))
       else if (result.history) setOpeningNote(t('opening.history'))
       else setOpeningNote(t('opening.rotated'))
@@ -2359,14 +2422,33 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const currentDetail = detailName !== '' && detailName === detail?.name ? detail : undefined
   // 日记页用的是 viewName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
   const diaryDetail = diaryTarget !== '' && detail !== undefined && detail.name === diaryTarget ? detail : undefined
+
+  /**
+   * 详情数据自带的「这张卡绑在本会话」信号。
+   *
+   * 优先读宿主本体的嵌套形状 `binding:{boundHere, sessions, global}`（`src/web.ts:524-533`）；
+   * 自定义宿主 / 断更版本没有嵌套对象时，退回旧扁平字段（boundHere / boundSessionId，向后兼容别删）。
+   * 请求侧已把面板所在会话随 `?sessionId=` 送去（见 `fetchCharacter`），宿主才算得出这格。
+   */
+  const detailSaysBoundHere = (name: string): boolean => {
+    if (sessionId === '' || name === '' || currentDetail === undefined || currentDetail.name !== name) return false
+    const binding = currentDetail.binding
+    if (typeof binding === 'object' && binding !== null) {
+      if (binding.boundHere === true) return true
+      if (Array.isArray(binding.sessions) && binding.sessions.includes(sessionId)) return true
+    }
+    // 旧扁平容错字段（向后兼容自定义宿主，别删）
+    return currentDetail.boundHere === true || currentDetail.boundSessionId === sessionId
+  }
+
   /**
    * 本会话绑定的角色（`bindings[sessionId]`）。
    *
-   * 宿主没给 bindings 时退一步读 `GET /character` 的容错字段（只对「当前打开的那张卡」有效）：
+   * 绑定表认不出时，退一步信当前打开的那张卡自带的绑定信号（见上）：
    * 这样做的好处是「绑定刚被别处改过、overview 还没刷新」时详情页也不会闪成未绑定。
    */
   const boundName = sessionId !== ''
-    ? (bindings[sessionId] ?? (currentDetail?.boundHere === true && currentDetail.name !== '' ? currentDetail.name : ''))
+    ? (bindings[sessionId] ?? (currentDetail !== undefined && detailSaysBoundHere(currentDetail.name) ? currentDetail.name : ''))
     : ''
   /** 本会话实际生效的角色：绑定优先，其次全局 */
   const sessionName = boundName !== '' ? boundName : globalName
@@ -2374,12 +2456,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   /** 同一张卡既绑了本会话又是全局角色：只显示一次，标「本会话 / 全局」 */
   const bothSame = boundName !== '' && boundName === globalName
 
-  /** 详情页这张卡是否已绑定在本会话（优先 bindings，其次 GET /character 的容错字段） */
+  /** 详情页这张卡是否已绑定在本会话（优先 bindings 表，其次详情数据自带的绑定信号） */
   const isBoundHere = (name: string): boolean => {
     if (name === '' || sessionId === '') return false
     if (bindings[sessionId] !== undefined) return bindings[sessionId] === name
-    return currentDetail?.name === name
-      && (currentDetail?.boundHere === true || currentDetail?.boundSessionId === sessionId)
+    return detailSaysBoundHere(name)
   }
 
   /**
@@ -3044,10 +3125,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
           {/* 预设：列表 / 编辑 / 导入三态，内容本体在 preset-view.tsx */}
           {dialog === 'preset' && (
-            <Overlay label={t('preset.title')} onClose={() => setDialog('')}>
+            <Overlay label={t('preset.title')} onClose={() => setDialog('')} escYield={presetFocusOpen}>
               <PresetPanel
                 t={t}
                 sessionId={sessionId}
+                onFocusLayerChange={setPresetFocusOpen}
                 onChanged={() => { void reload() }}
                 onClose={() => setDialog('')}
               />
@@ -3092,7 +3174,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
           {dialog === 'resetAll' && (
             <ResetAllDialog
-              name={liveName}
+              // 名字用「正在看的角色」：弹窗标题必须与实际被重置的对象一致（同 onReset 的口径）
+              name={viewName}
               busy={busy}
               scope="all"
               onCancel={() => setDialog('')}
@@ -3102,7 +3185,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
           {dialog === 'resetSession' && (
             <ResetAllDialog
-              name={liveName}
+              name={viewName}
               busy={busy}
               scope="session"
               onCancel={() => setDialog('')}

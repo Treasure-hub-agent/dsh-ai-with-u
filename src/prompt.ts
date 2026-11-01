@@ -478,6 +478,33 @@ export class PromptController {
   private chain: Promise<void> = Promise.resolve()
   /** 缓存代际：只有最新一代的刷新结果才允许提交。 */
   private generation = 0
+  /**
+   * 子代理会话判定（可选，由 index.ts 注入宿主 `agents.roots()` 判据）。
+   *
+   * 判定为子代理的会话在**注入侧**一律视为未启用（包括不回落全局人设/全局预设）：
+   * 子代理 / 任务看板 / 定时任务跑的是工程会话，L0 + 纪律包会改写工程产出。
+   * 与写路径（`agents.roots()` 过滤会话写盘）共享同一判据，注入/写入不再不对称。
+   * 只影响渲染与预览；`characterForSession` 等工具决议路径不受影响。
+   */
+  private subAgentCheck?: (sessionId: string | undefined, assembly: unknown) => boolean
+
+  /** 注入子代理判定（宿主侧实现，见 index.ts 的 registerAgentHooks 判据）。 */
+  setSubAgentPredicate(fn: (sessionId: string | undefined, assembly: unknown) => boolean): void {
+    this.subAgentCheck = fn
+  }
+
+  /**
+   * 该次组装 / 预览是不是子代理会话：判定器未注入或判定时抛错都按**主会话**处理——
+   * 宁可误注入也不误吞主会话的人设（判定失效不能让角色消失）。
+   */
+  private isSubAgentAssembly(assembly: unknown, sessionId: string | undefined): boolean {
+    if (this.subAgentCheck === undefined) return false
+    try {
+      return this.subAgentCheck(sessionId, assembly) === true
+    } catch {
+      return false
+    }
+  }
 
   constructor(
     private readonly store: Store,
@@ -717,7 +744,17 @@ export class PromptController {
     }
     const saved = await this.store.readActive()
     if (saved.enabled && saved.character !== undefined) {
-      const card = await this.store.readCcV3(saved.character)
+      let card: CharacterCardV3 | undefined
+      try {
+        card = await this.store.readCcV3(saved.character)
+      } catch (error) {
+        // 角色名本身是脏的（手改过 _active.json：含路径分隔符 / 超长 / 非法字符，normalizeName 抛错）：
+        // 按「卡不存在」静默拔出——绝不能让 restore() reject 拖垮整个插件挂载
+        // （风格对齐 store.pruneBindings 对同一问题的 try/catch）。
+        this.host.logger.warn('恢复启用态失败（脏角色名按卡不存在处理，静默拔出）：%s',
+          error instanceof Error ? error.message : String(error))
+        card = undefined
+      }
       if (card === undefined) {
         // 角色卡已不存在：静默拔出，不带着坏状态启动
         this.state = { enabled: false }
@@ -951,6 +988,21 @@ export class PromptController {
           this.noteBindingsDead(dead)
           this.bindings = await this.store.readBindings()
         } catch { /* 标记失败不阻断渲染路径：内存 deadSlots 仍然生效 */ }
+        return
+      }
+      if (target.source === 'global') {
+        // 全局启用的卡在运行期被外部删掉/改名：**自愈**——清缓存 + 静默拔出 + 回写 _active.json。
+        // 以前这里直接 return：旧缓存每轮照注入整卡人设，commitTurn 还会把已删角色的
+        // session.json / 目录 / 索引重建出来（与会话绑定分支的 dead 处理同一语义）。
+        try {
+          await this.deactivate()
+          const line = `全局启用的角色「${name}」已不存在：已静默拔出（缓存已清、_active.json 已回写）`
+          ;(host?.warn ?? host?.info ?? host?.error)?.call(host, line)
+          this.host.logger.warn(line)
+        } catch (error) {
+          this.host.logger.error('全局启用卡失效后的拔出回写失败：%s',
+            error instanceof Error ? error.message : String(error))
+        }
       }
       return
     }
@@ -1075,6 +1127,8 @@ export class PromptController {
    */
   private renderActiveSection(ctx?: unknown): string {
     const sessionId = readSessionId(ctx)
+    // 子代理 / 看板 / 定时会话是工程会话：不注入人设（连全局都不回落）
+    if (this.isSubAgentAssembly(ctx, sessionId)) return ''
     const target = this.resolveTarget(sessionId)
     if (target.character === undefined) return ''
     const cache = this.cacheOf(target.key)
@@ -1128,13 +1182,19 @@ export class PromptController {
    * 不给 = 全局视角（面板默认）。
    */
   preview(sessionId?: string): PreviewSnapshot {
-    const target = this.resolveTarget(sessionId)
+    // 预览与真实注入走同一判据：子代理会话一律「未启用 / 无预设」（不回落全局）
+    const subAgent = this.isSubAgentAssembly(undefined, sessionId)
+    const target: SessionTarget = subAgent
+      ? { key: sessionId ?? '', source: 'none' }
+      : this.resolveTarget(sessionId)
     const character = target.character
     const cache = character === undefined ? undefined : this.cacheOf(target.key)
     const segment = (id: string, order: number, label: string, text: string): PreviewSegment =>
       ({ id, order, label, chars: text.length, text })
     const discipline = this.disciplineLevel
-    const presetTarget = this.resolvePreset(sessionId)
+    const presetTarget = subAgent
+      ? { source: 'none' as const }
+      : this.resolvePreset(sessionId)
     const presetText = this.presetText(presetTarget, sessionId)
 
     const segments: PreviewSegment[] = [
@@ -1201,6 +1261,8 @@ export class PromptController {
   /** L0.5 纪律包段 / 预设段 / L1 段共用的「有没有角色」判定。 */
   private renderPresetSection(ctx?: unknown): string {
     const sessionId = readSessionId(ctx)
+    // 子代理会话不注入预设（它回落的全局预设属于人设范畴，同样会改写工程产出）
+    if (this.isSubAgentAssembly(ctx, sessionId)) return ''
     return this.presetText(this.resolvePreset(sessionId), sessionId)
   }
 
@@ -1270,11 +1332,17 @@ export class PromptController {
    * `preview()` 直接传已决议的缓存 / 布尔（预览不触发刷新，也不重读盘）。
    */
   private hasCharacter(ctx?: unknown): boolean {
-    return this.resolveTarget(readSessionId(ctx)).character !== undefined
+    const sessionId = readSessionId(ctx)
+    // 子代理 / 看板 / 定时会话是工程会话：L0 与纪律包不注入（连全局都不回落）
+    if (this.isSubAgentAssembly(ctx, sessionId)) return false
+    return this.resolveTarget(sessionId).character !== undefined
   }
 
   private cacheFrom(ctx?: unknown): L1Cache | undefined {
-    const target = this.resolveTarget(readSessionId(ctx))
+    const sessionId = readSessionId(ctx)
+    // 子代理会话没有 L1（世界书 / 时间差段随之不注入）
+    if (this.isSubAgentAssembly(ctx, sessionId)) return undefined
+    const target = this.resolveTarget(sessionId)
     if (target.character === undefined) return undefined
     return this.cacheOf(target.key)
   }

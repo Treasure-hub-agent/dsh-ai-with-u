@@ -403,6 +403,11 @@ export interface PresetPanelProps {
   t: Translate
   /** 当前会话 id；空串 = 宿主没给 → 禁用「当前会话使用」（绝不编一个 id 写进去） */
   sessionId: string
+  /**
+   * 全屏模块编辑层（FocusEditor）开/关：外壳（Overlay）据此把 Esc 让给本层，
+   * 避免一次 Esc 连关两层、未保存的模块编辑无声丢失（同 card-editor 的 loreFocus 约定）。
+   */
+  onFocusLayerChange?: (open: boolean) => void
   /** 任何改动（保存 / 删除 / 启用 / 导入）之后通知外壳刷新总览 */
   onChanged: () => void
   onClose: () => void
@@ -411,7 +416,7 @@ export interface PresetPanelProps {
 type View = 'list' | 'edit' | 'import'
 
 export function PresetPanel(props: PresetPanelProps): JSX.Element {
-  const { t, sessionId, onChanged, onClose } = props
+  const { t, sessionId, onFocusLayerChange, onChanged, onClose } = props
 
   const [view, setView] = useState<View>('list')
   const [list, setList] = useState<PresetSummary[]>([])
@@ -462,6 +467,13 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
 
   useEffect(() => { void loadList() }, [loadList])
 
+  // 全屏模块编辑层的开关上报：外壳（index.tsx 的 Overlay）读到 true 就把 Esc 让位。
+  // 判据与编辑视图的渲染条件一致（focusIndex 指得到一条真实模块才算开着）。
+  const focusLayerOpen = detail !== undefined && focusIndex >= 0 && focusIndex < detail.modules.length
+  useEffect(() => {
+    onFocusLayerChange?.(focusLayerOpen)
+  }, [focusLayerOpen, onFocusLayerChange])
+
   const showNotice = useCallback((text: string, tone: 'ok' | 'warn' = 'ok'): void => {
     setNotice({ text, tone })
     // 面板内的轻提示：不抢注意力，成功 6 秒自动走，警告留到下次操作
@@ -475,6 +487,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
   const globalPresetId = active.global ?? ''
 
   /** 打开一份预设进入编辑（自取正文：列表里只有计数，没有正文）。 */
+  const detailSeq = useRef(0)
   const openPreset = useCallback((id: string): void => {
     setView('edit')
     setConfirmDelete(false)
@@ -482,9 +495,14 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
     setEditLoading(true)
     setError('')
     setDetail(undefined)
+    // 连点两份预设时旧响应可能晚到：只认最后一次发起的那个。
+    // 不做守卫的话，开工慢的那份回来会覆盖已打开详情 —— 此时点「保存」就会覆盖错误的预设
+    // （照抄 index.tsx 的 detailSeq 写法，2026-11-01 审查中危项 11）。
+    const seq = detailSeq.current + 1
+    detailSeq.current = seq
     void fetchPreset(id)
       .then(result => {
-        if (!aliveRef.current) return
+        if (!aliveRef.current || seq !== detailSeq.current) return
         setDetail({
           id: result.preset.id,
           name: result.preset.name,
@@ -498,11 +516,11 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
         setActive(isRecord(result.active) ? result.active : {})
       })
       .catch((e: unknown) => {
-        if (!aliveRef.current) return
+        if (!aliveRef.current || seq !== detailSeq.current) return
         if (isUnavailable(e)) setUnavailable(true)
         else setError(t('preset.loadFailed', { reason: errorText(e) }))
       })
-      .finally(() => { if (aliveRef.current) setEditLoading(false) })
+      .finally(() => { if (aliveRef.current && seq === detailSeq.current) setEditLoading(false) })
   }, [t])
 
   /** 新建：空白草稿（不落盘，保存时才写）。 */
@@ -1149,7 +1167,7 @@ function PresetImportView(props: {
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
-  const parse = (text: string): void => {
+  const parse = useCallback((text: string): void => {
     setError('')
     setPreview(undefined)
     setParsed(undefined)
@@ -1169,7 +1187,16 @@ function PresetImportView(props: {
     } catch (e) {
       setError(t('preset.import.failed', { reason: errorText(e) }))
     }
-  }
+  }, [t])
+
+  // 导入粘贴框防抖（300ms）：十万字符级的 JSON 每敲一字全量 JSON.parse 会把面板卡死
+  // （2026-11-01 审查低危项）。文件读进来同样只 setRaw，解析统一走这条防抖通道。
+  useEffect(() => {
+    // 空文本立即清态（错误 / 预览跟着消失），不进防抖
+    if (raw.trim() === '') { parse(raw); return undefined }
+    const timer = window.setTimeout(() => parse(raw), 300)
+    return () => window.clearTimeout(timer)
+  }, [raw, parse])
 
   const readFile = (file: File): void => {
     const reader = new FileReader()
@@ -1177,7 +1204,6 @@ function PresetImportView(props: {
     reader.onload = () => {
       const text = typeof reader.result === 'string' ? reader.result : ''
       setRaw(text)
-      parse(text)
     }
     reader.readAsText(file)
   }

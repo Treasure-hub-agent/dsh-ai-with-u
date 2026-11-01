@@ -16,12 +16,22 @@
  *   V16 忘却全卡手术（P0-1）                        V17 L1 不双渲染（P0-3）
  *   V18 设计文档 §1.7 golden 样例即期望输出          V19 旧视图合并不洗 extensions/character_book
  *
+ * 后续追加节（V20 起，执行顺序与编号不完全一致，以 section 标题为准）：
+ *   附·装饰器解析 / 长度统计 / 关系档位              V20 宏健壮性（宿主会抛错那几种不崩）
+ *   V25 34 字段镜像对照 client/card-schema GROUPS    V14/V15 存储层沙箱（损坏写盘 / 并发）
+ *   V22 世界书注入规范（§4.3 定稿 8 条）              V21 REST 三键保存 + 导入预览
+ *   V24 PromptController 装配                        V26 清空字段 / 清空整组不复活
+ *   V27 存储硬化（跨实例锁 / BOM / 旧卡备份 / 体量）  V29 世界书超限软警告
+ *   V30 REST 透出软警告                              V31 POST /mode 三段口径
+ *   V32 真酒馆卡适配                                 V33 正则屏蔽可证明（三重断言）
+ *
  * 运行：node scripts/verify-tavern.mjs
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { makeReq, makeRes } from './helpers.mjs'
 
 const root0 = new URL('..', import.meta.url).pathname
 const root = process.platform === 'win32' ? root0.replace(/^\/([A-Za-z]:)/, '$1') : root0
@@ -616,6 +626,18 @@ section('附 · 装饰器解析 / 长度统计 / 关系档位')
 
   check(cardName(card) === '虞照' && cardSource(card) === 'custom', 'cardName / cardSource 派生正确')
   check(MES_EXAMPLE_BUDGET === 1200, 'mes_example 预算是 1200 字')
+
+  // 精确钉死纪律包三档正文长度（文档即契约）：README「分层注入」写死 lite 555 / full 736 字符。
+  // 断言引用 lib 常量**实测**——两边不许各漂各的：哪一侧先变，这里就红，逼着同步另一侧
+  // （历史教训：字符数区间断言 + 手写文档数字并行时，区间内漂移照样绿，README 已经错过一次）。
+  {
+    const { DISCIPLINE_TEXT, DISCIPLINE_FULL_TEXT } = await import(lib('prompt.js'))
+    const liteLen = [...DISCIPLINE_TEXT].length
+    const fullLen = [...DISCIPLINE_FULL_TEXT].length
+    check(liteLen === 555, `README 的纪律包 lite 字数 = 555（实测 ${liteLen}）`)
+    check(fullLen === 736, `README 的纪律包 full 字数 = 736（实测 ${fullLen}）`)
+    check(fullLen - liteLen === 181, `README 的「切 full 多 181 字符」（实测 ${fullLen - liteLen}）`)
+  }
 }
 
 // ================================================================ 34 字段镜像 V25
@@ -779,24 +801,7 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
   const store = new Store(sandbox)
   const NAME = '接口角色'
 
-  const fakeRes = () => {
-    const out = { status: 0, body: undefined }
-    return {
-      out,
-      setHeader() { /* noop */ },
-      writeHead(status) { out.status = status },
-      end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-    }
-  }
-  const fakeReq = (body, url = '/') => ({
-    url,
-    method: 'POST',
-    // 宿主真实请求一定带 Host；来源栅栏（web.ts）会校验它
-    headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
-    async *[Symbol.asyncIterator]() {
-      if (body !== undefined) yield Buffer.from(JSON.stringify(body))
-    },
-  })
+  // HTTP fake 统一走 scripts/helpers.mjs（带 socket.localAddress，单一真源）
   const routes = buildRoutes(store, fakePromptController())
   const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
   try {
@@ -812,8 +817,8 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
     // ---- 只给 card（旧视图）：世界书与 aiwu 必须原样活着
     const view = await store.readCard(NAME)
     const edited = { ...view, dynamic_state: { 当前情绪: '被改过' } }
-    const res1 = fakeRes()
-    await route('/character/save').handler(fakeReq({ name: NAME, card: edited }), res1)
+    const res1 = makeRes()
+    await route('/character/save').handler(makeReq({ body: { name: NAME, card: edited } }), res1.res)
     check(res1.out.status === 200 && res1.out.body?.ok === true, `只给 card 保存成功（status ${res1.out.status}）`)
     const after = await store.readCcV3(NAME)
     check(after?.data.character_book?.entries.length === 1, '只给 card：character_book 没被洗掉')
@@ -824,23 +829,25 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
 
     // ---- 只给 ccv3：正常落盘
     const ccv3Only = await store.readCcV3(NAME)
-    const res2 = fakeRes()
-    await route('/character/save').handler(fakeReq({ name: NAME, ccv3: { ...ccv3Only, data: { ...ccv3Only.data, nickname: '小照' } } }), res2)
+    const res2 = makeRes()
+    await route('/character/save').handler(makeReq({ body: { name: NAME, ccv3: { ...ccv3Only, data: { ...ccv3Only.data, nickname: '小照' } } } }), res2.res)
     check(res2.out.status === 200, '只给 ccv3 保存成功')
     check((await store.readCcV3(NAME))?.data.nickname === '小照', '只给 ccv3：值生效')
 
     // ---- 两个都不给：明确报错，不当空卡写
-    const res3 = fakeRes()
-    await route('/character/save').handler(fakeReq({ name: NAME }), res3)
+    const res3 = makeRes()
+    await route('/character/save').handler(makeReq({ body: { name: NAME } }), res3.res)
     check(res3.out.status === 400 && String(res3.out.body?.error).includes('card'), 'card/ccv3 都缺 → 400 且说明缺什么')
 
     // ---- 导入预览：认识野生 JSON 卡、补齐默认值、**不写盘**
     const wild = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: '野卡', description: '从别处来的卡' } }
-    const res4 = fakeRes()
-    await route('/character/import').handler(fakeReq({
-      fileName: 'wild.json',   // 裸 JSON 卡：按内容判格式，扩展名只是提示
-      dataBase64: Buffer.from(JSON.stringify(wild), 'utf8').toString('base64'),
-    }), res4)
+    const res4 = makeRes()
+    await route('/character/import').handler(makeReq({
+      body: {
+        fileName: 'wild.json',   // 裸 JSON 卡：按内容判格式，扩展名只是提示
+        dataBase64: Buffer.from(JSON.stringify(wild), 'utf8').toString('base64'),
+      },
+    }), res4.res)
     check(res4.out.status === 200 && res4.out.body?.ok === true, `导入预览成功（status ${res4.out.status}）`)
     check(res4.out.body?.format === 'json', `按魔数判格式：${res4.out.body?.format}`)
     check(res4.out.body?.name === '野卡', '预览返回角色名')
@@ -851,23 +858,21 @@ section('V21 · REST 三键保存 + 导入预览（C7 全链路：保存不许�
     check((await store.readCcV3('野卡')) === undefined, '导入预览**不写盘**（确认后才 save）')
 
     // ---- 导入非法内容：错误文案原样透出，不压成"导入失败"
-    const res5 = fakeRes()
-    await route('/character/import').handler(fakeReq({ fileName: 'x.png', dataBase64: '%%%不是base64%%%' }), res5)
+    const res5 = makeRes()
+    await route('/character/import').handler(makeReq({ body: { fileName: 'x.png', dataBase64: '%%%不是base64%%%' } }), res5.res)
     check(res5.out.status === 400 && String(res5.out.body?.error).length > 6, `非法导入返回 400 且带原因：${String(res5.out.body?.error).slice(0, 40)}`)
 
     // ---- 缺 dataBase64
-    const res6 = fakeRes()
-    await route('/character/import').handler(fakeReq({ fileName: 'x.png' }), res6)
+    const res6 = makeRes()
+    await route('/character/import').handler(makeReq({ body: { fileName: 'x.png' } }), res6.res)
     check(res6.out.status === 400 && String(res6.out.body?.error).includes('dataBase64'), '缺 dataBase64 → 400')
 
     // ---- GET /character 双视图
-    const res7 = fakeRes()
-    await route('/character').handler({
-      url: `/_dsh/ai-with-u/character?name=${encodeURIComponent(NAME)}`,
+    const res7 = makeRes()
+    await route('/character').handler(makeReq({
       method: 'GET',
-      headers: { host: '127.0.0.1:50143' },
-      async *[Symbol.asyncIterator]() {},
-    }, res7)
+      url: `/_dsh/ai-with-u/character?name=${encodeURIComponent(NAME)}`,
+    }), res7.res)
     check(res7.out.body?.card?.['basic']?.['身份'] !== undefined && res7.out.body?.ccv3?.spec === 'chara_card_v3',
       'GET /character 同时给 card（旧视图）与 ccv3')
   } finally {
@@ -1163,21 +1168,7 @@ section('V30 · REST 透出软警告（/character/save 与导入预览都带 war
     const store = new Store(sandbox)
     const routes = buildRoutes(store, fakePromptController())
     const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
-    const fakeRes = () => {
-      const out = { status: 0, body: undefined }
-      return {
-        out,
-        setHeader() {},
-        writeHead(status) { out.status = status },
-        end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-      }
-    }
-    const fakeReq = (body, url = '/') => ({
-      url,
-      method: 'POST',
-      headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
-      async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
-    })
+    // HTTP fake 统一走 scripts/helpers.mjs（带 socket.localAddress，单一真源）
 
     const bigBook = bookOf([entry({ id: 'big', keys: ['设定'], content: '长'.repeat(5000) })])
     const card = normalizeCard({
@@ -1186,19 +1177,21 @@ section('V30 · REST 透出软警告（/character/save 与导入预览都带 war
       data: { name: '警告卡', description: '身份：警告卡', character_book: bigBook },
     })
 
-    const saveRes = fakeRes()
-    await route('/character/save').handler(fakeReq({ name: '警告卡', ccv3: card }), saveRes)
+    const saveRes = makeRes()
+    await route('/character/save').handler(makeReq({ body: { name: '警告卡', ccv3: card } }), saveRes.res)
     check(saveRes.out.status === 200, `POST /character/save 超限也成功（${saveRes.out.status}）`)
     check(Array.isArray(saveRes.out.body?.warnings) && saveRes.out.body.warnings.length > 0,
       `save 响应带 warnings: string[]（${saveRes.out.body?.warnings?.length} 条）`)
     check(String(saveRes.out.body?.warnings?.[0] ?? '').includes('5000'), 'save 警告里带实际字数')
 
     // 导入预览同样带（用户点"确认导入"之前就该看到）
-    const importRes = fakeRes()
-    await route('/character/import').handler(fakeReq({
-      fileName: 'big.json',
-      dataBase64: Buffer.from(JSON.stringify(card), 'utf8').toString('base64'),
-    }), importRes)
+    const importRes = makeRes()
+    await route('/character/import').handler(makeReq({
+      body: {
+        fileName: 'big.json',
+        dataBase64: Buffer.from(JSON.stringify(card), 'utf8').toString('base64'),
+      },
+    }), importRes.res)
     check(importRes.out.status === 200, `导入预览成功（${importRes.out.status}）`)
     check((importRes.out.body?.warnings ?? []).some(w => String(w).includes('按需注入')),
       `导入预览的 warnings 带世界书软警告（${(importRes.out.body?.warnings ?? []).length} 条）`)
@@ -1206,11 +1199,13 @@ section('V30 · REST 透出软警告（/character/save 与导入预览都带 war
       '导入预览不截断世界书正文')
 
     // 正常卡：warnings 是空数组（存在但为空，客户端不用判 undefined）
-    const okRes = fakeRes()
-    await route('/character/save').handler(fakeReq({
-      name: '正常卡',
-      ccv3: normalizeCard({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: '正常卡', description: '身份：正常' } }),
-    }), okRes)
+    const okRes = makeRes()
+    await route('/character/save').handler(makeReq({
+      body: {
+        name: '正常卡',
+        ccv3: normalizeCard({ spec: 'chara_card_v3', spec_version: '3.0', data: { name: '正常卡', description: '身份：正常' } }),
+      },
+    }), okRes.res)
     check(okRes.out.status === 200 && Array.isArray(okRes.out.body?.warnings) && okRes.out.body.warnings.length === 0,
       '正常卡保存：warnings 为空数组')
   } finally {
@@ -1252,25 +1247,11 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
     }
     const routes = buildRoutes(store, fakePrompt)
     const routeOf = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
-    const fakeRes = () => {
-      const out = { status: 0, body: undefined }
-      return {
-        out,
-        setHeader() {},
-        writeHead(status) { out.status = status },
-        end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-      }
-    }
-    const fakeReq = (body) => ({
-      url: '/',
-      method: 'POST',
-      headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
-      async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
-    })
+    // HTTP fake 统一走 scripts/helpers.mjs（带 socket.localAddress，单一真源）
 
     // ① 有启用角色、body 不带 name：写 session + 全局，scope=session
-    let res = fakeRes()
-    await routeOf('/mode').handler(fakeReq({ mode: 'text' }), res)
+    let res = makeRes()
+    await routeOf('/mode').handler(makeReq({ body: { mode: 'text' } }), res.res)
     check(res.out.status === 200 && res.out.body?.scope === 'session',
       `① 启用中 → scope=session（${res.out.status} / ${res.out.body?.scope}）`)
     check((await store.readSession(NAME)).mode === 'text', '① 写进了该角色的 session.json')
@@ -1278,8 +1259,8 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
 
     // ② 有启用角色、body 指定另一张卡：只写那张卡的 session，全局兜底同步
     calls.length = 0
-    res = fakeRes()
-    await routeOf('/mode').handler(fakeReq({ mode: 'text+action', name: OTHER }), res)
+    res = makeRes()
+    await routeOf('/mode').handler(makeReq({ body: { mode: 'text+action', name: OTHER } }), res.res)
     check(res.out.status === 200 && res.out.body?.scope === 'session', `② 指定别的卡 → scope=session（${res.out.status}）`)
     check(res.out.body?.name === OTHER, `② 回显 name=${String(res.out.body?.name)}`)
     check((await store.readSession(OTHER)).mode === 'text+action', '② 写进了指定角色的 session.json')
@@ -1288,8 +1269,8 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
     // ③ 没启用角色、body 也没 name：**不报错**，只写全局兜底
     activeName = undefined
     calls.length = 0
-    res = fakeRes()
-    await routeOf('/mode').handler(fakeReq({ mode: 'text' }), res)
+    res = makeRes()
+    await routeOf('/mode').handler(makeReq({ body: { mode: 'text' } }), res.res)
     check(res.out.status === 200, `③ 空闲态不报错（${res.out.status}，修复前是 400）`)
     check(res.out.body?.ok === true && res.out.body?.scope === 'global', `③ scope=global（${res.out.body?.scope}）`)
     check(res.out.body?.mode === 'text', `③ 回显 mode=${String(res.out.body?.mode)}`)
@@ -1298,8 +1279,8 @@ section('V31 · POST /mode 三段口径（无启用角色也能点，只写全�
 
     // ④ 空闲态 + 指定 name：仍然写那张卡的 session（客户端选中卡片时走这条）
     calls.length = 0
-    res = fakeRes()
-    await routeOf('/mode').handler(fakeReq({ mode: 'text', name: NAME }), res)
+    res = makeRes()
+    await routeOf('/mode').handler(makeReq({ body: { mode: 'text', name: NAME } }), res.res)
     check(res.out.status === 200 && res.out.body?.scope === 'session', `④ 空闲态带 name → scope=session（${res.out.status}）`)
     check((await store.readSession(NAME)).mode === 'text', '④ 写进了指定角色的 session.json')
   } finally {

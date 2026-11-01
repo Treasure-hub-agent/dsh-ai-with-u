@@ -74,22 +74,40 @@ const IMPORT_TIMEOUT_MS = 90000
 
 async function request<T>(path: string, init?: RequestInit, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<T> {
   let res: Response
+  // `RequestInit.signal` 的类型是 AbortSignal | null | undefined：先归一成 undefined，
+  // 后面就不用每次写 null 分支（TS 也窄不掉 `!== undefined` 里的 null）。
+  const callerSignal = init?.signal ?? undefined
   const timeout = new AbortController()
+  // 组合监听：fetch 只能挂**一个** signal，所以内部超时自己当 signal，
+  // 调用方带了自己的 signal 时用监听把它「并入」进来 —— 两个都能各自取消请求。
+  // 以前 `init?.signal ?? timeout.signal` 只发一个：调用方有 signal 时 20s 超时整个失效。
+  let abortedByCaller = false
+  const onCallerAbort = (): void => {
+    abortedByCaller = true
+    timeout.abort()
+  }
+  if (callerSignal !== undefined) {
+    if (callerSignal.aborted) onCallerAbort()
+    else callerSignal.addEventListener('abort', onCallerAbort)
+  }
   const timer = setTimeout(() => timeout.abort(), timeoutMs)
   try {
     res = await fetch(`${API_PREFIX}${path}`, {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       ...init,
-      signal: init?.signal ?? timeout.signal,
+      signal: timeout.signal,
     })
   } catch (error) {
+    // 调用方自己取消的：把原始的 abort 错误原样交还（语义归调用方，别冒充超时）
+    if (abortedByCaller) throw error
     if (timeout.signal.aborted) {
       throw new Error(`请求超时（${timeoutMs / 1000} 秒）：${path}`)
     }
     throw new Error(`连不上宿主接口（${path}）：${error instanceof Error ? error.message : String(error)}`)
   } finally {
     clearTimeout(timer)
+    if (callerSignal !== undefined) callerSignal.removeEventListener('abort', onCallerAbort)
   }
 
   // 404 / 501 有两种截然不同的来源，必须分开：
@@ -170,21 +188,46 @@ export interface ActiveState {
   activatedAt?: string
 }
 
+/**
+ * `/overview.bindings` 的形状 —— **与宿主对齐（`src/web.ts:255-272`）**。
+ *
+ * 宿主给的是包装对象（count / current / effective / items），**items 的角色键叫
+ * `character` 不叫 `name`**。以前客户端声明成 `Record<string, string>`，
+ * 三种形态全认不出，「会话绑定」整条功能在前端实际不可用（审查 H5）。
+ */
+export interface OverviewBindingItem {
+  sessionId: string
+  character: string
+  /** ISO 时间戳；宿主 store 里可能还带 dead 标记，面板不关心，原样不声明 */
+  boundAt?: string
+}
+
+export interface OverviewBindings {
+  /** 绑定总数 */
+  count?: number
+  /** 当前会话（按请求里带的 `?sessionId=`）的绑定；没绑定 / 没带 sessionId 时为 null */
+  current?: OverviewBindingItem | null
+  /** 当前会话最终用哪个角色（会话绑定 > 全局启用 > 未启用） */
+  effective?: { character: string; source: string }
+  /** 全部绑定条目（摘要） */
+  items?: OverviewBindingItem[]
+}
+
 export interface Overview {
   ok: true
   root: string
   active: ActiveState
   /**
-   * 面板所在的**当前会话 id**（宿主 K1 提供；老宿主没有这个字段）。
+   * 面板所在的**当前会话 id**（请求带 `?sessionId=` 时宿主原样回显；没带就是空串）。
    *
    * 拿不到就只能做「全局启用」——绝不在客户端拼一个假 id 写进绑定表。
    */
   sessionId?: string
   /**
-   * 会话绑定表：`sessionId → 角色名`。只影响列出的那些会话，
-   * 没列出的会话继续用 `active`（全局）。
+   * 会话绑定摘要。只影响列出的那些会话，没列出的会话继续用 `active`（全局）。
+   * 形状见 `OverviewBindings`（老宿主给不出这个形状时由 `readBindings` 容错到底）。
    */
-  bindings?: Record<string, string>
+  bindings?: OverviewBindings
   stats: {
     characters: number
     memoryEntries: number
@@ -372,6 +415,23 @@ export interface DiaryEntry {
   notes: string[]
 }
 
+/**
+ * `GET /character` 顺手带回的会话绑定信息 —— **宿主本体形状（`src/web.ts:524-533`）**。
+ *
+ * 面板优先用 `/overview.bindings` 自己判断；这里只在绑定刚被别处改过、overview
+ * 还没刷新时当兜底读一遍。
+ */
+export interface CharacterBinding {
+  /** 当前会话（请求带 `?sessionId=` 时）是否绑在这张卡上 */
+  boundHere?: boolean
+  /** 这张卡被哪些会话绑定（sessionId 列表） */
+  sessions?: string[]
+  /** 这张卡是否是全局启用角色 */
+  global?: boolean
+  /** 当前会话最终用哪个角色（会话绑定 > 全局启用 > 未启用） */
+  effective?: { character: string; source: string }
+}
+
 export interface CharacterDetail {
   ok: true
   name: string
@@ -394,11 +454,11 @@ export interface CharacterDetail {
   relation?: DetailRelation
   /** 世界书预算诊断（宿主新加；老宿主没有 → 面板整块不显示） */
   diag?: LoreDiagPayload
+  /** 本卡与本会话的绑定信息（宿主本体形状，见 `CharacterBinding`）。 */
+  binding?: CharacterBinding
   /**
-   * 这张卡**是否绑定在当前会话**上（宿主新字段，形状尚未定稿）。
-   *
-   * 面板优先用 `/overview.bindings` 自己判断；只有宿主没给 bindings 时才读这几个容错字段。
-   * 一律可选，缺失就当「不知道」，不要据此禁用/启用任何按钮。
+   * 旧扁平容错字段（自定义宿主 / 断更版本才有）：嵌套 `binding` 不在时才读，
+   * 形状尚未定稿，一律可选，缺失就当「不知道」，不要据此禁用/启用任何按钮。
    */
   boundHere?: boolean
   boundSessionId?: string
@@ -511,9 +571,18 @@ export interface OpeningResult {
 
 // ---------------------------------------------------------------- 动作函数
 
-/** 总览：启用态 + 全局统计。 */
-export function fetchOverview(): Promise<Overview> {
-  return request<Overview>(ROUTES.overview)
+/**
+ * 总览：启用态 + 全局统计。
+ *
+ * `sessionId`（可选）是面板自己在的会话（DockSink 转交的会话 id）：宿主只从
+ * query 上读 sessionId（`src/web.ts:222-223`），不带的话绑定 / 预设 / 预览全
+ * 回「全局视角」，面板永远「当前会话不可识别」（审查 H4）。空串按不带参处理。
+ */
+export function fetchOverview(sessionId?: string): Promise<Overview> {
+  const path = sessionId === undefined || sessionId === '' || sessionId.trim() === ''
+    ? ROUTES.overview
+    : `${ROUTES.overview}?sessionId=${encodeURIComponent(sessionId)}`
+  return request<Overview>(path)
 }
 
 // ---------------------------------------------------------------- 注入预览（只读）
@@ -570,9 +639,18 @@ export async function fetchCharacters(): Promise<CharacterSummary[]> {
   return Array.isArray(body.characters) ? body.characters : []
 }
 
-/** 单角色详情：完整角色卡 + 日记 + 会话。 */
-export function fetchCharacter(name: string): Promise<CharacterDetail> {
-  return request<CharacterDetail>(ROUTES.character(name))
+/**
+ * 单角色详情：完整角色卡 + 日记 + 会话。
+ *
+ * `sessionId`（可选）：宿主的 `/character` 也从 query 上读 `?sessionId=` 来算
+ * `binding.boundHere` / `binding.effective`（`src/web.ts:498`），不带时这两格退回
+ * 全局视角，绑定兜底就没有意义。空串按不带参处理。
+ */
+export function fetchCharacter(name: string, sessionId?: string): Promise<CharacterDetail> {
+  const path = sessionId === undefined || sessionId === '' || sessionId.trim() === ''
+    ? ROUTES.character(name)
+    : `${ROUTES.character(name)}&sessionId=${encodeURIComponent(sessionId)}`
+  return request<CharacterDetail>(path)
 }
 
 /** 启用角色（插入人设）。 */

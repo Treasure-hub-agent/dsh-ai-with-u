@@ -5,7 +5,8 @@
  *   1. PNG（tEXt ccv3 / tEXt chara=V2 / tEXt 放在 IDAT 之前 / 被截断的 PNG）
  *   2. CHARX（store 与 deflate 两种压缩 / 缺 card.json / 加密条目 / 不支持的压缩方法 / 嵌套一层目录）
  *   3. 裸 JSON（V3 / V2 / 只有 data / 本插件 v0.1 旧卡 / 完全不是卡）
- *   4. 归一化细节（assets 剥离、regex_scripts 剥离、缺名字告警、扩展名与内容不符）
+ *   4. 归一化细节（assets 剥离、regex_scripts 保留 + 告警不删（2026-10-31 口径：卡是用户资产）、
+ *      缺名字告警、扩展名与内容不符）
  *
  * 依赖：`npm run build:host` 产出的 `lib/import-card.js`。
  * 用法：`node scripts/verify-import.mjs`

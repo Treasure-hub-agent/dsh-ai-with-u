@@ -25,11 +25,19 @@ export const AWU_SCHEMA = 1
 /** `mes_example` 进 L1 的字符预算（§3.4）。 */
 export const MES_EXAMPLE_BUDGET = 1200
 
-/** 长度软警告阈值（§5.1）。 */
+/**
+ * 世界书**单条偏长**阈值的单一真源（v0.5.1 收敛双真源，统一为 4000）：
+ *   - `collectCardWarnings`（面板保存 / 导入软警告）与 `lengthWarnings`（蒸馏诊断）此前分别用
+ *     CARD_SOFT_LIMITS.bookEntry(4000) 与 LENGTH_LIMITS.loreEntry(800)，
+ *     同一张含 2000 字条目的卡「走蒸馏有警告、走面板没有」。现在两处引用同一个常量。
+ */
+export const LORE_ENTRY_SOFT_LIMIT = 4000
+
+/** 长度软警告阈值（§5.1）；条目偏长阈值见 {@link LORE_ENTRY_SOFT_LIMIT}（单一真源）。 */
 export const LENGTH_LIMITS = {
   description: 1200,
   l1Static: 3000,
-  loreEntry: 800,
+  loreEntry: LORE_ENTRY_SOFT_LIMIT,
   loreTotal: 20000,
   loreEntries: 30,
   cardFile: 200 * 1024,
@@ -905,7 +913,7 @@ export const CARD_HARD_LIMITS = {
  * 条数上限（`too-many-entries`）保留在体检里，那是「会真的进不去」的问题。
  */
 export const CARD_SOFT_LIMITS = {
-  bookEntry: 4000,
+  bookEntry: LORE_ENTRY_SOFT_LIMIT,
 } as const
 
 /**
@@ -1953,7 +1961,7 @@ export function renderL1Static(card: CharacterCardV3): string {
   return parts.join('\n\n')
 }
 
-/** `mes_example` 按 `<START>` / `block:` 分块裁剪到预算内（不切半句台词）。 */
+/** `mes_example` 按 `<START>` / `block:` 分块裁剪到预算内（后续块不切半句；首块超预算才截断）。 */
 export function clipMesExample(text: string, budget = MES_EXAMPLE_BUDGET): string {
   const source = text.trim()
   if (source.length <= budget) return source
@@ -1963,7 +1971,8 @@ export function clipMesExample(text: string, budget = MES_EXAMPLE_BUDGET): strin
   let used = 0
   for (const block of blocks) {
     if (used + block.length > budget && kept.length > 0) break
-    kept.push(block)
+    // 首块（kept.length===0）超预算也必须截断：以前整块塞入，一个超长示例就能占掉 1200 字预算
+    kept.push(used + block.length > budget ? block.slice(0, budget - used).trim() : block)
     used += block.length
   }
   return kept.join('\n\n')
@@ -2017,10 +2026,10 @@ export interface ForgetCardResult {
   warnings: string[]
 }
 
-/** 按句删除命中关键词的句子（句子分隔符保留链）。 */
+/** 按句删除命中关键词的句子（句子分隔符保留链；`.` 是英文句号，否则英文整段被过度删除）。 */
 export function removeSentences(text: string, keywords: string[]): string {
   if (keywords.length === 0 || text === '') return text
-  const parts = text.split(/(?<=[。！？!?；;\n])/u)
+  const parts = text.split(/(?<=[。！？!?；;.\n])/u)
   const kept = parts.filter(part => !keywords.some(k => part.includes(k)))
   return kept.join('').replace(/\n{3,}/gu, '\n\n').trim()
 }

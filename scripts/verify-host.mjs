@@ -15,6 +15,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { makeReq, makeRes } from './helpers.mjs'
 
 const rootRaw = new URL('..', import.meta.url).pathname
 const root = process.platform === 'win32' ? rootRaw.replace(/^\/([A-Za-z]:)/, '$1') : rootRaw
@@ -191,22 +192,14 @@ const info = [...app.registry.values()].map((rt) => `${rt.name ?? '(匿名插件
 console.log(`      注册表：${info.join(' | ')}`)
 
 // ---------------------------------------------------------------- 蒸馏临时武装（验证 index.ts 的接线）
+// HTTP fake 统一走 scripts/helpers.mjs（带 socket.localAddress，单一真源）。
+// 这里只做两行薄适配：①把 {out,res} 包成原先平铺的 res 形状，45+ 个调用点零改动；
+// ②把 (method, body) 位置签名转成 helpers 的 opts 对象。实现没有第二份。
 const fakeRes = () => {
-  const out = { status: 0, body: undefined }
-  return {
-    out,
-    setHeader() {},
-    writeHead(status) { out.status = status },
-    end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-  }
+  const { out, res } = makeRes()
+  return { out, ...res }
 }
-const fakeReq = (method, body) => ({
-  method,
-  url: '/',
-  // 真实宿主请求一定带 Host；来源栅栏（web.ts）会校验它
-  headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
-  async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
-})
+const fakeReq = (method, body) => makeReq({ method, body })
 // ⚠️ 必须**精确匹配**：/preset/activate 也以 /activate 结尾，用 endsWith 会把激活路由打到预设上
 const routeOf = (suffix) => registered.routes.find(r => r.path === '/_dsh/ai-with-u' + suffix)
 
@@ -538,6 +531,33 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
       `导入返回 dropped 明细（${(importRes.out.body?.dropped ?? []).length} 条）`)
     const disabledModule = (importRes.out.body?.preset?.modules ?? []).find(m => m.name === 'User 条目')
     check(disabledModule?.enabled === false, 'prompt_order 里 enabled:false 的条目保留为停用')
+
+    // 「退出零残留」契约钉死（2026-11-01 补，与 README「分层注入」的预设段例外说明配对）：
+    // 在**全局预设仍启用**的状态下退出角色，真实结果必须是——preset 段仍非空、
+    // 其余五段全空。这是设计行为：预设是宿主侧的文风层，renderPresetSection
+    // （src/prompt.ts）不校验角色启用态；预设属于「这台宿主怎么说话」，不属于「此刻扮演谁」。
+    // 若哪次改动让 preset 段也被清空（或让角色段有残留），先改 README 承诺再改这里，不要静默对齐。
+    const exitMidRes = fakeRes()
+    await routeOf('/deactivate').handler(fakeReq('POST'), exitMidRes)
+    check(exitMidRes.out.status === 200, `全局预设启用中 POST /deactivate → ${exitMidRes.out.status}`)
+    const sectionTextOf = (name) => {
+      const layer = sp.layers.get(name)
+      if (layer === undefined) return undefined
+      return typeof layer.text === 'function' ? layer.text({}) : String(layer.text)
+    }
+    const presetAfterExit = sectionTextOf('aiwu:preset')
+    check(presetAfterExit !== undefined && presetAfterExit.includes('短句为主'),
+      `退出角色后预设段仍非空（契约：预设不随角色退出，实际 ${presetAfterExit === undefined ? '段不存在' : `${presetAfterExit.length} 字符`}）`)
+    const fiveIdle = ['aiwu:baseline', 'aiwu:discipline', 'aiwu:active-character', 'aiwu:lore', 'aiwu:clock']
+      .map(name => [name, sectionTextOf(name)])
+      .filter(([, text]) => text !== '')
+      .map(([name]) => name)
+    check(fiveIdle.length === 0, `退出角色后其余五段全空${fiveIdle.length === 0 ? '' : '：非空的有 ' + fiveIdle.join(',')}`)
+
+    // 回到「启用角色 + 预设开」，继续原有收尾断言
+    const backRes = fakeRes()
+    await routeOf('/activate').handler(fakeReq('POST', { name: ACTIVE_NAME }), backRes)
+    check(backRes.out.status === 200, `重新启用角色 → ${backRes.out.status}`)
 
     // 收尾：取消全局预设启用（否则后面"退出后归零"会被预设段顶着）
     await routeOf('/preset/activate').handler(fakeReq('POST', { scope: 'global' }), fakeRes())

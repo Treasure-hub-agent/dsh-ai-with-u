@@ -23,7 +23,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join, parse, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
@@ -507,24 +507,40 @@ export class Store {
   /**
    * 取一把跨进程锁（独占创建 lockfile）。
    *
-   * 崩溃残留用 mtime 判定：超过 {@link LOCK_STALE_MS} 直接清掉，否则一次强杀会让该角色永远写不进去。
+   * v0.5.1 修复锁协议（审查 H1）：
+   *   - 拿锁时写入唯一 token（uuid + pid + 时间戳），闭包持有 token；
+   *   - **释放前读回比对**：锁被 stale 抢占后原持有者放弃删除——否则会误删别人新建的
+   *     合法锁，第三个进程跟进后锁级联失效，两个写者同时进临界区；
+   *   - stale 判定升级为 pid 探活（见 {@link isLockStaleFile}）：mtime 单独判定会把
+   *     「慢盘 / 杀软 / 大卡导致的慢临界区」误判成崩溃残留，删掉并发进入正在写的锁。
    */
   private async acquireFileLock(key: string): Promise<() => Promise<void>> {
     const dir = join(this.root, LOCK_DIR)
     await mkdir(dir, { recursive: true })
     const file = join(dir, `${lockKeyOf(key)}.lock`)
     const deadline = Date.now() + LOCK_WAIT_MS
+    const token = `${randomUUID()} ${process.pid} ${Date.now()}`
     for (;;) {
       try {
         const handle = await open(file, 'wx')
-        try { await handle.writeFile(`${process.pid} ${Date.now()}`, 'utf8') } finally { await handle.close() }
-        return async () => { await rm(file, { force: true }) }
+        try { await handle.writeFile(token, 'utf8') } finally { await handle.close() }
+        // 释放：锁文件内容还是自己的 token 才删；读不到 / 内容变了 = 已被 stale 抢占，
+        // 放弃删除（当前锁是别人新建的合法锁，删掉就级联失效）。
+        return async () => {
+          let current: string
+          try {
+            current = await readFile(file, 'utf8')
+          } catch {
+            return // 锁已经不在了（或读不到）：无需也不应再删
+          }
+          if (current !== token) return // 不是自己的锁：绝不删除
+          await rm(file, { force: true })
+        }
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code
         if (code !== 'EEXIST') throw error
         try {
-          const info = await stat(file)
-          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+          if (await this.isLockStaleFile(file)) {
             await rm(file, { force: true })
             continue
           }
@@ -535,6 +551,43 @@ export class Store {
         if (Date.now() > deadline) throw new Error(`等待存储锁超时（${key}），可能有另一个 DSH 实例正在写入`)
         await sleep(15)
       }
+    }
+  }
+
+  /**
+   * 锁文件是不是崩溃残留：优先解析锁内容里的 pid 做探活（`process.kill(pid, 0)`）；
+   * pid 解析不了 / 探活结果不可靠时退回 mtime + {@link LOCK_STALE_MS}。
+   *
+   * 探活语义（Windows / POSIX 一致）：ESRCH = 进程不存在（崩溃残留）；
+   * EPERM = 进程存在但无权限发信号（**视为存活**）；其余异常回退 mtime。
+   * 旧格式锁内容是 `pid 时间戳` 两段（升级前的残留，按同样两条路径解析）。
+   */
+  private async isLockStaleFile(file: string): Promise<boolean> {
+    let content: string
+    try {
+      content = await readFile(file, 'utf8')
+    } catch {
+      return true // 锁文件已消失（他人刚删）：让调用方直接重试抢锁
+    }
+    const fields = content.trim().split(/\s+/u)
+    const pidIndex = fields.length >= 3 ? 1 : 0 // 新 token（uuid pid ts）→ pid 在第 2 段；旧格式（pid ts）→ 第 1 段
+    const pid = Number(fields[pidIndex])
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0) // 探活：不发信号，只为确认进程存在
+        return false
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code
+        if (code === 'ESRCH') return true // 进程不存在：崩溃残留
+        if (code === 'EPERM') return false // 权限不足但进程存在：视为存活
+        // 其它异常探不了活：退回 mtime
+      }
+    }
+    try {
+      const info = await stat(file)
+      return Date.now() - info.mtimeMs > LOCK_STALE_MS
+    } catch {
+      return true // stat 读不到：锁刚被删，可重试
     }
   }
 
@@ -1156,11 +1209,13 @@ export class Store {
       else entry.notes[target.index] = text
       await this.writeDiaryUnlocked(safe, entries)
 
-      // 同步：该事若也出现在 session.recent 摘要里，一并更新
+      // 同步：该事若也出现在 session.recent 摘要里，一并更新（口径与 commitTurn 一致：
+      // 拍平换行 + 裁到 RECENT_ITEM_MAX_CHARS=120——以前整段改写文本原样塞进去，一条就能吃掉窗口）
       const session = await this.readSession(safe)
       let sessionUpdated = false
       if (session !== undefined && Array.isArray(session.recent) && before !== undefined) {
-        const recent = session.recent.map(item => (item === before ? text : item))
+        const revised = normalizeSummary({ summary: text }) ?? text
+        const recent = session.recent.map(item => (item === before ? revised : item))
         if (recent.some((item, i) => item !== session.recent?.[i])) {
           await this.writeSessionUnlocked(safe, { ...session, recent })
           sessionUpdated = true
@@ -1216,7 +1271,9 @@ export class Store {
       const previous = (await this.readSession(safe)) ?? {}
       const diary = await this.readDiary(safe)
       const removedDiary = diary.reduce((n, d) => n + d.timeline.length + d.notes.length, 0)
-      // 删日记前先留一份可回滚的备份：这是不可逆操作，宁可多一个文件也不让记忆直接蒸发
+      // 删日记前先留一份可回滚的备份：这是不可逆操作，宁可多一个文件也不让记忆直接蒸发。
+      // 备份失败必须中止重置（错误抛给调用方，rm(diaryPath) 不执行）——
+      // 以前备份失败被静默吞掉后照样删日记 = 记忆不可逆丢失。
       const diaryBackup = await this.backupDiary(safe)
       await rm(this.diaryPath(safe), { force: true })
       const next: SessionState = {
@@ -1236,19 +1293,31 @@ export class Store {
     })
   }
 
-  /** 把 diary.md 复制成 `diary.md.bak-<时间戳>`；没有日记或读失败时返回 undefined。 */
+  /**
+   * 把 diary.md 复制成 `diary.md.bak-<时间戳>`（时间戳精确到毫秒，消除同秒覆盖）。
+   * 没有日记（文件不存在）返回 undefined；**读/写失败一律抛错**——
+   * v0.5.1 修：「彻底重置」必须先拿到备份再删日记，备份做不出来就不许删。
+   */
   private async backupDiary(name: string): Promise<string | undefined> {
     const path = this.diaryPath(name)
+    let text: string
     try {
-      const text = await readFile(path, 'utf8')
-      if (text.trim() === '') return undefined
-      const stamp = localIsoTimestamp().replace(/[^\d]/gu, '')
-      const backup = `${path}.bak-${stamp}`
-      await atomicWrite(backup, text)
-      return backup
-    } catch {
-      return undefined
+      text = await readFile(path, 'utf8')
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code === 'ENOENT') return undefined // 没有日记：无需备份
+      throw new Error(`读取日记失败，无法备份，重置中止（diary.md 原样保留）：${error instanceof Error ? error.message : String(error)}`)
     }
+    if (text.trim() === '') return undefined
+    const now = new Date()
+    const stamp = `${localIsoTimestamp(now).replace(/[^\d]/gu, '')}${String(now.getMilliseconds()).padStart(3, '0')}`
+    const backup = `${path}.bak-${stamp}`
+    try {
+      await atomicWrite(backup, text)
+    } catch (error) {
+      throw new Error(`写日记备份文件失败，重置中止（diary.md 原样保留）：${error instanceof Error ? error.message : String(error)}`)
+    }
+    return backup
   }
 
   private async activeMode(): Promise<string | undefined> {
@@ -1810,14 +1879,18 @@ export class Store {
   }
 
   /**
-   * 首次使用时幂等种入预置卡：仅当 characters/ 目录不存在时执行一次。
+   * 首次使用时幂等种入预置卡：**逐张按目标 card.json 是否存在判幂等**。
    *
-   * 预置卡现在本身就是 CCv3（2026-10-30 换过），种入用原子写直接落盘；
-   * 旧格式卡的迁移回归由 `scripts/fixtures/legacy-cards` 承担，不再依赖预置卡。
+   * v0.5.1 修两处（审查中危项）：
+   *   - 不再「characters/ 目录存在即整体跳过」——上次启动 mkdir 后、种子写完前被杀，
+   *     预置卡会永远缺失；逐张判存在即可自愈补齐；
+   *   - 种入改走 {@link atomicWrite}：与全项目写盘铁律对齐，断电不落半个 JSON。
+   *
+   * 预置卡现在本身就是 CCv3（2026-10-30 换过）；旧格式卡的迁移回归由
+   * `scripts/fixtures/legacy-cards` 承担，不再依赖预置卡。
    */
   async seedPresets(presetRoot: string): Promise<number> {
     const dirRoot = join(this.root, CHARACTERS_DIR)
-    if (existsSync(dirRoot)) return 0
     let seeded = 0
     try {
       await mkdir(dirRoot, { recursive: true })
@@ -1832,7 +1905,7 @@ export class Store {
           if (existsSync(dst)) continue
           await mkdir(dirname(dst), { recursive: true })
           // 旧格式原样写（迁移在读取时发生，第二次写盘才落成 CCv3）
-          await writeFile(dst, `${JSON.stringify(raw, null, 2)}\n`, 'utf8')
+          await atomicWrite(dst, `${JSON.stringify(raw, null, 2)}\n`)
           await this.touchIndex(name, cardSource(raw))
           seeded += 1
         } catch (error) {

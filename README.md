@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-1025%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-1032%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
@@ -32,8 +32,10 @@
 ```
 启用前：和普通 DSH 会话没有区别
 启用后：模型以角色身份说话，但该跑测试跑测试、该读代码读代码
-退出后：系统提示词里一个字都不留，和没装过一样
+退出后：角色相关的五段全部清空，和没启用过一样
 ```
+
+> 预设段例外见 [分层注入](#分层注入)：预设是宿主侧的文风层，不随角色退出。
 
 ---
 
@@ -84,11 +86,12 @@ flowchart LR
 |---|---|---|---|
 | **L0 底线** | 启用期间 | 优先级声明 + 扮演底线 | 约 365 字符 |
 | **L0.5 纪律包** | 启用期间，按档位 | 禁止词库、消息形态、动作格式、输入识别、内容边界 | lite 555 / full 736 字符 |
+| **预设** | 启用了预设就常驻 | 宿主侧文风层（独立于角色启用，进退角色都不动它） | 按预设体量，超 8000 字符给警告 |
 | **L1 角色** | 启用期间 | CCv3 角色卡（声线优先）+ 时间差 + 最近日记 | 约 1.9–2.4K，随卡增长 |
 | **世界书** | 命中才注入 | 关键词 / 常驻条目，预算 12 条 · 6000 字符 | 典型约 0.2K |
 | **L2 长流程** | 工具按需 | 蒸馏、建卡向导 | 不进系统提示词 |
 
-退出时五段全部返回空串，宿主会过滤掉——这是「干净拔出」的实现方式，不是靠删文件。
+退出时角色相关的五段（L0 / L0.5 / L1 / 世界书 / 时间差）全部返回空串，宿主会过滤掉——这是「干净拔出」的实现方式，不是靠删文件。**预设段（`aiwu:preset`）是例外**：预设是宿主侧的文风层，独立于角色启用——进角色、退角色都不动它，全局预设启用时退出角色该段照样非空（`src/prompt.ts` 的渲染函数不校验角色启用态，这是设计：预设属于「这台宿主怎么说话」，不属于「此刻扮演谁」）。
 
 纪律包有三档：`off`（关掉）/ `lite`（默认）/ `full`（多一段「遮住名字也要猜得出是谁」的语态锚点 + 每 10 轮日记自检）。切档走 `POST /_dsh/ai-with-u/discipline`，偏好存在 `_active.json` 里，退出角色也保留。
 
@@ -111,7 +114,7 @@ flowchart LR
 - **统计** — 角色数、记忆条数、对话轮次
 - **指南** — 首次打开时的使用说明
 
-**注入预览**在角色簿详情的「预览」入口：列出此刻真正会进系统提示词的五段（L0 底线 / L0.5 纪律包 / L1 角色 / 世界书 / 时间差），每段给段名与字符数，下面是逐段正文，最后给总字符数。它显示的是宿主那一刻的真实渲染结果（`GET /preview`，纯只读：不刷新缓存、不写盘），不是面板自己另算的一份——两套算法的预览迟早会和实际注入对不上。
+**注入预览**在角色簿详情的「预览」入口：列出此刻真正会进系统提示词的六段（L0 底线 / L0.5 纪律包 / 预设 / L1 角色 / 世界书 / 时间差），每段给段名与字符数，下面是逐段正文，最后给总字符数。它显示的是宿主那一刻的真实渲染结果（`GET /preview`，纯只读：不刷新缓存、不写盘），不是面板自己另算的一份——两套算法的预览迟早会和实际注入对不上。
 
 日记页支持**记忆回顾**：关键词搜索（标题、正文、日期都能命中）、按月份折叠，以及把当前角色的日记导出成 markdown 文件（浏览器里直接下载，不经过宿主）。
 
@@ -458,7 +461,7 @@ distill/flow  distill/arm  distill/disarm  distill/state
 
 ### 面板与提示词
 
-- **注入预览** —— 五段真实渲染的段名 / 字符数 / 正文 + 总字符，纯只读快照
+- **注入预览** —— 六段真实渲染的段名 / 字符数 / 正文 + 总字符（含预设段），纯只读快照
 - **记忆回顾** —— 日记关键词搜索、按月折叠、导出 markdown
 - **导入角色卡** —— 角色簿左栏入口，吃 PNG / CHARX / JSON，先预览后落盘；世界书超限只警告不拦
 - **自创角色卡** —— 三格表单落骨架卡，可选「让 AI 补全人设」（走当前会话，AI 先问 3–5 个问题）
@@ -472,21 +475,23 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 九套自检（合计 981 项）
-npm run verify           # 产物形状 / 新鲜度 / 孤儿产物（16 项）
-npm run verify:bundle    # 客户端产物加载（9 项）
-npm run verify:wiring    # 接线体检：25 组契约（72 项；后端做了前端没接 / 验收项回归）
-npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容（303 项）
-npm run verify:distill   # 蒸馏 / 补全武装与 kind（121 项）
-npm run verify:import    # PNG / CHARX / JSON 导入解析 / 字段保真（58 项）
-npm run verify:session   # 会话、指令、纪律包、关系、绑定、预设与预览只读（286 项）
-npm run verify:host      # 真实 cordis 宿主装配（116 项）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 八套自检（各套通过项总数以 verify 输出为准）
+npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
+npm run verify:bundle    # 客户端产物加载
+npm run verify:wiring    # 接线体检：25 组契约（后端做了前端没接 / 验收项回归）
+npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容
+npm run verify:distill   # 蒸馏 / 补全武装与 kind
+npm run verify:import    # PNG / CHARX / JSON 导入解析 / 字段保真
+npm run verify:session   # 会话、指令、纪律包、关系、绑定、预设与预览只读
+npm run verify:host      # 真实 cordis 宿主装配
 npm run typecheck:client # 只查浏览器侧类型
 ```
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的 1025 = build 串里所有自检的通过项之和，失败项必须为 0、skip 也必须为 0（`bundle 9 + wiring 72 + verify 16 + tavern 303 + distill 121 + import 58 + session 324 + host 122`）。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+徽章上的数字 = build 串里八套自检的通过项之和，失败项必须为 0、skip 也必须为 0。**各套总数与合计以 verify 输出实测为准，不在文档里回填逐套分解清单**——1025 时代的教训：这套数字从手写成 515 起，先后漂移出 515 / 981 / 1025 三套口径（981 与 1025 曾一度并存），自检断言增减是常态，宁可每次实测也不要维护第二份会过期的清单。
+
+当前徽章 **1032** 是 2026-11-01 发布快照的全链实测回填：`verify 16 + bundle 9 + wiring 72 + tavern 306 + distill 121 + import 58 + session 324 + host 126`。下一次增删断言后它就会过期——重新跑全链按实测改徽章，不必另行更新本段。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 
@@ -520,6 +525,8 @@ AGENTS.md 是以 user 角色消息注入的，插件用的是 system prompt，�
 <summary>退出后真的什么都不留吗？</summary>
 
 五段（L0 / L0.5 纪律 / L1 / 世界书 / 时间差）在退出后都返回空串，宿主会过滤空段。`awu_*` 工具同时全部卸载。数据文件仍然在磁盘上，但不参与任何提示词组装。
+
+唯一的例外是预设段：预设是宿主侧文风层，不随角色退出（详见「分层注入」一节的说明）。
 
 </details>
 

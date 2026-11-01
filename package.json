@@ -32,7 +32,8 @@
   "files": [
     "lib",
     "presets",
-    "distill",
+    "distill/flow.md",
+    "distill/flow-create.md",
     "cordis.patch.yml",
     "README.md"
   ],

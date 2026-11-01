@@ -14,10 +14,13 @@
  */
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = process.cwd()
-const require = createRequire(resolve(root, 'package.json'))
+// 与其余 7 套 verify 一致：从 import.meta.url 推根，不依赖 process.cwd()
+// （H6：曾经用 process.cwd() 定位，换目录跑必红且报错误导）
+const root = dirname(fileURLToPath(new URL('../package.json', import.meta.url)))
+const require = createRequire(join(root, 'package.json'))
 
 let pass = 0
 let fail = 0
@@ -54,15 +57,20 @@ globalThis.document = {
   getElementById: () => null,
 }
 
-console.log('客户端产物加载自检：')
+console.log(`客户端产物加载自检：\n  项目根：${root}`)
 
 let spec
 try {
-  await import(pathToFileURL(resolve(root, 'lib/client.js')).href)
+  await import(pathToFileURL(join(root, 'lib/client.js')).href)
   spec = store.spec
   check(spec !== undefined, '产物向 __ModuleLoader__ 注册了模块')
 } catch (error) {
-  check(false, '产物自身语法/求值可执行', error instanceof Error ? error.message : String(error))
+  if (error instanceof Error && (error.code === 'ERR_MODULE_NOT_FOUND' || error.message.includes('Cannot find module'))) {
+    check(false, '产物自身语法/求值可执行',
+      `${error.message}\n      解析出的项目根是 ${root}。这通常意味着 lib/client.js 不存在——\n      回项目根 npm run build 生成产物，而不是修代码。`)
+  } else {
+    check(false, '产物自身语法/求值可执行', error instanceof Error ? error.message : String(error))
+  }
 }
 
 if (spec !== undefined) {
@@ -91,7 +99,9 @@ if (spec !== undefined) {
 console.log('')
 if (fail > 0) {
   console.log(`客户端产物加载自检失败：通过 ${pass} 项，失败 ${fail} 项。`)
-  console.log('提示：这类错误 tsc/esbuild 都查不出来，通常是 styles 模板串里混进了反引号或 ${...}。')
+  console.log(`项目根：${root}`)
+  console.log('提示：报 Cannot find module → 回项目根跑 npm run build 生成产物；')
+  console.log('      真正执行抛错的 → tsc/esbuild 都查不出来，通常是 styles 模板串里混进了反引号或 ${...}。')
   process.exit(1)
 }
 console.log(`客户端产物加载自检全部通过（${pass} 项）。`)

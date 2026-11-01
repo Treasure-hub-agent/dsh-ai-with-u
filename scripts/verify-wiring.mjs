@@ -545,6 +545,9 @@ head('[8] 产物 · lib/prompt.js 里的纪律包与源码一致（build 漂移�
       fresh = undefined
     }
     if (fresh === false) {
+      // 与 scripts/verify.mjs 的口径分工（两处都写注释，防止只改一边再度分叉）：
+      // 这里是「产物↔源码逐字比对」，产物没编出来时无从比对 → [skip]，不算失败；
+      // 新鲜度本身（产物旧了必须拦）由 verify.mjs 第 3 节兜底，那边是 fail。
       skipped('lib/prompt.js 里的纪律包与源码一致',
         'lib/prompt.js 比 src/prompt.ts 旧：还没重新 build，等 C2 全量构建后再查（这不是失败）')
     } else if (fresh === undefined) {

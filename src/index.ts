@@ -187,6 +187,10 @@ export function apply(context: Context): () => void {
   const presetRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'presets')
   const disposers: Array<() => void> = []
   let prompt: PromptController | undefined
+  // 卸载标志（⚠️ 2026-11-01 修 H2 竞态）：`apply` 同步返回卸载函数时初始化还没完成，
+  // ready 闭包 / 注入回调若在卸载之后才执行，会留下装不回去的半挂载态（段/工具/路由/钩子泄漏，
+  // 热重载后出现双份人设）。所有注册路径在动手前都检查它。
+  let closed = false
 
   // ---------------------------------------------------------------- 0. 蒸馏武装（内存态）
   /**
@@ -234,6 +238,8 @@ export function apply(context: Context): () => void {
       if (seeded > 0) log.info(`已种入 ${seeded} 张预置角色卡`)
       const pc = new PromptController(store, { sys: ctx.systemPrompt, logger: log })
       await pc.restore()
+      // 已卸载（H2 竞态）：不再 install，也不登记 prompt，避免留下永不拆除的段
+      if (closed) { resolve(pc); return }
       pc.install()
       prompt = pc
       const active = pc.snapshot()
@@ -250,6 +256,7 @@ export function apply(context: Context): () => void {
   // ---------------------------------------------------------------- 3. 工具（可选）
   const pendingSync: Array<() => void> = []
   const registerTools = (toolCtx: AnyCtx, pc: PromptController): void => {
+    if (closed) return // 已卸载：不再挂任何工具（H2）
     const tools = toolCtx.get?.('tools') as AnyCtx['tools']
     if (tools === undefined) return
     toolsService = tools
@@ -293,6 +300,7 @@ export function apply(context: Context): () => void {
 
   // ---------------------------------------------------------------- 4. Web 路由（可选）
   const registerRoutes = (webCtx: AnyCtx, pc: PromptController): void => {
+    if (closed) return // 已卸载：不再注册路由（H2）
     const web = webCtx.get?.('webServer') as AnyCtx['webServer']
     if (web === undefined) return
     for (const route of buildRoutes(store, pc, distillArm)) {
@@ -320,6 +328,14 @@ export function apply(context: Context): () => void {
   }
 
   /**
+   * 本轮 turn 标识（`agentId:turn`，pre-step 去重键与 turn-stopping 去重键同一口径）。
+   * ⚠️ turn 缺失时用毫秒时间戳兜底：以前用 `?`，所有缺 turn 的事件拿到同一个 `agent:?`，
+   * 被 store.lastTurnId 的去重判「本轮已写入」，session.json 从此停更。
+   */
+  const turnKeyOf = (agent: AgentLike | undefined, turn: number | undefined): string =>
+    `${String(agent?.id ?? agent?.session?.id ?? 'agent')}:${String(turn ?? Date.now())}`
+
+  /**
    * 一轮对话结束 → 写 session.json。
    *
    * 按**该会话的决议角色**写（会话绑定 > 全局启用 > 未启用）：会话绑了 A、全局启用 B 时，
@@ -334,7 +350,7 @@ export function apply(context: Context): () => void {
     if (character === undefined) return
     const session = agent?.session
     const texts = extractTurnTexts(session)
-    const turnId = `${String(agent?.id ?? session?.id ?? 'agent')}:${String(turn ?? '?')}`
+    const turnId = turnKeyOf(agent, turn)
     try {
       const result = await store.commitTurn({
         character,
@@ -368,14 +384,58 @@ export function apply(context: Context): () => void {
       if (pc.characterForSession(sessionId) === undefined) return
       const session = agent?.session
       const recentTexts = extractRecentTexts(session)
-      const turnKey = `${String(agent?.id ?? session?.id ?? 'agent')}:${String(turn ?? '?')}`
+      const turnKey = turnKeyOf(agent, turn)
       await pc.refresh(log, { recentTexts, turnKey, ...(sessionId === undefined ? {} : { sessionId }) })
     } catch (error) {
       log.error('轮前刷新提示词缓存失败：%s', error instanceof Error ? error.message : String(error))
     }
   }
 
+  // 子代理 / 任务看板 / 定时会话都是独立 agent；它们的一轮对话不该写进
+  // 用户角色的 session.json（否则 L1 的「上次聊到哪」会被无关内容污染）。
+  // 宿主 registry 用 `roots()` 明确给出「没有 owner 的顶层 agent」，直接用它判定。
+  // 同一套判据也交给注入侧（PromptController 的子代理谓词）：
+  // 子代理是工程会话，L0+纪律包+L1+世界书会改写工程产出，注入侧一律视为未启用。
+  const agents = ctx.get?.('agents') as { roots?: () => AgentLike[] } | undefined
+  const isSubAgent = (agent: AgentLike | undefined): boolean => {
+    if (agent === undefined || typeof agents?.roots !== 'function') return false
+    try {
+      const roots = agents.roots()
+      // 取不到根列表时按「不是子代理」处理：宁可多写一轮，也不静默丢掉主会话
+      return roots.length > 0 && !roots.includes(agent)
+    } catch {
+      return false
+    }
+  }
+  /**
+   * 注入侧的子代理判定（PromptController.setSubAgentPredicate 的实现）：
+   *   - 组装上下文带 agent 对象时与写路径同一判据（roots() 引用相等，再兜底比对 id）；
+   *   - 拿不到 agent 对象（面板预览只带 sessionId）时按 id 对账：不是任何根 agent 的会话即为子代理；
+   *   - 会话 id 缺省（diagnostics 等无 agent 组装）按主会话处理：保留「退回全局」原语义。
+   */
+  const isSubAgentAssembly = (sessionId: string | undefined, assembly: unknown): boolean => {
+    if (sessionId === undefined || typeof agents?.roots !== 'function') return false
+    try {
+      const roots = agents.roots()
+      if (roots.length === 0) return false
+      const obj = (assembly ?? null) as { agent?: unknown } | null
+      const agent = (typeof obj === 'object' && obj !== null ? obj.agent : undefined) as AgentLike | undefined
+      if (typeof agent === 'object' && agent !== null) {
+        if (roots.includes(agent)) return false
+        // 引用不相等时兜底比对 id（宿主重组可能给克隆对象）
+        const rootIds = new Set(roots.map(root => root['id']) as Array<unknown>)
+        const selfId = agent?.id
+        if (selfId !== undefined && rootIds.has(selfId)) return false
+        if (agent?.session?.id !== undefined && rootIds.has(agent.session.id)) return false
+      }
+      return !roots.some(root => sessionIdOfAgent(root) === sessionId)
+    } catch {
+      return false
+    }
+  }
+
   const registerAgentHooks = (): void => {
+    if (closed) return // 已卸载：不再挂事件钩子（H2）
     // ctx.on 返回 Cordis effect disposer（源码核实：register → fiber.effect）。
     // 通过 ctx.get 探测一次，避免 Proxy 直接读属性抛 `without inject`。
     const events = ctx.get?.('events') as { on?: AnyCtx['on'] } | undefined
@@ -385,20 +445,6 @@ export function apply(context: Context): () => void {
     if (typeof on !== 'function') {
       log.warn('宿主没有 ctx.on，会话状态不会自动写盘（面板手动接口仍可用）')
       return
-    }
-    // 子代理 / 任务看板 / 定时会话都是独立 agent；它们的一轮对话不该写进
-    // 用户角色的 session.json（否则 L1 的「上次聊到哪」会被无关内容污染）。
-    // 宿主 registry 用 `roots()` 明确给出「没有 owner 的顶层 agent」，直接用它判定。
-    const agents = ctx.get?.('agents') as { roots?: () => AgentLike[] } | undefined
-    const isSubAgent = (agent: AgentLike | undefined): boolean => {
-      if (agent === undefined || typeof agents?.roots !== 'function') return false
-      try {
-        const roots = agents.roots()
-        // 取不到根列表时按「不是子代理」处理：宁可多写一轮，也不静默丢掉主会话
-        return roots.length > 0 && !roots.includes(agent)
-      } catch {
-        return false
-      }
     }
     const safe = (label: string, fn: () => Promise<void>): void => {
       // 事件回调里绝不抛出：Cordis 的 hooks 是同步派发的，抛错会被宿主吞成一条 warn，
@@ -430,6 +476,9 @@ export function apply(context: Context): () => void {
 
   // 等服务就绪后再挂：初始化是异步的，必须等 prompt 构造好
   void ready.then((pc) => {
+    if (closed) return // 初始化完成前卸载（H2）：不再挂任何东西
+    // 注入侧与写路径共用 roots() 判据：子代理会话不注入人设（连全局都不回落）
+    pc.setSubAgentPredicate(isSubAgentAssembly)
     pc.onStateChange(() => { for (const fn of pendingSync) fn() })
     waitTools(pc)
     waitWeb(pc)
@@ -442,6 +491,7 @@ export function apply(context: Context): () => void {
 
   // ---------------------------------------------------------------- 卸载
   return () => {
+    closed = true // 从此刻起 ready 闭包 / 注入回调里的所有挂载路径都会短路（H2）
     distillArm.disarm()
     prompt?.uninstall()
     for (const d of disposers.reverse()) {

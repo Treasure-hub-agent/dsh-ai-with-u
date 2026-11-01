@@ -49,13 +49,36 @@ if (!Array.isArray(inject)) {
 }
 
 // ---------------------------------------------------------------- 3. 产物新鲜度
+// 与 verify-wiring 的口径分工（两处都写注释，防止只改一边再度分叉）：
+//   · 这里做「产物比源码旧 → fail」：新鲜度是硬契约，改了源码没重编必须在安装前拦住；
+//   · wiring 第 8 节做「产物↔源码逐字比对 → 产物旧则 [skip]」：内容一致性检查
+//     在产物还没编出来时无从比对，skip 不算失败（scripts/verify-wiring.mjs 同款注释）。
 console.log('产物检查：')
 // 动态生成映射：src/*.ts → lib/*.js。写死列表会漏掉后加的模块
 // （tavern / import-card / distill 就是这样长期没被新鲜度检查覆盖的）。
 const pairs = (await readdir(join(root, 'src')))
   .filter(name => name.endsWith('.ts'))
   .map(name => [`src/${name}`, `lib/${name.replace(/\.ts$/u, '.js')}`])
-pairs.push(['client/index.tsx', 'lib/client.js'])
+
+// 前端产物是单文件 bundle（entry.tsx 打包进 lib/client.js）：配对对象是
+// client/ 全目录的最大 mtime，而不是某个入口文件——entry import 的
+// distill/text/styles/preset-view 等模块改了同样必须重编。
+// （旧写法只盯 client/index.tsx，改其余文件单独 npm run verify 会假绿。）
+const clientLatest = async () => {
+  const walk = async (dir) => {
+    const out = []
+    for (const dirent of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, dirent.name)
+      if (dirent.isDirectory()) out.push(...await walk(path))
+      else out.push(path)
+    }
+    return out
+  }
+  const files = await walk(join(root, 'client'))
+  const stamps = await Promise.all(files.map(p => stat(p).then(s => s.mtimeMs)))
+  return Math.max(...stamps)
+}
+
 for (const [src, out] of pairs) {
   try {
     const [a, b] = await Promise.all([stat(join(root, src)), stat(join(root, out))])
@@ -65,9 +88,20 @@ for (const [src, out] of pairs) {
     fail(`${out} 不存在`)
   }
 }
-// 孤儿产物：lib 里有 .js，但 src 里没有同名 .ts（多半是改完没清干净的旧模块）
 {
-  const expected = new Set(pairs.map(([, out]) => out))
+  const out = 'lib/client.js'
+  try {
+    const [latest, b] = [await clientLatest(), await stat(join(root, out))]
+    if (b.mtimeMs + 1000 < latest) fail(`${out} 比 client/ 下最新源文件旧，重新构建`)
+    else ok(`${out} 已是最新（对照 client/ 全目录最大 mtime）`)
+  } catch {
+    fail(`${out} 不存在或 client/ 无法遍历`)
+  }
+}
+// 孤儿产物：lib 里有 .js，但 src 里没有同名 .ts（多半是改完没清干净的旧模块）
+// lib/client.js 是前端 bundle，pair 不来自 src/*.ts，这里显式补进期望集合
+{
+  const expected = new Set([...pairs.map(([, out]) => out), 'lib/client.js'])
   const libFiles = (await readdir(join(root, 'lib'))).filter(name => name.endsWith('.js'))
   for (const name of libFiles) {
     if (!expected.has(`lib/${name}`)) fail(`lib/${name} 没有对应的源文件（孤儿产物，删掉或补回 src）`)

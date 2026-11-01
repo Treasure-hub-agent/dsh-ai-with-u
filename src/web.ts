@@ -540,7 +540,10 @@ export function buildRoutes(
       method: 'POST',
       path: `${ROUTE_PREFIX}/character/save`,
       handler: guard(async (req, res) => {
-        const body = await readBody(req)
+        // v0.5.1 放宽到导入同款上限：导入链允许 16 MB 请求体 / 8 MB 卡，但保存整卡回传
+        // 却卡在默认 4 MB——大文本卡「解析成功、后半程 400」。放宽后攻击面由同样
+        // 覆盖到这里的新卡过一道 parseCardBuffer 的 8 MB 闸来守住（导入时已校验）。
+        const body = await readBody(req, IMPORT_BODY_LIMIT)
         const name = String(body['name'] ?? '').trim()
         if (name === '') throw new Error('缺少角色名')
         const card = body['card']

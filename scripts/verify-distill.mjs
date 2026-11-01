@@ -15,6 +15,10 @@
  *   9. 非法 data → `invalid-data` 且不写盘
  *  10. 端到端：arm → save 一张最小卡 → `readCardView(name)` 能读到
  *
+ * 条目偏长口径：§3 的 warnings 断言是 `length > 0`（走过场不行、也不写死数字）——
+ * 阈值统一后 `lengthWarnings` 只认 `LORE_ENTRY_SOFT_LIMIT = 4000`（src/tavern.ts 单一真源，
+ * LENGTH_LIMITS.loreEntry / CARD_SOFT_LIMITS.bookEntry 都引用它），本文件不做第二份阈值数字。
+ *
  * 运行：node scripts/verify-distill.mjs
  */
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
@@ -22,6 +26,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { makeReq, makeRes } from './helpers.mjs'
 
 const root0 = new URL('..', import.meta.url).pathname
 const root = process.platform === 'win32' ? root0.replace(/^\/([A-Za-z]:)/, '$1') : root0
@@ -287,21 +292,14 @@ section('8. 路由：/distill/arm · /distill/state · /distill/disarm（含方�
   const routes = buildRoutes(store, fakePrompt, arm)
   const route = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
 
+  // HTTP fake 统一走 scripts/helpers.mjs（带 socket.localAddress，单一真源）。
+  // 薄适配：{out,res} 包回原先平铺的 res 形状、(method[, body][, url]) 位置签名转 opts——
+  // 本节与 §12 的调用点保持零改动，实现没有第二份。
   const fakeRes = () => {
-    const out = { status: 0, body: undefined }
-    return {
-      out,
-      setHeader() {},
-      writeHead(status) { out.status = status },
-      end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-    }
+    const { out, res } = makeRes()
+    return { out, ...res }
   }
-  const fakeReq = (method) => ({
-    method,
-    url: '/',
-    headers: { host: '127.0.0.1:50143' },
-    async *[Symbol.asyncIterator]() {},
-  })
+  const fakeReq = (method, body, url) => makeReq({ method, body, url })
 
   const res1 = fakeRes()
   await route('/distill/arm').handler(fakeReq('POST'), res1)
@@ -512,21 +510,12 @@ section('12. 时间窗通道 kind：distill（缺省）/ create（骨架卡 AI �
   }
   const routes = buildRoutes(store, fakePrompt, routeArm)
   const routeOf = (path) => routes.find(r => r.path === `/_dsh/ai-with-u${path}`)
+  // HTTP fake 统一走 scripts/helpers.mjs（与 §8 同款薄适配，实现没有第二份）
   const fakeRes = () => {
-    const out = { status: 0, body: undefined }
-    return {
-      out,
-      setHeader() {},
-      writeHead(status) { out.status = status },
-      end(bytes) { try { out.body = JSON.parse(String(bytes)) } catch { out.body = String(bytes) } },
-    }
+    const { out, res } = makeRes()
+    return { out, ...res }
   }
-  const fakeReq = (method, body, url = '/') => ({
-    method,
-    url,
-    headers: { host: '127.0.0.1:50143', 'content-type': 'application/json' },
-    async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) },
-  })
+  const fakeReq = (method, body, url) => makeReq({ method, body, url })
 
   let res = fakeRes()
   await routeOf('/distill/arm').handler(fakeReq('POST', { kind: 'create', name: '林晚' }), res)
