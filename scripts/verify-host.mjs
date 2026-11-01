@@ -426,6 +426,44 @@ if (routeOf('/activate') === undefined || routeOf('/deactivate') === undefined) 
     check(layerText('aiwu:active-character', ctxB).includes(ACTIVE_NAME), '解除绑定后该会话回落到全局角色')
   }
 
+  // ---------------------------------------------------------------- 真机复现：绑定的卡被删 → 该会话未启用（不回落全局）
+  {
+    const { Store: HostStore } = await import(lib('store.js'))
+    const hostStore = new HostStore(sandbox)
+    const TMP = '__probe_tmp__'
+    const PROBE_SESSION = 'probe-dead'
+    await hostStore.writeCard(TMP, { name: TMP, basic: { 姓名: TMP, 一句话背景: '临时探针卡' } })
+
+    const bindProbe = fakeRes()
+    await routeOf('/bind').handler(fakeReq('POST', { name: TMP, sessionId: PROBE_SESSION }), bindProbe)
+    check(bindProbe.out.status === 200 && bindProbe.out.body?.character === TMP,
+      `绑定临时卡 → ${bindProbe.out.status}`)
+
+    // bind 之后立刻预览：必须是真内容（修掉「只拿到 39 字符占位」）
+    const pvWarm = fakeRes()
+    await routeOf('/preview').handler({ ...fakeReq('GET'), url: `/?sessionId=${PROBE_SESSION}` }, pvWarm)
+    const warmL1 = pvWarm.out.body?.segments?.find(s => s.id === 'aiwu:active-character')?.text ?? ''
+    check(warmL1.includes(TMP) && !warmL1.includes('角色卡正在载入'),
+      `POST /bind 后该会话 L1 已预热（${warmL1.length} 字符，非占位）`)
+
+    // 走真实删卡路由
+    const delProbe = fakeRes()
+    await routeOf('/character/delete').handler(fakeReq('POST', { name: TMP }), delProbe)
+    check(delProbe.out.status === 200 && (delProbe.out.body?.deadBindings ?? []).includes(PROBE_SESSION),
+      `删卡返回失效的会话列表：${JSON.stringify(delProbe.out.body?.deadBindings)}`)
+
+    const pvDead = fakeRes()
+    await routeOf('/preview').handler({ ...fakeReq('GET'), url: `/?sessionId=${PROBE_SESSION}` }, pvDead)
+    check(pvDead.out.body?.source === 'none' && pvDead.out.body?.active?.enabled === false,
+      `删卡后该会话 source=${String(pvDead.out.body?.source)}（期望 none，不是 global）`)
+    check(pvDead.out.body?.active?.character === undefined, '该会话不再指向任何角色（没有回落全局）')
+
+    // 磁盘上保留 dead 标记（重启后保证仍成立）
+    const bindingsOnDisk = JSON.parse(await readFile(join(sandbox, '_sessions.json'), 'utf8'))
+    check(bindingsOnDisk[PROBE_SESSION]?.dead === true && bindingsOnDisk[PROBE_SESSION]?.character === TMP,
+      `_sessions.json 保留 dead 绑定：${JSON.stringify(bindingsOnDisk[PROBE_SESSION])}`)
+  }
+
   // ---------------------------------------------------------------- 预设段（aiwu:preset @5080）
   {
     const { Store: HostStore } = await import(lib('store.js'))

@@ -314,6 +314,8 @@ export function buildRoutes(
         const binding = await store.bindSession(sessionId, name)
         await prompt.reloadBindings()
         prompt.refreshMount()
+        // 写操作允许刷新：把该会话的 L1 预热好，面板带 sessionId 预览时看到的是真内容（不是占位文本）
+        await prompt.refreshSession(sessionId)
         send(res, 200, {
           ok: true,
           bound: true,
@@ -586,13 +588,15 @@ export function buildRoutes(
         if (name === '') throw new Error('缺少角色名')
         if (prompt.characterName === name) await prompt.deactivate()
         await store.deleteCharacter(name, withMemory)
-        // 删卡连带清掉「绑在这张卡上」的会话绑定：留着就是悬空绑定（绑定的卡没了 = 该会话未启用）
-        const pruned = await store.pruneBindingsOf(name)
-        if (pruned.length > 0) {
+        // 删卡**不删绑定**：把绑在这张卡上的会话标成 dead（磁盘留痕 + 内存标记）。
+        // 直接删条目会让 resolveTarget 走不到 dead 分支、静默落到全局角色——2026-11-01 真机复测的 bug。
+        const deadSessions = await store.markBindingsDead(name)
+        prompt.noteBindingsDead(deadSessions)
+        if (deadSessions.length > 0) {
           await prompt.reloadBindings()
           prompt.refreshMount()
         }
-        send(res, 200, { ok: true, prunedBindings: pruned })
+        send(res, 200, { ok: true, prunedBindings: deadSessions, deadBindings: deadSessions })
       }),
     },
     // ------------------------------------------------------------ 启用（插）

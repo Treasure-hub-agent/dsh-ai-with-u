@@ -112,11 +112,19 @@ export interface RelationLogItem {
   why?: string
 }
 
-/** 一条会话绑定：这个会话用哪张卡（与全局启用无关）。 */
+/**
+ * 一条会话绑定：这个会话用哪张卡（与全局启用无关）。
+ *
+ * `dead: true` = **绑定的角色卡已被删除**：这条绑定要**留在磁盘上**（不要删），
+ * 否则重启/重读之后就分不清「本来没绑」和「绑的卡没了」，会话会静默回落到全局角色
+ * （用户以为在跟 A 聊，其实换成了 B）。`resolveTarget` 看到 dead 一律返回「未启用」。
+ */
 export interface SessionBinding {
   character: string
   /** 绑定时刻（本地时区 ISO，带偏移）。 */
   boundAt: string
+  /** 绑定的卡已删除（保留原角色名，面板可显示「原先绑的是谁」）。 */
+  dead?: boolean
 }
 
 export type SessionBindings = Record<string, SessionBinding>
@@ -1415,7 +1423,10 @@ export class Store {
       const character = typeof value['character'] === 'string' ? value['character'].trim() : ''
       if (character === '') continue
       const boundAt = typeof value['boundAt'] === 'string' ? value['boundAt'].trim() : ''
-      out[sessionId] = { character, boundAt: boundAt === '' ? localIsoTimestamp() : boundAt }
+      const binding: SessionBinding = { character, boundAt: boundAt === '' ? localIsoTimestamp() : boundAt }
+      // `dead` 是**持久标记**：绑定的卡没了就留痕，不删除条目（重启后保证仍能判定"未启用"）
+      if (value['dead'] === true) binding.dead = true
+      out[sessionId] = binding
     }
     return out
   }
@@ -1429,6 +1440,7 @@ export class Store {
    * 绑定一个会话到某张卡（「当前会话启用」）。
    *
    * 卡不存在直接拒（绑到不存在的卡 = 那个会话之后会静默未启用，用户看不懂）；
+   * 覆盖既有条目时**清掉 dead 标记**（重新绑另一张卡 = 这个会话恢复正常）。
    * 写盘走 `#sessions` 键的跨进程锁——桌面 + web profile 共用数据根时，
    * 绑定表与 `_index.json` 同级对待，不共用锁就会互相丢更新。
    */
@@ -1445,7 +1457,7 @@ export class Store {
     })
   }
 
-  /** 解除一个会话的绑定；返回该会话原先绑的是谁（没绑过返回 undefined）。 */
+  /** 解除一个会话的绑定（**真正删条**：这是用户显式动作）；返回原先绑的是谁。 */
   async unbindSession(sessionId: string): Promise<SessionBinding | undefined> {
     const sid = normalizeSessionId(sessionId)
     return this.locked('#sessions', async () => {
@@ -1459,16 +1471,38 @@ export class Store {
   }
 
   /**
-   * 清理指向「已删除角色卡」的绑定，返回被清掉的 sessionId。
+   * 把「绑在这张卡上」的会话条目标成 **dead**（**不删除**），返回受影响的 sessionId。
    *
-   * 为什么必须清：绑定指向不存在的卡时，那个会话应当**明确未启用**（并且我们连同绑定一起清掉），
-   * 而不是静默回落到全局角色——否则用户以为在跟 A 聊，其实在跟 B 聊。
+   * 这是「删卡」的安全路径：条目留着、`character` 留着（面板能说"原先绑的是谁"），
+   * 但 `resolveTarget` 见到 dead 就返回**未启用**——绝不静默回落到全局角色。
+   */
+  async markBindingsDead(character: string): Promise<string[]> {
+    const name = normalizeName(character)
+    return this.locked('#sessions', async () => {
+      const bindings = await this.readBindings()
+      const affected: string[] = []
+      for (const [sessionId, binding] of Object.entries(bindings)) {
+        if (binding.character !== name) continue
+        affected.push(sessionId)
+        bindings[sessionId] = { character: binding.character, boundAt: binding.boundAt, dead: true }
+      }
+      if (affected.length > 0) await this.writeBindingsUnlocked(bindings)
+      return affected
+    })
+  }
+
+  /**
+   * 启动自检：把绑定指向「已不存在的角色卡」的条目标成 dead（**不删除**），返回受影响的 sessionId。
+   *
+   * 为什么不删：删了之后重启就分不清「本来没绑」和「绑的卡没了」，
+   * 会话会静默回落到全局角色——那正是 2026-11-01 真机复测抓到的 bug。
    */
   async pruneBindings(): Promise<string[]> {
     return this.locked('#sessions', async () => {
       const bindings = await this.readBindings()
-      const pruned: string[] = []
+      const dead: string[] = []
       for (const [sessionId, binding] of Object.entries(bindings)) {
+        if (binding.dead === true) continue
         let alive = false
         try {
           alive = (await this.readCcV3(binding.character)) !== undefined
@@ -1476,26 +1510,21 @@ export class Store {
           // 卡名本身就是脏的（手改过 `_sessions.json`）：按"卡不在"处理
           alive = false
         }
-        if (!alive) { pruned.push(sessionId); delete bindings[sessionId] }
+        if (alive) continue
+        dead.push(sessionId)
+        bindings[sessionId] = { character: binding.character, boundAt: binding.boundAt, dead: true }
       }
-      if (pruned.length > 0) await this.writeBindingsUnlocked(bindings)
-      return pruned
+      if (dead.length > 0) await this.writeBindingsUnlocked(bindings)
+      return dead
     })
   }
 
-  /** 删卡时连带清掉指向它的绑定（返回被清掉的 sessionId 列表）。 */
+  /**
+   * @deprecated 用 {@link markBindingsDead}：删卡时**标记 dead 而不是删条**。
+   * 保留这个方法只为兼容旧调用方；新代码不要用（会把"未启用"保证弄丢）。
+   */
   async pruneBindingsOf(character: string): Promise<string[]> {
-    const name = normalizeName(character)
-    return this.locked('#sessions', async () => {
-      const bindings = await this.readBindings()
-      const pruned = Object.entries(bindings)
-        .filter(([, binding]) => binding.character === name)
-        .map(([sessionId]) => sessionId)
-      if (pruned.length === 0) return pruned
-      for (const sessionId of pruned) delete bindings[sessionId]
-      await this.writeBindingsUnlocked(bindings)
-      return pruned
-    })
+    return this.markBindingsDead(character)
   }
 
   // ---------------------------------------------------------------- 预设（提示词模块组）
@@ -1575,6 +1604,18 @@ export class Store {
       }
       if (Object.keys(out).length > 0) active.sessions = out
     }
+    // dead 标记（预设被删过的会话）：持久化，重启后仍然是「无预设」而不是回落全局
+    const deadSessions = raw['deadSessions']
+    if (isRecord(deadSessions)) {
+      const out: Record<string, { id: string; at: string }> = {}
+      for (const [sessionId, value] of Object.entries(deadSessions)) {
+        if (!isRecord(value)) continue
+        const id = typeof value['id'] === 'string' ? value['id'].trim() : ''
+        if (!isValidPresetId(id)) continue
+        out[sessionId] = { id, at: typeof value['at'] === 'string' ? value['at'] : '' }
+      }
+      if (Object.keys(out).length > 0) active.deadSessions = out
+    }
     return active
   }
 
@@ -1582,6 +1623,7 @@ export class Store {
     const payload: PresetActive = { version: PRESET_VERSION }
     if (active.global !== undefined) payload.global = active.global
     if (active.sessions !== undefined && Object.keys(active.sessions).length > 0) payload.sessions = active.sessions
+    if (active.deadSessions !== undefined && Object.keys(active.deadSessions).length > 0) payload.deadSessions = active.deadSessions
     await atomicWrite(join(this.root, PRESETS_ACTIVE_FILE), `${JSON.stringify(payload, null, 2)}\n`)
   }
 
@@ -1636,9 +1678,11 @@ export class Store {
   }
 
   /**
-   * 删除一份预设：**正文 + 索引 + 启用态三处一起清**（同一个临界区）。
+   * 删除一份预设：**正文 + 索引清掉**；启用态里指向它的会话条目**改成 dead 标记**（不直接删）。
    *
-   * 返回被清掉的会话 id，让面板能提示「有 N 个会话原本用它」。
+   * 为什么不直接删会话条目：删了之后重启就分不清「本来没启用」和「启用的那份刚被删」，
+   * 那个会话会静默回落到全局预设（与角色绑定同一个坑）。
+   * 返回被标记的会话 id，让面板能提示「有 N 个会话原本用它」。
    */
   async deletePreset(id: string): Promise<{ prunedSessions: string[]; wasGlobal: boolean }> {
     const presetId = String(id ?? '').trim()
@@ -1650,11 +1694,14 @@ export class Store {
       await atomicWrite(join(this.root, PRESETS_INDEX_FILE), `${JSON.stringify({ version: PRESET_VERSION, presets }, null, 2)}\n`)
       const active = await this.readPresetActive()
       const prunedSessions: string[] = []
+      const at = localIsoTimestamp()
       if (active.sessions !== undefined) {
         for (const [sessionId, value] of Object.entries(active.sessions)) {
           if (value !== presetId) continue
           delete active.sessions[sessionId]
           prunedSessions.push(sessionId)
+          // 留痕：这个会话**曾经**用的是这份预设，现在没了 → 未启用（不回落全局）
+          active.deadSessions = { ...(active.deadSessions ?? {}), [sessionId]: { id: presetId, at } }
         }
       }
       const wasGlobal = active.global === presetId
@@ -1667,7 +1714,8 @@ export class Store {
   /**
    * 启用 / 取消启用：`scope='global'` 改全局，`scope='session'` 改指定会话。
    *
-   * `id` 缺省 = 取消启用（会话回落到全局；全局则回到"无预设"）。
+   * `id` 缺省 = **取消启用**（会话回落到全局；全局则回到"无预设"）——
+   * 这是用户显式动作，所以连 dead 标记一起清掉。
    */
   async setPresetActive(input: { id?: string; scope: 'global' | 'session'; sessionId?: string }): Promise<PresetActive> {
     const scope = input.scope === 'session' ? 'session' : 'global'
@@ -1682,10 +1730,19 @@ export class Store {
         else active.global = id
       } else {
         const sessions = { ...(active.sessions ?? {}) }
-        if (id === '') delete sessions[sessionId as string]
-        else sessions[sessionId as string] = id
+        const deadSessions = { ...(active.deadSessions ?? {}) }
+        if (id === '') {
+          delete sessions[sessionId as string]
+          delete deadSessions[sessionId as string]
+        } else {
+          sessions[sessionId as string] = id
+          // 重新启用 = 从"未启用"恢复正常
+          delete deadSessions[sessionId as string]
+        }
         if (Object.keys(sessions).length > 0) active.sessions = sessions
         else delete active.sessions
+        if (Object.keys(deadSessions).length > 0) active.deadSessions = deadSessions
+        else delete active.deadSessions
       }
       await this.writePresetActiveUnlocked(active)
       return active
@@ -1695,7 +1752,8 @@ export class Store {
   /**
    * 清理悬空引用：索引里文件已不存在的、启用态里指向不存在预设的。
    *
-   * 启动时跑一次（用户手删文件 / 别的插件实例删过）；返回被清掉的东西供日志留痕。
+   * 启动时跑一次（用户手删文件 / 别的插件实例删过）；返回被处理的东西供日志留痕。
+   * **会话条目改成 dead 标记，不直接删**——理由同 `deletePreset`。
    */
   async prunePresets(): Promise<{ presets: string[]; sessions: string[]; globalCleared: boolean }> {
     return this.locked('#presets', async () => {
@@ -1712,11 +1770,14 @@ export class Store {
       const aliveIds = new Set(alive.map(entry => entry.id))
       const active = await this.readPresetActive()
       const prunedSessions: string[] = []
+      const at = localIsoTimestamp()
       if (active.sessions !== undefined) {
         for (const [sessionId, value] of Object.entries(active.sessions)) {
           if (aliveIds.has(value)) continue
           delete active.sessions[sessionId]
           prunedSessions.push(sessionId)
+          // 留痕（不直接删）：这个会话曾经用那份预设，现在文件没了 → 未启用，不回落全局
+          active.deadSessions = { ...(active.deadSessions ?? {}), [sessionId]: { id: value, at } }
         }
       }
       const globalCleared = active.global !== undefined && !aliveIds.has(active.global)

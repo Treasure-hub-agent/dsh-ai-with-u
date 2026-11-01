@@ -65,6 +65,10 @@ export interface PresetIndex {
  * `_presets_active.json`：启用态。
  *
  * 决议优先级（与角色绑定同构）：**会话预设 > 全局预设 > 无**。
+ *
+ * `deadSessions` 是**持久化的失效标记**：某会话启用的预设被删掉之后，条目**不删**，
+ * 移到这里（保留原 preset id），这样重启/重读之后该会话仍然是「无预设」而不是静默回落到全局。
+ * （2026-11-01 真机复测抓到的同类 bug，与角色绑定的 `dead` 同一套口径。）
  */
 export interface PresetActive {
   version: typeof PRESET_VERSION
@@ -72,6 +76,8 @@ export interface PresetActive {
   global?: string
   /** 各会话启用的预设 id（会话结束没有事件，只按条目记录）。 */
   sessions?: Record<string, string>
+  /** 曾经启用、但那份预设已被删除的会话（值保留原 preset id，面板可显示「原先用的是哪份」）。 */
+  deadSessions?: Record<string, { id: string; at: string }>
 }
 
 /** 预设 id 的合法形状：`p_` + 8 位小写 base36，落成文件名也安全。 */

@@ -976,14 +976,41 @@ section('18. 会话绑定：决议优先级 / 删卡回落 / 全局切换 / LRU 
   check(pc.characterForSession('sess-unknown') === OTHER, '没绑定的会话跟着全局变')
   await pc.activate(NAME)    // 换回
 
-  // ---- 绑定的卡被删：该会话未启用 + 清绑定 + **绝不回落到全局**
+  // ---- 绑定的卡被删：该会话未启用 + **绑定改成 dead 留痕（不删条）** + 绝不回落到全局
   await store.deleteCharacter(NAME, true)
   await pc.refresh(undefined, { sessionId: 'sess-b' })
   check(pc.characterForSession('sess-b') === undefined, '绑定的卡被删：该会话视为未启用（不回落全局）')
   check(pc.resolveTarget('sess-b').dead === true, '并标成 dead（面板可提示"绑定的角色卡已被删除"）')
-  check((await store.readBindings())['sess-b'] === undefined, '悬空绑定已被清掉（磁盘同步）')
+  const persistedDead = (await store.readBindings())['sess-b']
+  check(persistedDead?.dead === true && persistedDead?.character === NAME,
+    `磁盘上保留绑定条目并标 dead（不是删条）：${JSON.stringify(persistedDead)}`)
+  // 模拟重启：重新读绑定表后**仍然是未启用**（2026-11-01 真机复现的回归点）
+  await pc.reloadBindings()
+  check(pc.characterForSession('sess-b') === undefined && pc.resolveTarget('sess-b').source === 'none',
+    '重读绑定表（模拟重启）后该会话仍是 none（不回落全局）')
   const pvDead = pc.preview('sess-b')
-  check(pvDead.active.enabled === false && pvDead.total === 0, '该会话的 preview 全空（未启用）')
+  check(pvDead.active.enabled === false && pvDead.total === 0 && pvDead.source === 'none',
+    '该会话的 preview 全空且 source=none（未启用）')
+  // 重新绑另一张卡 → 恢复正常（dead 标记被覆盖清掉）
+  await store.writeCard(NAME, { ...CARD, name: NAME })
+  await store.bindSession('sess-b', OTHER)
+  await pc.reloadBindings()
+  check(pc.characterForSession('sess-b') === OTHER && pc.resolveTarget('sess-b').source === 'session',
+    '重新绑定另一张卡后恢复为那张卡')
+  check((await store.readBindings())['sess-b']?.dead !== true, '磁盘上的 dead 标记已被覆盖清掉')
+
+  // ---- 启动 prune：卡被**外部**删掉（没走删卡路由）→ 标 dead 而不是删条，重启后仍为未启用
+  const EXT = '外部删卡'
+  await store.writeCard(EXT, { ...CARD, name: EXT })
+  await store.bindSession('sess-ext', EXT)
+  await rm(join(sandbox, 'characters', EXT), { recursive: true, force: true })
+  const markedDead = await store.pruneBindings()
+  check(markedDead.includes('sess-ext'), `启动 prune 报告失效的会话：${JSON.stringify(markedDead)}`)
+  check((await store.readBindings())['sess-ext']?.dead === true, 'prune 把条目标 dead（不删条）')
+  const freshForPrune = await makePromptHost()
+  await freshForPrune.pc.reloadBindings()
+  check(freshForPrune.pc.resolveTarget('sess-ext').source === 'none',
+    '新 controller（模拟重启）读磁盘后该会话仍是 none')
 
   // ---- LRU：缓存槽位有上限（会话结束没有事件，靠淘汰 + 按需重建）
   await store.writeCard(NAME, { ...CARD, name: NAME })
@@ -1023,6 +1050,10 @@ section('18. 会话绑定：决议优先级 / 删卡回落 / 全局切换 / LRU 
   const pvRes = await restCall(routes, 'GET', '/preview', { url: '/?sessionId=rest-sess' })
   check(pvRes.body?.sessionId === 'rest-sess' && pvRes.body?.active?.character === OTHER,
     'GET /preview?sessionId= 按会话预览')
+  // bind 之后立刻预热：预览不该是「角色卡正在载入」占位（实测 bug：只拿到 39 字符占位）
+  const l1AfterBind = pvRes.body?.segments?.find(s => s.id === 'aiwu:active-character')?.text ?? ''
+  check(l1AfterBind.includes('你现在的身份') && !l1AfterBind.includes('角色卡正在载入'),
+    `POST /bind 后该会话 L1 已预热（${l1AfterBind.length} 字符，不是占位）`)
   const detail = await restCall(routes, 'GET', '/character',
     { url: `/?name=${encodeURIComponent(OTHER)}&sessionId=rest-sess` })
   check(detail.body?.binding?.boundHere === true, 'GET /character 的 binding.boundHere 为 true')
@@ -1136,18 +1167,34 @@ section('19. 预设系统：CRUD / 上限 / 决议优先级 / 删预设不回落
   await store.setPresetActive({ scope: 'global', id: presetA.id })
   await pc.reloadPresets()
 
-  // ---- 4) 删除会话预设 → 该会话「无预设」，**不回落全局**
+  // ---- 4) 删除会话预设 → 该会话「无预设」，**不回落全局**（且磁盘留 dead 痕，重启仍成立）
   const deleted = await store.deletePreset(presetB.id)
-  check(deleted.prunedSessions.includes('p-sess-1'), `删除时报告被清理的会话：${JSON.stringify(deleted.prunedSessions)}`)
-  // 产品路径（`POST /preset/delete`）会先把这些会话标成「无预设」，测试里手动等价调用
+  check(deleted.prunedSessions.includes('p-sess-1'), `删除时报告失效的会话：${JSON.stringify(deleted.prunedSessions)}`)
   pc.notePresetDeleted(deleted.prunedSessions)
   const activeAfterDelete = JSON.parse(await readFile(join(sandbox, '_presets_active.json'), 'utf8'))
   check(activeAfterDelete.sessions === undefined && activeAfterDelete.global === presetA.id,
-    `_presets_active.json 里会话条目已清、全局保留：${JSON.stringify(activeAfterDelete)}`)
+    `_presets_active.json 里活条目已清、全局保留：${JSON.stringify(activeAfterDelete)}`)
+  check(activeAfterDelete.deadSessions?.['p-sess-1']?.id === presetB.id,
+    `磁盘上保留 deadSessions 留痕（不是直接删）：${JSON.stringify(activeAfterDelete.deadSessions?.['p-sess-1'])}`)
   await pc.reloadPresets()
   check(pc.resolvePreset('p-sess-1').preset === undefined && pc.resolvePreset('p-sess-1').source === 'none',
     '会话预设被删后该会话 = 无预设（不回落全局）')
   check(presetTextFor('p-sess-1') === '', '该会话的预设段为空串')
+  // 模拟重启：全新 controller 只靠磁盘，仍判为「无预设」
+  const fresh = await makePromptHost()
+  await fresh.pc.reloadPresets()
+  check(fresh.pc.resolvePreset('p-sess-1').source === 'none',
+    '重启（全新 controller 只读磁盘）后仍然是无预设（不回落全局）')
+  // 重新启用另一份预设 → 恢复正常
+  await store.setPresetActive({ scope: 'session', sessionId: 'p-sess-1', id: presetA.id })
+  await pc.reloadPresets()
+  check(pc.resolvePreset('p-sess-1').source === 'session' && pc.resolvePreset('p-sess-1').preset?.id === presetA.id,
+    '重新启用另一份预设后恢复正常')
+  check(JSON.parse(await readFile(join(sandbox, '_presets_active.json'), 'utf8')).deadSessions === undefined,
+    '磁盘上的 deadSessions 已被清掉')
+  // 收尾：取消该会话的启用（回到跟全局）
+  await store.setPresetActive({ scope: 'session', sessionId: 'p-sess-1' })
+  await pc.reloadPresets()
 
   // ---- 5) preview 第六段（预设段）与 preset 摘要
   const pv = pc.preview()

@@ -497,8 +497,12 @@ export class PromptController {
    * 决议一个会话用哪张卡：**会话绑定 > 全局启用 > 未启用**。
    *
    * 纯内存（渲染路径会在一次组装里被调五次，绝不能每个段都读一次盘）；
-   * 绑定表由 {@link restore} / {@link reloadBindings} 从 `_sessions.json` 灌进来，
-   * 绑定的卡被删时由 `refreshCache` 把该会话标成 `deadSlots` 并清掉绑定。
+   * 绑定表由 {@link restore} / {@link reloadBindings} 从 `_sessions.json` 灌进来。
+   *
+   * `dead` 有**两个来源**，都必须判为未启用：
+   *   1. 内存里的 `deadSlots`（本轮运行期发现卡没了）；
+   *   2. 磁盘绑定条目上的 `dead: true`（上一个进程删过卡 / 启动 prune 标记过）。
+   * 只看内存会把「重启后」的保证弄丢——2026-11-01 真机复测抓到的正是这个。
    */
   resolveTarget(sessionId?: string): SessionTarget {
     if (sessionId !== undefined) {
@@ -507,6 +511,7 @@ export class PromptController {
       if (this.deadSlots.has(sessionId)) return { key: sessionId, source: 'none', dead: true }
       const bound = this.bindings[sessionId]
       if (bound !== undefined) {
+        if (bound.dead === true) return { key: sessionId, source: 'none', dead: true }
         return { character: bound.character, key: sessionId, source: 'session' }
       }
     }
@@ -535,14 +540,40 @@ export class PromptController {
     return out
   }
 
-  /** 重新从磁盘读绑定表（REST `/bind` `/unbind` 写完后调用）。 */
+  /** 重新从磁盘读绑定表（REST `/bind` `/unbind` / 删卡后调用）。 */
   async reloadBindings(): Promise<SessionBindings> {
     this.bindings = await this.store.readBindings()
-    // 绑定的卡可能刚被删：硬件位标记清掉，交给下一次 refresh 复检
+    // 解除内存 dead 标记的两种情形：用户**显式解绑**（条目没了 → 回落全局）、或重新绑了活卡。
+    // 磁盘上 `dead:true` 的条目继续判为未启用（重启保证就靠它）。
     for (const sessionId of [...this.deadSlots]) {
-      if (this.bindings[sessionId] !== undefined) this.deadSlots.delete(sessionId)
+      const binding = this.bindings[sessionId]
+      if (binding === undefined || binding.dead !== true) this.deadSlots.delete(sessionId)
     }
     return this.bindingSnapshot()
+  }
+
+  /**
+   * 把一批会话标成「绑定的卡已被删」（内存 deadSlots）。
+   *
+   * 删除方（删卡路由）知道**哪些会话受影响**，磁盘上的 `dead:true` 保证重启后仍然成立；
+   * 这个方法是让**当前进程**立刻生效，不用等下一次 refresh 才发现。
+   */
+  noteBindingsDead(sessionIds: readonly string[]): void {
+    for (const sessionId of sessionIds) {
+      const sid = typeof sessionId === 'string' ? sessionId.trim() : ''
+      if (sid === '') continue
+      this.deadSlots.add(sid)
+      this.caches.delete(sid)
+      this.refreshing.delete(sid)
+    }
+  }
+
+  /**
+   * 按会话预热缓存（写操作允许刷新：`/bind` 之后面板带 sessionId 看预览就是真内容，不是占位）。
+   */
+  async refreshSession(sessionId: string): Promise<void> {
+    this.caches.delete(sessionId)
+    await this.refresh(undefined, { sessionId })
   }
 
   // ---------------------------------------------------------------- 预设决议（纯内存）
@@ -580,9 +611,11 @@ export class PromptController {
   async reloadPresets(): Promise<void> {
     this.presetIndex = await this.store.listPresetEntries()
     this.presetActive = await this.store.readPresetActive()
-    // 重新启用了某个预设的会话：解除「无预设」标记
+    // 内存里的 dead 标记只在「磁盘也不再标记 dead」时清掉（重新启用 / 用户显式取消启用都会清）
     for (const sessionId of [...this.deadPresetSessions]) {
-      if (this.presetActive.sessions?.[sessionId] !== undefined) this.deadPresetSessions.delete(sessionId)
+      const persisted = this.presetActive.deadSessions?.[sessionId] !== undefined
+      const live = this.presetActive.sessions?.[sessionId] !== undefined
+      if (!persisted && !live) this.deadPresetSessions.delete(sessionId)
     }
     await this.warmPresetBodies()
   }
@@ -624,8 +657,11 @@ export class PromptController {
   /**
    * 决议一个会话用哪份预设：**会话预设 > 全局预设 > 无**。
    *
-   * 会话启用但预设已不存在 → **无预设**（`dead`），**不回落全局**（与角色绑定的 deadSlots 同构）。
-   * 子代理有自己的 agent/sessionId，查不到会话预设 → 用全局预设（**不继承父会话**，口径与角色绑定一致）。
+   * 会话启用但预设已不存在 → **无预设**（`dead`），**不回落全局**。判据有两个来源：
+   *   1. 内存 `deadPresetSessions`（本轮运行期发现）；
+   *   2. 磁盘 `_presets_active.json` 的 `deadSessions`（上个进程/启动 prune 标记过）——
+   *      只看内存会把「重启后」的保证弄丢（与角色绑定同一个坑，2026-11-01 真机复测抓过）。
+   * 子代理有自己的 agent/sessionId，查不到会话预设 → 用全局预设（**不继承父会话**）。
    */
   resolvePreset(sessionId?: string): { id?: string; preset?: Preset; source: 'session' | 'global' | 'none'; dead?: boolean } {
     if (sessionId !== undefined) {
@@ -635,7 +671,10 @@ export class PromptController {
         if (preset === undefined) return { id, source: 'none', dead: true }
         return { id, preset, source: 'session' }
       }
-      if (this.deadPresetSessions.has(sessionId)) return { source: 'none', dead: true }
+      const deadRecord = this.presetActive.deadSessions?.[sessionId]
+      if (this.deadPresetSessions.has(sessionId) || deadRecord !== undefined) {
+        return { ...(deadRecord === undefined ? {} : { id: deadRecord.id }), source: 'none', dead: true }
+      }
     }
     const globalId = this.presetActive.global
     if (globalId === undefined) return { source: 'none' }
@@ -649,6 +688,7 @@ export class PromptController {
     const active: PresetActive = { version: PRESET_VERSION }
     if (this.presetActive.global !== undefined) active.global = this.presetActive.global
     if (this.presetActive.sessions !== undefined) active.sessions = { ...this.presetActive.sessions }
+    if (this.presetActive.deadSessions !== undefined) active.deadSessions = { ...this.presetActive.deadSessions }
     return {
       active,
       entries: this.presetIndex.map(entry => ({ ...entry })),
@@ -658,11 +698,12 @@ export class PromptController {
 
   /** 从磁盘恢复上次的启用状态（宿主启动时调用）。 */
   async restore(): Promise<ActiveState> {
-    // 启动先清掉「指向已删卡」的绑定：用户删卡重启后不该留悬空绑定
+    // 启动把「绑定卡已不存在」的条目标成 dead（**不删**）：重启后仍要能判为「未启用」
     try {
-      const pruned = await this.store.pruneBindings()
-      if (pruned.length > 0) {
-        this.host.logger.warn('启动时清理了 %d 条指向已删卡的会话绑定：%s', pruned.length, pruned.join('、'))
+      const dead = await this.store.pruneBindings()
+      if (dead.length > 0) {
+        this.noteBindingsDead(dead)
+        this.host.logger.warn('启动时把 %d 条指向已删卡的会话绑定标为失效：%s', dead.length, dead.join('、'))
       }
     } catch (error) {
       this.host.logger.warn('清理会话绑定失败（继续启动）：%s', error instanceof Error ? error.message : String(error))
@@ -898,14 +939,18 @@ export class PromptController {
     const card = await this.store.readCcV3(name)
     if (card === undefined) {
       if (target.source === 'session' && sessionId !== undefined) {
-        // 绑定的卡被删：该会话视为未启用，绝不静默回落到全局（否则用户以为在跟 A 聊，其实在跟 B 聊）
+        // 绑定的卡被删：该会话视为未启用，绝不静默回落到全局（否则用户以为在跟 A 聊，其实在跟 B 聊）。
+        // **绑定条目不删、改成 dead 留痕**：只清内存的话，重启之后这个保证就丢了。
         this.deadSlots.add(cacheKey)
         this.caches.delete(cacheKey)
-        delete this.bindings[sessionId]
-        const line = `会话 ${sessionId} 绑定的角色「${name}」已不存在：该会话按未启用处理，并已清理这条绑定`
+        const line = `会话 ${sessionId} 绑定的角色「${name}」已不存在：该会话按未启用处理（绑定已标为失效）`
         ;(host?.warn ?? host?.info ?? host?.error)?.call(host, line)
         this.host.logger.warn(line)
-        try { await this.store.unbindSession(sessionId) } catch { /* 清绑定失败不阻断渲染路径 */ }
+        try {
+          const dead = await this.store.markBindingsDead(name)
+          this.noteBindingsDead(dead)
+          this.bindings = await this.store.readBindings()
+        } catch { /* 标记失败不阻断渲染路径：内存 deadSlots 仍然生效 */ }
       }
       return
     }

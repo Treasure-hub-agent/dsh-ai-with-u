@@ -261,7 +261,8 @@ export function apply(context: Context): () => void {
     let toolDisposers: Array<() => void> = []
     const sync = (): void => {
       // 工具该不该挂：**全局启用** 或 **至少有一个会话绑定**（会话绑定下也要能记日记/查关系）
-      const should = pc.characterName !== undefined || Object.keys(pc.bindingSnapshot()).length > 0
+      const should = pc.characterName !== undefined
+        || Object.values(pc.bindingSnapshot()).some(binding => binding.dead !== true)
       if (should && toolDisposers.length === 0) {
         toolDisposers = createTools(store, pc).map(t => tools.register(t))
         log.info(`已挂载 ${toolDisposers.length} 个 awu_* 工具`)
