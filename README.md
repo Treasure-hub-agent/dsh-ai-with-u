@@ -10,12 +10,21 @@
 ![self-checks](https://img.shields.io/badge/self--checks-1047%20passed-16a34a)
 
 <p align="center">
-  <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
+  <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情、会话绑定与编辑入口">
 </p>
 
 <p align="center">
-  <sub>面板实拍：左侧角色簿，右侧是角色卡详情——34 个字段都可以就地编辑。</sub>
+  <sub>面板实拍（v0.5.2）：左栏只负责「选谁」——角色簿、搜索与过滤；右栏是详情——会话绑定 / 编辑 / ⋯ 菜单，34 个字段都能就地改。</sub>
 </p>
+
+## 最近更新（v0.5.2）
+
+- **面板重新排过**：分段器搬到右栏顶部，左栏只回答「选谁」（选中的卡有蓝色轨，日记页还会显示「正在看：X」）；详情页主操作收敛成「绑定到本会话 / 编辑 / ⋯」，删除挪到页面底部的危险区；`<900px` 走单栏导航栈（列表 → 详情 → 返回）。
+- **动效系统重做**：玻璃面板本体不再参与动画（这是我们在 Chromium 上踩了四次才定下来的：`backdrop-filter` 的元素只要有带动画的祖先，玻璃就会变成假半透明），改成「玻璃静止 + 内容放大上浮 + 压暗淡入」；弹层、编辑器、折叠、提示条都补齐了退场。
+- **前端全量体检**：五名检查员通读前端 12,000 行 + 三份 CSS，修掉 P0 10 条（含「日记页静默换了操作对象」这种会伤数据的）与几十条中危；新增 `verify-ui` / `verify-a11y` 两套静态自检，自检总数 1047 项。
+- **工程侧**：`tools/preview` 富化 fixture（可模拟慢响应 / 报错 / 崩溃 / 已绑定会话），`tools/qa` 出截图矩阵——它现在**会判红**（导航没落地、打包失败、步骤点空、图与"什么都没点"的基线一样，任一命中即失败）。
+
+完整过程见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 第十六节；设计与审查报告在 [docs/design](docs/design/) 与 [docs/audit](docs/audit/)。
 
 ---
 
@@ -107,12 +116,19 @@ flowchart LR
 
 入口在左侧栏底部（与用量统计插件同席位）。展开态显示「角色管理 + 当前角色名」，收起态收成 36px 圆徽，点击弹出悬浮面板。
 
+面板是**两栏主从结构**：左栏只回答「选谁」，右栏看「这个人是什么样」+ 四个分区。
+
+- 左栏：蒸馏 / 自创两枚同级按钮 → 搜索框（名字 / 身份 / 来源）与「共 N 位」→ 模式胶囊 → 预设 / 预览 / 导入 → 卡片墙。选中的卡有蓝色左侧轨；日记页下还会多一行「正在看：X」，避免一边翻日记一边点卡就把操作对象换掉。
+- 右栏顶部：**角色簿 / 日记 / 统计 / 指南**四段分段器（带滑动指示块），右端是刷新与关闭。
+
 四个分区：
 
 - **角色簿** — 卡片墙、导入角色卡、注入预览、详情页、完整编辑
 - **日记** — 时间线、关键词搜索、按月折叠、导出 markdown、逐条改写、危险区
-- **统计** — 角色数、记忆条数、对话轮次
+- **统计** — 角色数、记忆条数、对话轮次、数据存放位置
 - **指南** — 首次打开时的使用说明
+
+窗口窄于 900px 时两栏会收成单栏：列表一屏，点卡进详情，返回再回列表——不再是"详情挤在十几张卡下面"。
 
 **注入预览**在角色簿详情的「预览」入口：列出此刻真正会进系统提示词的六段（L0 底线 / L0.5 纪律包 / 预设 / L1 角色 / 世界书 / 时间差），每段给段名与字符数，下面是逐段正文，最后给总字符数。它显示的是宿主那一刻的真实渲染结果（`GET /preview`，纯只读：不刷新缓存、不写盘），不是面板自己另算的一份——两套算法的预览迟早会和实际注入对不上。
 
@@ -448,8 +464,6 @@ distill/flow  distill/arm  distill/disarm  distill/state
 `/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
 `/bind` 与 `/unbind` 就是「当前会话启用」：`POST /bind {name, sessionId}` / `POST /unbind {sessionId}`，返回 `{ ok, bound, character }`。`POST /activate` 仍然是**全局启用**语义（向后兼容）。`GET /overview?sessionId=…` 会带上 `sessionId`、`binding`（本会话绑了谁）与 `bindings` 摘要，面板据此判断「当前会话启用」能不能点。
-
-`/character` 与 `/characters` 同时返回 `card`（34 字段视图）与 `ccv3`（完整卡）；`/character/save` 收 `{ name, card?, ccv3? }`，只给 `card` 时保留既有世界书与 `extensions`。
 
 `GET /preview` 是**纯只读**快照：返回 `{ active, mode, discipline, segments[] }`，`segments` 现在**六段**（`aiwu:baseline` / `aiwu:discipline` / `aiwu:preset` / `aiwu:active-character` / `aiwu:lore` / `aiwu:clock`，按 order 升序；未启用角色时 `text: ''`、`chars: 0`）。文本走 `PromptController` 的真实渲染路径，不在预览里另拼一份——拼第二份等于给「预览与真实注入漂移」开口子。
 
