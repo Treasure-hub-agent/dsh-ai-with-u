@@ -50,6 +50,7 @@ const CSS = `
    注意：下面浅色块的类名清单必须与本段**逐字一致**，两边同步增删。 */
 .awu-scope,
 .awu-layer,
+.awu-panelFade,
 .awu-scrim,
 .awu-dialog {
   /* ---- 材质：三层玻璃 ----
@@ -289,7 +290,7 @@ const CSS = `
    判定必须同时看 html 与 body：宿主把 data-ds-dark-theme 打在 **body** 上
    （dsh-client-ui-theme 里是 body[data-ds-dark-theme]{…}），而预览沙盒历史上打在 html 上。
    只判 html 会让 :not() 恒真 → 深色皮肤下浅色令牌永远生效，暗色态根本出不来。 */
-html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
+html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
   --awu-glass-1: rgba(255, 255, 255, .54);
   --awu-glass-2: rgba(255, 255, 255, .68);
   /* 卡面 hover 档：比静息更白（卡浮起来 = 挡住更多背景） */
@@ -548,10 +549,44 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   line-height: var(--awu-lh-body);
   overflow: hidden;
   transform-origin: center;
-  /* W2：will-change 不再常驻（它让 1120x900 的层永不回收）。
-     动画期由 JSX 挂 data-still="true"，CSS 在那段时间才买层提升，animationend 移除。 */
-  animation: awu-panel-in var(--awu-dur-4) var(--awu-ease);
+  /* 2026-11-02（主人报「二段式」后重做）：面板本体不再播任何动画。
+     原因见文件末尾「面板进场：玻璃静态、内容淡入」：
+     这块玻璃一旦参与动画，backdrop-filter 就要逐帧重算 1.12M px（本机软件合成
+     下直接卡在首帧）；而省掉模糊再装回去又会硬切一次（那就是「顿一下」）。
+     两条路都被实测否掉，所以玻璃静止、动效交给内容层。 */
+  animation: none;
 }
+
+/* ---- 面板进场：整层淡入（2026-11-02 重做，主人报「二段式」）
+   外壳 .awu-panelFade 只做 opacity（不位移、不缩放）：
+     1. 面板玻璃不动 —— backdrop-filter 只算一次，不会逐帧重采 1.1M px；
+     2. 100vmax 压暗与玻璃一起淡入，不会出现「先发白、顿一下再变实」的换档；
+     3. 外壳 pointer-events: none，面板自己 auto，点面板外仍落到宿主。
+   为什么不直接在面板上播：见本文件末尾 data-still 段的事故记录。 */
+.awu-panelFade {
+  position: fixed;
+  inset: 0;
+  z-index: 2147482000;
+  pointer-events: none;
+  /* 终态就是 1：万一环境不跑过渡（老内核 / 冻结帧），面板也是「直接出现」而不是隐身。 */
+  opacity: 1;
+  transition: opacity var(--awu-t-base) var(--awu-ease-out);
+}
+
+/* 首帧从 0 起（Chromium 117+，本机 Electron 44 远超门槛）。
+   用 @starting-style 而不是 keyframes + fill:both —— 后者在「动画不跑」的环境里会把面板
+   永远停在 opacity:0；前者最坏情况只是没有淡入。 */
+@starting-style {
+  .awu-panelFade {
+    opacity: 0;
+  }
+}
+
+/* 面板自己是 auto：外壳不吞点击，但面板里的一切照常可点 */
+.awu-panelFade > .awu-panel {
+  pointer-events: auto;
+}
+
 
 /* ================================================================ 两栏骨架（iOS Split View） */
 /* JSX 接线：<div class="awu-workspace"><aside class="awu-rail">…列表…</aside><main class="awu-main">…内容…</main></div>
@@ -3802,13 +3837,8 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-focusRead { font-family: var(--awu-sans); }
 
 /* ================================================================ 动效 */
-/* 入场：居中放大淡入。刻意不用 translateX —— 面板靠 left/right/margin:auto 居中，
-   keyframes 里任何 transform 都会在那个 200ms 内覆盖布局，窗口会先偏到一边再跳回来。
-   scale 用独立属性，避免与 transform 打架。 */
-@keyframes awu-panel-in {
-  from { opacity: 0; scale: .985; transform: translateY(6px); }
-  to { opacity: 1; scale: 1; transform: translateY(0); }
-}
+/* 面板进场（2026-11-02 重做）：见上方 .awu-panelFade 段 —— 那条用的是 transition +
+   @starting-style，不是 keyframes。故意保留这段说明，避免后人"补一个面板入场动画"回来。 */
 
 @keyframes awu-sheet-in {
   from { opacity: 0; transform: translateY(24px); }
@@ -4116,34 +4146,26 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   pointer-events: none;
 }
 
-/* ---- 动画期去模糊 + 层提升（契约 §2.1 的 data-still）----
-   面板进入/退出的 320ms 里，backdrop-filter 会逐帧重算 1.12M px 的 20px 模糊
-   —— 这是"打开面板"最贵的一条路径，低端机上就是开头那一下掉帧。
-   JSX 在动画期给根节点挂 data-still="true"，animationend/transitionend 时移除。
-   同一段时间里做三件事：
-     1. 关掉 blur（省掉逐帧模糊采样）；
-     2. 买一次层提升（will-change）让 transform/opacity 走合成 ——
-        **这就是"100vmax 巨影不参与重绘"的落地方式**：巨影随层一次性栅格化，
-        动画期只翻合成层的 alpha，不再逐帧重画那 1.3M px 的压暗；
-     3. 摘掉 --awu-shadow 里那两层大模糊投影（28px/80px 与 2px/12px）。
-        它们完全被 100vmax 压暗层盖住、动画期根本看不见，但每次重新栅格化都要算一遍。
-   代价：那 320ms 里面板底更透（少了模糊兜底），观感是"淡入时更通透、落定后变实"，可接受。 */
+/* ---- 动画期层提升（契约 §2.1 的 data-still）----
+   历史：这里原本还做了两件事 —— backdrop-filter: none 与摘掉大投影，用来省掉
+   进场那 320ms 里对 1.12M px 的逐帧模糊。2026-11-02 主人实测后改掉了：
+   blur 与 box-shadow 都不可过渡，animationend 那一刻摘掉 data-still = 一次性硬切
+   （实测 t≈401ms 从 none 跳到 blur(18px) saturate(1.85) brightness(1.03)），
+   肉眼就是「先半透明发白、顿一下才变实」。省下的重绘抵不过这条观感损伤。
+
+   现在的规矩：
+     1. 整段进场里 backdrop-filter / box-shadow 保持恒定，不做任何换档 ——
+        进场只动 opacity 与 scale，两者都是合成属性，不必逐帧重算模糊；
+     2. data-still 只负责买一次层提升（will-change），让 100vmax 巨影随层一次性栅格化；
+     3. 动画结束立刻撤回层提升，避免 1120×900 的层永久驻留。
+   代价：进场期背板真的会做模糊采样（本机实测帧间隔仍 ~16ms），换来一条连续的淡入。 */
 .awu-panel[data-still="true"],
 .awu-dialog[data-still="true"],
 .awu-scrim[data-still="true"],
 .awu-editor[data-still="true"],
 .awu-focus[data-still="true"],
 .awu-editorConfirm[data-still="true"] {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  will-change: transform, opacity;
-}
-
-.awu-panel[data-still="true"] {
-  box-shadow:
-    0 0 0 100vmax var(--awu-scrim-bg),
-    inset 0 1px 0 var(--awu-glass-edge),
-    inset 0 0 0 1px color-mix(in srgb, var(--awu-glass-edge) 40%, transparent);
+  will-change: opacity, transform, scale;
 }
 
 /* ================================================================ 无障碍：降低透明度（W1-C 补齐）
@@ -4156,7 +4178,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    --awu-specular 用"透明 inset 零阴影"而不是 none：它常年出现在
    box-shadow: var(--awu-shadow-card), var(--awu-specular) 这类列表里，写 none 会让整条声明失效。 */
 @media (prefers-reduced-transparency: reduce) {
-  :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
+  :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
     --awu-glass-1: #1e1e21;        /* 面板底 */
     --awu-glass-2: #26262b;        /* 卡片 / 分组 / 状态带 / 输入框 */
     --awu-glass-2-hi: #2c2c32;     /* 卡面 hover */
@@ -4172,7 +4194,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     --awu-line-soft: rgba(255, 255, 255, .07);
   }
 
-  html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-scrim, .awu-dialog) {
+  html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
     --awu-glass-1: #f4f4f7;
     --awu-glass-2: #ffffff;
     --awu-glass-2-hi: #fbfbfd;

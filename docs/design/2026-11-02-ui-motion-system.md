@@ -145,3 +145,25 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 | 动画期降模糊 | `data-still="true"` | CSS 已就绪，**JS 未接** | 第 2 批接：面板 `animationstart/end` 挂属性 |
 | 死代码 `SCOPED_ATTR` | 删 | `index.tsx:102` 仍 import，CSS 侧已确认无 `[data-awu-scoped]` 规则 | 第 2 批随 index.tsx 一起删 |
 | 「退出全局」入口 | 唯一 | 状态带右侧与 ⋯ 菜单各一份（重复） | 第 2 批去重（保留菜单项，状态带改为纯状态） |
+
+---
+
+## 7. 进场机制修正（2026-11-02 主人实测报「二段式」后重做）
+
+**现象**：打开面板时先半透明发白，顿一下才变实。**根因（CDP 逐帧采样）**：进场走的是
+「动画期摘掉 `backdrop-filter` → `animationend` 装回去」，而 blur 与 box-shadow 都不可过渡，
+所以 t≈401ms 发生了一次硬切（`none` → `blur(18px) saturate(1.85) brightness(1.03)`，投影同时换档）。
+
+**两条被否掉的路**：
+1. 保持模糊 + 给面板播 opacity/scale —— 面板 1.1M px 的模糊要逐帧重采，本机实测直接卡在首帧；
+2. 摘模糊省成本 + 结束时装回 —— 就是上面那次硬切。
+
+**最终做法**：玻璃**不参与任何动画**，在挂载首帧完整就位并恒定；新增不参与模糊的外壳
+`.awu-panelFade`（`position:fixed; inset:0; pointer-events:none`，面板自身 `auto`），用
+`transition: opacity` + `@starting-style { opacity: 0 }` 做**一次纯合成淡入**，100vmax 压暗随之一起淡。
+
+**为什么用 `@starting-style` 而不是 keyframes + `fill:both`**：后者在"动画不跑"的环境里会把面板
+永远停在 `opacity:0`（本机无头环境实测复现）；前者的终态就是 `opacity:1`，最坏情况只是没有淡入。
+
+**代价与遗留**：面板不再有位移/缩放（放大入场这条手感没了）；弹层（sheet）仍是 `translateY` 入场，
+它们的 `data-still` 现在只买 `will-change`，如果哪天报卡顿，用同一招给弹层也套一层外壳。

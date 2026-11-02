@@ -3440,8 +3440,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   //   width: min(1120px, 100vw - 32px)  height: calc(100vh - 80px)
   // 数值仍由 styles.ts 的 PANEL_WIDTH / PANEL_MAX_H（这里当上下留白用）统一给出。
   //
-  // ⚠️ 居中**不能用 transform**：面板有入场动画 `awu-panel-in`，动画运行期间 keyframes 里的
-  // transform 会覆盖内联 transform —— 窗口会先出现在右半边，动画结束才「跳」回正中（主人实测到过）。
+  // ⚠️ 居中**不能用 transform**：面板外面有 .awu-panelFade 外壳（进场淡入），面板自己也在动画体系里
+  // （退场时 data-state="closing" 会跑 awu-exit 的 translateY）；任何 keyframes 里的 transform
+  // 都会覆盖内联 transform —— 窗口会先出现在右半边，动画结束才「跳」回正中（主人实测到过）。
   // 改用 left/right:0 + margin:0 auto + 固定宽度居中，transform 就完整留给动画用。
   // `bottom: auto` 必须写：旧样式里 .awu-panel 是贴底定位的，不覆盖会和 top 同时生效把窗口拉长。
   const panelStyle: CSSProperties = {
@@ -3609,6 +3610,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
 
       {/* 退场期仍 mounted（160ms）：`open` 一翻转就摘 DOM 的话，CSS 退场根本没有机会播 */}
       {panelPresence.mounted && typeof document !== 'undefined' && createPortal(
+        /*
+          进场外壳（2026-11-02，主人报「二段式」后加的）：
+          面板玻璃自己**不播任何动画** —— 它带 backdrop-filter: blur(18px)，动它就要逐帧
+          重算 1.1M px；而为了省这个把模糊摘掉、animationend 再装回去就是一次硬切
+          （实测 t≈401ms 从 none 跳到 blur(18px)，观感「先发白、顿一下」）。
+          所以玻璃挂载即完整就位，由这层外壳做一次纯 opacity 淡入：模糊只算一次，
+          100vmax 压暗跟着整层一起淡，不存在换档。
+          外壳 pointer-events: none（面板自己 auto），点面板外仍然落到宿主。
+        */
+        <div className="awu-panelFade">
         <div
           ref={attachPanelRef}
           className="awu-panel awu-scope"
@@ -4305,6 +4316,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           )}
           </>
           )}
+          </div>
         </div>,
         document.body,
       )}

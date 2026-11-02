@@ -47,7 +47,10 @@ const templateBody = (source) => {
   const m = source.match(/const (?:CSS|DISTILL_CSS|GUIDE_CSS) = `/)
   if (m === null) return undefined
   const from = m.index + m[0].length
-  const close = source.slice(from).match(/\n`[ \t]*\n/)
+  // 收尾特征：一行只有反引号。**行尾符必须容忍 CRLF**——一个 Python 文本模式写入的脚本
+  // 曾把整份文件重写成 CRLF，导致这里匹配失败、退化成"扫整个文件"，于是把 installStyles
+  // 里的代码模板串当成 CSS，报出 7 个反引号 + 非白名单插值 id 的假红。
+  const close = source.slice(from).match(/\r?\n`[ \t]*\r?\n/)
   if (close === null) return source.slice(from)
   return source.slice(from, from + close.index)
 }
