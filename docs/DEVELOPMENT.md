@@ -3,7 +3,7 @@
 > 本文记录 `dsh-ai-with-u` 从零到可用的完整开发过程、踩过的坑与设计取舍。
 > **写给未来的自己（和任何要改这个项目的人）**：如果你想避开我们踩过的所有雷，先读完这份。
 >
-> 最后更新：2026-10-30
+> 最后更新：2026-11-02（v0.5.2）
 
 ---
 
@@ -1442,3 +1442,69 @@ export const ST_SCRIPT_STANCE = '本插件不执行酒馆正则脚本；提示�
 2. 预设段与角色卡/纪律包的**实际手感**：长预设会不会把 L1 挤到后面（看 `preview` 第六段的字符数占比）。
 3. 会话预设与全局预设同时存在时的行为（尤其**删掉被绑的预设**后，该会话是否真的变成「无预设」而不是回落全局）。
 4. ST 预设里 `role: assistant` 的条目按普通模块注入后，模型是否真的当作「规则」而不是「对话历史」。
+
+## 十六、2026-11-02 · UI 与动效轮（v0.5.2：玻璃面板 + 全量前端体检 + 审查收口）
+
+### 这一轮要解决的问题
+
+主人原话：「强化插件面板设计感和动效，优化 UI 设计，对前端进行全方面检查」。
+五名检查员分域通读 `client/**` 约 12,000 行 + 三份 CSS，产出 **P0 10 / P1 46 / P2 60**；
+之后分三批实施、一轮遗留收口、一轮四名审查员复查。
+
+### 最贵的一条经验：玻璃面板的进场动效怎么做（四版返工）
+
+| 版本 | 做法 | 结果 |
+|---|---|---|
+| ① | 面板自己播 `opacity+scale`，动画期摘掉 `backdrop-filter`、`animationend` 装回 | 「先发白、**顿一下**才变实」——blur/box-shadow 不可过渡，换档必然是一帧硬切 |
+| ② | 面板静止，外壳做纯淡入（`transition` + `@starting-style`） | 观感"没有线性感" |
+| ③ | 放大上浮挪到外壳 | **「彻底半透明了」**——祖先带 opacity/transform 会让 `backdrop-filter` 失去页面背板（假半透明，且可能停在中间帧） |
+| ④ | 玻璃与外壳都不动；`scale .98→1 + translateY 6px + opacity` 只作用在**面板内部的三段内容**；压暗改外壳 `::before` 纯色层淡入；进场 `fill: backwards`、退场 `both` | 主人确认「这次正常了」 |
+
+**铁律**（已写进 `styles.ts` 注释、`docs/design/2026-11-02-ui-motion-system.md` §5.8 与知识库）：
+
+> 带 `backdrop-filter` 的元素**及其任何祖先**，都不得有 `opacity`/`transform`/`scale` 动画，
+> 也不得挂 `will-change: opacity|transform`。进场动效只能落在它内部的内容层。
+
+### 交付了什么
+
+- **结构**：tabs 归位右栏、左栏只回答"选谁"（选中蓝轨 + 「正在看：X」）、hero 收敛成 1 主 1 次 + ⋯、
+  删除下沉 dangerZone、`<900` 单栏导航栈 `split/push/pop`。
+- **动效**：退场系统（面板/弹层/编辑器/专注层/确认层/四套折叠/notice/骨架）、tab 120ms crossfade、
+  分段器滑块、list↔detail 方向位移 + **头像共享元素**、列表 FLIP、指针跟随玻璃高光、按压补 13 处。
+- **性能**：`awu-glow` 从 box-shadow 动画改伪元素呼吸（去掉无限期整卡重绘）、删 scrim 的 6px 全屏模糊、
+  动画期 `data-still` 只买层提升、`CharacterTile` memo、轮询 `document.hidden` 早退、
+  编辑器击键 LayoutCount 41→9。
+- **无障碍**：ErrorBoundary、`aria-modal` 与焦点陷阱对齐、编辑器/详情退场还焦、`role=alert`/`status`、
+  对比度 4.17→4.94、`focus-ring` 收敛为单一来源、`reduced-motion` 换全局守卫、
+  `reduced-transparency` 补齐 8/8 模糊面、新增 `prefers-contrast` 整块。
+- **数据安全**：左栏选中态消灭「日记页静默换操作对象」；预设编辑器补脏数据保护（四路关闭统一）；
+  「专注层保存后立刻 Esc」丢改动的 160ms 窗口已封（`onClosing` 带 `cancel|commit` 意图）。
+
+### 断言与工具（这一轮最大的一笔资产）
+
+十套自检全部进 `npm run build`，合计 **1047 项**（新增 `verify-ui` 7 条纪律、`verify-a11y` 8 项无障碍）。
+另外新增：
+
+- `tools/preview/` 富化 fixture：`/presets` `/preset` `/preview`、`?slow=` `?fail=` `?crash=` `?bound=`；
+- `tools/qa/` 四件套：`shots.mjs`（21 场景 × 3 媒体态截图矩阵）、`crash.mjs`、`states.mjs`、`collapse.mjs`；
+- **矩阵现在会红**：导航未落地 / bundle 500 / 步骤点了不存在的元素 / 图过小 / 与"什么都不点"的基线
+  栅格差 <1.5%，任一命中即非 0 退出（以前这几种情况全是 `✓ + exit 0`，属于假绿）。
+
+### 本轮的三条可复用判据
+
+1. **不可过渡的属性（`backdrop-filter`、`box-shadow`）不能在动画期间换档**——省下的重绘抵不过一次观感事故。
+2. **进场用 `backwards`、退场用 `both`**：进场基线要"已可见"，退场要把终态保持到真正卸载。
+3. **矩阵不是断言**：截图脚本必须自带失败通道（含"与空操作基线比像素差"这一条），否则它只能骗自己。
+
+### 审查轮（同日，四名审查员）
+
+P0 1 / P1 6 / P2 20+，全部已修。关键的几条：`data-still` 的 `will-change` 还挂在三张带 blur 的层上；
+**面板退场自己在动玻璃**（已改内容层淡出 + 外壳压暗淡出）；详情退场判据晚一帧；详情返回焦点落 `body`；
+保存退场期弹「未保存确认」；弹层退场期第二次 Esc 连带关面板；`useOverlayRequestClose` 是零调用假承诺；
+世界书分区展开会把嵌套箭头一起转；骨架退场宽度跳变；fixture 契约漂移导致会话绑定态零覆盖。
+报告见 `docs/audit/`（`2026-11-02-ui/` 五份检查、`2026-11-02-review/` 四份复查）。
+
+### 仍需（不阻塞定版）
+
+字体放大走 rem（全 px）、`distill` 的 busy 分支缺实机证据、预设/预览的 `ErrorBar` 无重试按钮、
+`cards` 骨架在窄弹层是两列网格。均已记录在 `docs/design/2026-11-02-ui-upgrade-report.md` §6.1。

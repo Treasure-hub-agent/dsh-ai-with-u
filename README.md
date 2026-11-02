@@ -2,12 +2,12 @@
 
 **给 DeepSeek Harness 的角色扮演插件。** 蒸馏任意ip角色卡并让你的大肥鱼成为TA，选一张角色卡点「启用」，人设立刻生效；点「退出」，干净拔出，正常工作不受影响。
 
-![version](https://img.shields.io/badge/version-0.5.0-d97706)
+![version](https://img.shields.io/badge/version-0.5.2-d97706)
 ![npm](https://img.shields.io/npm/v/dsh-ai-with-u?color=cb3837&logo=npm)
 ![license](https://img.shields.io/badge/license-MIT-2563eb)
 ![platform](https://img.shields.io/badge/DSH-desktop-1f6feb)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white)
-![self-checks](https://img.shields.io/badge/self--checks-1032%20passed-16a34a)
+![self-checks](https://img.shields.io/badge/self--checks-1047%20passed-16a34a)
 
 <p align="center">
   <img src="docs/assets/panel.png" width="880" alt="角色管理器面板：左侧角色簿，右侧角色卡详情与编辑入口">
