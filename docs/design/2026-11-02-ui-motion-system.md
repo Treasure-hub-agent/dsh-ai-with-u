@@ -126,6 +126,9 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 5. `ink-faint` 只作装饰，不作文本色。
 6. 卡片高整数 px、hover 只提亮不压暗、错峰 `min(index,8)×34ms` 不放大。
 7. 每批结束必须 `npm run build` 全绿（基线 1032 项）。
+8. **`.awu-panel` 及其任何祖先不得有 `opacity`/`transform`/`scale` 动画，也不得挂
+   `will-change: opacity|transform`** —— 会让 `backdrop-filter` 失去页面背板、玻璃变「假半透明」
+   （2026-11-02 主人实测两次踩到，见 §7.1）。进场动效只能落在面板内部的内容层。
 
 ---
 
@@ -165,5 +168,36 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 **为什么用 `@starting-style` 而不是 keyframes + `fill:both`**：后者在"动画不跑"的环境里会把面板
 永远停在 `opacity:0`（本机无头环境实测复现）；前者的终态就是 `opacity:1`，最坏情况只是没有淡入。
 
-**代价与遗留**：面板不再有位移/缩放（放大入场这条手感没了）；弹层（sheet）仍是 `translateY` 入场，
-它们的 `data-still` 现在只买 `will-change`，如果哪天报卡顿，用同一招给弹层也套一层外壳。
+---
+
+### 7.1 第三次修订：外壳也动不得（主人实测「彻底半透明」）
+
+把放大上浮挪到外壳 `.awu-panelFade` 上（`opacity + scale + translateY`）之后，主人看到的是
+**整块面板变成半透明、后面的聊天内容透出来**。这不是观感问题，是渲染路径问题：
+
+> **Chromium 里，含 `backdrop-filter` 的元素只要有「opacity < 1 / transform」的祖先，
+> 祖先就会被提升为独立渲染表面；`backdrop-filter` 采到的就不再是页面背景，玻璃退化成
+> 「假半透明」，并且可能停在中间帧不回落。**
+
+同一条规则也解释了为什么第一版「动画期摘掉 blur」是必要的——那时面板自己就在动。
+
+**由此定下铁律（写进 §5 禁止项）**：
+
+1. **`.awu-panel` 及其任何祖先都不能有 `opacity` / `transform` / `scale` 动画**；
+2. 也不给这类元素加 `will-change: opacity|transform`（同样是层提升，同样会破坏背板采样）；
+3. 放大上浮只能落在面板**内部的内容层**（内容画在模糊之上，不参与背板采样）。
+
+**最终实现（第四次修订，现行）**：
+
+| 层 | 动什么 | 为什么安全 |
+|---|---|---|
+| `.awu-panel` | 不动（`animation: none`，无 will-change） | 玻璃首帧即完整，背板只采样一次 |
+| `.awu-panelFade` | 不动，只做定位外壳 | 有 opacity/transform 会拖垮子层的 backdrop |
+| `.awu-panelFade::before` | 全屏压暗淡入 200ms（纯色层） | 与原 `box-shadow: 0 0 0 100vmax` 等价，但能独立淡入 |
+| `.awu-panel > .awu-head / .awu-status / .awu-workspace` | `opacity + scale .98→1 + translateY 6px→0`，200ms，错开 0/40/80ms | 内容在模糊之上，缩放不触发背板重采样 |
+
+`fill-mode` 一律用 **`backwards`** 而不是 `both`：基线就是"完全可见/已压暗"，动画不跑时
+最坏只是没有入场效果，绝不会把内容或压暗停在 0。
+
+**代价与遗留**：面板框本身不再放大（放大感由内容层的 `scale .98→1` 提供）；弹层（sheet）仍是
+`translateY` 入场 + 模糊在动，若报卡顿用同一招（外壳伪元素淡入 + 内容层位移，弹层本体不动）。

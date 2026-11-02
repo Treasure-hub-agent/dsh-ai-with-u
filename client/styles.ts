@@ -540,7 +540,6 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   -webkit-backdrop-filter: var(--awu-blur-panel);
   box-shadow:
     var(--awu-shadow),
-    0 0 0 100vmax var(--awu-scrim-bg),
     inset 0 1px 0 var(--awu-glass-edge),
     inset 0 0 0 1px color-mix(in srgb, var(--awu-glass-edge) 40%, transparent);
   color: var(--awu-ink);
@@ -557,27 +556,63 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   animation: none;
 }
 
-/* ---- 面板进场：外壳放大上浮（2026-11-02 三次修订）
-   演进：① 直接在面板上播 → 动画期摘模糊省钱 → animationend 硬切（「二段式」）；
-        ② 面板静止 + 外壳纯淡入 → 主人反馈淡入没有线性感、不够利落；
-        ③ 现在：**放大上浮放回外壳上**，玻璃本身仍然恒定不换档。
-   为什么这次不会再有「顿一下」：外壳 .awu-panelFade 自己不带 backdrop-filter，
-   它只做 scale/translateY/opacity；玻璃在挂载首帧就完整就位（blur 与 100vmax 压暗
-   全程不换档），所以不存在「模糊在动画结束时被装回去」那一帧硬切。
-   幅度刻意收小（.992 / 3px）：外壳一动，里面那层模糊就要按新位置重新采样，
-   位移越小、时长越短，重采样帧数越少（本机软件合成下 1.1M px 模糊是秒级，
-   所以这里宁可"小一点、快一点"，也不做大幅弹入）。 */
+/* ---- 面板进场：内容层放大上浮（2026-11-02 四次修订）
+   演进与结论：
+     ① 直接给面板播动画、动画期摘掉模糊 → animationend 硬切（「二段式」）；
+     ② 面板静止 + 外壳纯淡入 → 没有线性感；
+     ③ 把放大上浮挪到外壳 → 主人实测「彻底半透明了」。
+   ③ 的失败是决定性的：Chromium 里给「含 backdrop-filter 元素的祖先」加 opacity/transform
+   会把祖先提升为独立渲染表面，backdrop-filter 采到的就不再是页面背景，玻璃退化成
+   「假半透明」，而且可能停在中间帧不回落。所以——
+
+   **铁律：面板本身与它的任何祖先都不能有 opacity / transform / scale 动画。**
+   放大上浮只能落在面板**内部**的内容层（内容画在模糊之上，不参与背板采样）。
+   玻璃（background + backdrop-filter + 100vmax 压暗）在挂载首帧就完整就位且全程恒定。 */
 .awu-panelFade {
   position: fixed;
   inset: 0;
   z-index: 2147482000;
   pointer-events: none;
-  animation: awu-panel-in var(--awu-t-base) var(--awu-ease) both;
+}
+
+/* 全屏压暗（原来挂在面板的 box-shadow: 0 0 0 100vmax 上）。
+   挪到这里是因为：它是面板的"影子"，跟着面板会出现得很硬；而它本身是纯色层，
+   放在**外壳的伪元素**上单独淡入既便宜又安全（外壳没有 backdrop-filter，动它不伤玻璃采样）。
+   z-index 让它在面板之下：面板自己 z-index 2147482000，伪元素按 DOM 顺序先画。 */
+.awu-panelFade::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: var(--awu-scrim-bg);
+  pointer-events: none;
+  /* 基线就是"已压暗"：用 backwards 而不是 both —— 万一环境不跑动画，最坏是压暗瞬现，
+     绝不会变成"没有压暗"。 */
+  opacity: 1;
+  animation: awu-scrim-in var(--awu-t-base) var(--awu-ease-out) backwards;
 }
 
 /* 面板自己是 auto：外壳不吞点击，但面板里的一切照常可点 */
 .awu-panelFade > .awu-panel {
   pointer-events: auto;
+}
+
+/* 进场动效：三段内容依次「放大 + 上浮 + 淡入」，玻璃框不动。
+   错开 0 / 40ms / 80ms，每段 200ms —— 整体在 280ms 内收住，读起来是一气呵成的一次落位。
+   这些节点都不带 backdrop-filter（面板的模糊在父层），所以缩放不会触发背板重采样。
+   fill 用 backwards（不是 both）：基线是"完全可见"，动画不跑时最坏只是没有入场效果，
+   绝不会把内容永远停在 opacity:0（这一点上一版真踩过，面板整块看不见）。 */
+.awu-panel > .awu-head,
+.awu-panel > .awu-status,
+.awu-panel > .awu-workspace {
+  animation: awu-content-in var(--awu-t-base) var(--awu-ease) backwards;
+}
+
+.awu-panel > .awu-status {
+  animation-delay: calc(var(--awu-t-fast) / 3);
+}
+
+.awu-panel > .awu-workspace {
+  animation-delay: calc(var(--awu-t-fast) / 3 * 2);
 }
 
 
@@ -3833,9 +3868,19 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 /* 面板进场（2026-11-02 三次修订）：跑在外壳 .awu-panelFade 上，玻璃本身不动。
    见上方 .awu-panelFade 段的三段演进说明 —— 这里只留 keyframes，不要再把 animation
    加回 .awu-panel（那会把「动画期换模糊」的硬切重新引回来）。 */
-@keyframes awu-panel-in {
-  from { opacity: 0; scale: .992; transform: translateY(3px); }
+/* ================================================================ 动效 */
+/* 面板进场（2026-11-02 四次修订）：跑在面板**内部的内容层**上，玻璃框完全不动。
+   见 .awu-panelFade 段的四条演进 —— 结论是「含 backdrop-filter 的元素及其祖先都不能动
+   opacity/transform」，所以放大上浮只能落在内容上。 */
+@keyframes awu-content-in {
+  from { opacity: 0; scale: .98; transform: translateY(6px); }
   to { opacity: 1; scale: 1; transform: translateY(0); }
+}
+
+/* 全屏压暗淡入（外壳伪元素，见 .awu-panelFade::before）。纯色层，只动 opacity。 */
+@keyframes awu-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes awu-sheet-in {
@@ -4157,7 +4202,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
      2. data-still 只负责买一次层提升（will-change），让 100vmax 巨影随层一次性栅格化；
      3. 动画结束立刻撤回层提升，避免 1120×900 的层永久驻留。
    代价：进场期背板真的会做模糊采样（本机实测帧间隔仍 ~16ms），换来一条连续的淡入。 */
-.awu-panel[data-still="true"],
+/* 面板不再出现在这里：给带 backdrop-filter 的元素加 will-change: opacity/transform
+   同样会让它变成独立渲染表面，backdrop 采样退化（就是主人看到「彻底半透明」那个症状）。
+   面板现在不播动画，也就不需要层提升。 */
 .awu-dialog[data-still="true"],
 .awu-scrim[data-still="true"],
 .awu-editor[data-still="true"],
@@ -4223,12 +4270,13 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     background-image: none;
   }
 
-  /* 实底上 1px 玻璃亮边会显脏，换常规分隔线；阴影收掉外扩的 100vmax 压暗（遮罩已由 scrim-bg 承担） */
+  /* 实底上 1px 玻璃亮边会显脏，换常规分隔线。
+     压暗不再挂在面板 box-shadow 上（已挪到 .awu-panelFade::before 单独淡入），这里只留投影。 */
   .awu-panel,
   .awu-dialog,
   .awu-focus,
   .awu-editorConfirmCard { border-color: var(--awu-line-strong); }
-  .awu-panel { box-shadow: 0 0 0 100vmax var(--awu-scrim-bg), 0 24px 64px rgba(0, 0, 0, .35); }
+  .awu-panel { box-shadow: 0 24px 64px rgba(0, 0, 0, .35); }
   .awu-card,
   .awu-section,
   .awu-editGroup,
