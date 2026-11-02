@@ -55,7 +55,13 @@ const json = {
   render: (_a: unknown, v: unknown) => [{ type: 'text' as const, text: JSON.stringify(v) }],
 }
 
-/** 组装 awu_* 工具集。仅在启用状态下才会被注册（拔出即全部消失）。 */
+/**
+ * 组装 awu_* 工具集。
+ *
+ * 挂载时机（**不是**"仅在启用状态下"）：`index.ts` 的 `sync()` 判据是
+ * 「**全局启用** 或 **至少有一个未失效的会话绑定**」——只绑定了会话、没有全局启用的状态下
+ * 也必须能记日记 / 查关系，否则「当前会话启用」这条路等于残废。拔出（都不满足）才整体卸下。
+ */
 export function createTools(store: Store, prompt: PromptController): ToolDef[] {
   /** 这次工具调用属于哪个会话（宿主注入的 agent；自检可直接给 sessionId）。 */
   const sessionIdOf = (exec: ToolExec): string | undefined =>
@@ -64,12 +70,51 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
       : readSessionId(exec.agent)
 
   /**
+   * 这次调用是不是子代理会话（去问 prompt 的**同一判据**，见 `PromptController.subAgentVerdict`）。
+   *
+   * 为什么防御式取方法：`scripts/verify-session.mjs` 用「只实现用到成员」的最小 fake prompt
+   * 造工具，那里没有子代理概念；方法缺失按 `'unavailable'`（= 判定器未注入）处理，
+   * 不能让工具因为多问一句就整体炸掉。
+   */
+  const subAgentVerdict = (exec: ToolExec): 'subagent' | 'main' | 'unknown' | 'unavailable' => {
+    const probe = (prompt as unknown as {
+      subAgentVerdict?: (assembly: unknown, sessionId?: string) => string
+    }).subAgentVerdict
+    if (typeof probe !== 'function') return 'unavailable'
+    try {
+      const verdict = probe.call(prompt, exec, sessionIdOf(exec))
+      return verdict === 'subagent' || verdict === 'main' || verdict === 'unknown' ? verdict : 'unavailable'
+    } catch {
+      // 判定抛错：按"判定器不可用"处理（与注入侧同口径），绝不因此让工具报错
+      return 'unavailable'
+    }
+  }
+
+  /**
    * 取**本次调用所在会话**的决议角色（会话绑定 > 全局启用 > 未启用）。
    *
    * 绝不能再用 `prompt.characterName`（那是全局值）：会话绑定了 A、全局启用 B 时，
    * 那个会话的日记/关系/重置都必须落在 A 身上，否则就是串台。
+   *
+   * 先过**子代理守卫**：子代理既不扮演角色、也不回落全局（注入侧 `prompt.ts` 早就是这个口径，
+   * 工具侧以前没跟上——子代理里一句「记一下」会把日记写进全局启用角色名下，用户看不见）。
    */
   const requireActive = (exec: ToolExec): string => {
+    const verdict = subAgentVerdict(exec)
+    if (verdict === 'subagent') {
+      throw new Error(
+        '这是子代理 / 任务会话：它不扮演任何角色，也不回落全局角色（与提示词注入侧同一判据），'
+        + '所以 awu_* 工具在这里不可用。退化方案：请让用户在主会话里操作'
+        + '（面板的日记 / 关系按钮，或直接在主会话里说）；本次调用没有写入任何角色的数据。',
+      )
+    }
+    if (verdict === 'unknown') {
+      throw new Error(
+        '无法判定这次工具调用属于哪个会话（工具上下文里既没有 agent 也没有 sessionId）。'
+        + '为了不把内容写进全局角色的数据里，这次调用被拒绝。'
+        + '退化方案：改用面板按钮操作，或在主会话里重试（宿主会正常注入 agent）。',
+      )
+    }
     const name = prompt.characterForSession(sessionIdOf(exec))
     if (name === undefined) throw new Error('当前会话没有启用任何角色')
     return name
@@ -159,6 +204,19 @@ export function createTools(store: Store, prompt: PromptController): ToolDef[] {
       output: json,
       async execute(_args, exec) {
         const sessionId = sessionIdOf(exec)
+        // 子代理 / 判不了会话：如实回答"这里没有角色"，**绝不回落全局**（回落就是假答案）
+        const verdict = subAgentVerdict(exec)
+        if (verdict === 'subagent' || verdict === 'unknown') {
+          return {
+            active: false,
+            sessionId: sessionId ?? '',
+            source: 'none',
+            reason: verdict === 'subagent' ? 'subagent' : 'unknown-session',
+            hint: verdict === 'subagent'
+              ? '子代理 / 任务会话不扮演角色，也不回落全局角色（与注入侧同一判据）：这里没有"我是谁"可言。'
+              : '拿不到本次调用的会话身份（既没有 agent 也没有 sessionId），按未启用处理，不回落全局角色。',
+          }
+        }
         const target = prompt.resolveTarget(sessionId)
         const name = target.character
         if (name === undefined) {

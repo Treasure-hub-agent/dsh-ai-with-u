@@ -22,6 +22,7 @@
  *   V22 世界书注入规范（§4.3 定稿 8 条）              V21 REST 三键保存 + 导入预览
  *   V24 PromptController 装配                        V26 清空字段 / 清空整组不复活
  *   V27 存储硬化（跨实例锁 / BOM / 旧卡备份 / 体量）  V29 世界书超限软警告
+ *      └ 2026-11-02 起加挂「世界书正则护栏」：ReDoS 九族表驱动 + 正常写法反向断言 + 编译缓存
  *   V30 REST 透出软警告                              V31 POST /mode 三段口径
  *   V32 真酒馆卡适配                                 V33 正则屏蔽可证明（三重断言）
  *
@@ -199,6 +200,27 @@ const fakePromptController = (over = {}) => ({
   reloadBindings: async () => ({}),
   refreshMount: () => {},
   refreshCharacter: async () => {},
+  // ⚠️ 2026-11-02：`GET /character` 开始按**这张卡**算世界书预算诊断（`prompt.loreDiagForCard`）。
+  // 这个 fake 是「只实现路由用到的成员」的最小实现，缺这一项会让整条路由抛 → guard 转 400，
+  // 于是 V21「同时给 card 与 ccv3」变成**假红**。补的是 fake 的完整性，不是放宽断言：
+  // 断言仍然是「`card.basic.身份` 与 `ccv3.spec` 两个都必须在」。真的 diag 行为在 verify-session §23 验。
+  loreDiagForCard: () => ({
+    scope: 'constant-only',
+    reason: 'not-active',
+    count: 0,
+    constantCount: 0,
+    hitCount: 0,
+    constantKeptCount: 0,
+    keywordKeptCount: 0,
+    usedChars: 0,
+    budgetChars: 6000,
+    constantUsedChars: 0,
+    constantBudgetChars: 12000,
+    constantDropped: [],
+    keywordDropped: [],
+    unsupportedDepthN: 0,
+    forcedConstantOverBudget: false,
+  }),
   ...over,
 })
 
@@ -572,6 +594,48 @@ section('附 · 装饰器解析 / 长度统计 / 关系档位')
   check(long.data.description.length === 1300, '外部导入卡的长 description 原样保真（投影让路）')
   check(lengthWarnings(long).some(w => w.code === 'description'), 'description 超阈值触发软警告')
   check(!lengthWarnings(long).some(w => w.message.includes('错误')), '警告是"建议"措辞，不是拒绝')
+
+  // ---- 角色卡的未知宏：**卡侧也要报**（2026-11-02 之前只有 ST 预设侧会报，卡里写坏宏是静默的）
+  // 用户看到的是"模型把我的 {{original}} 原样念出来了"，面板却一句提示都没有。
+  const macroCard = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+      name: '未知宏卡',
+      description: '人设开头 {{persona}} 中间 {{original}} 结尾。',
+      mes_example: '示例里也写一个 {{setvar::x::y}}。',
+      extensions: {},
+    },
+  })
+  const macroWarnings = collectCardWarnings(macroCard)
+  const macroNote = macroWarnings.find(w => String(w).includes('无法展开'))
+  check(macroNote !== undefined,
+    `卡侧未知宏进 warnings（${macroNote === undefined ? '没有这一条' : String(macroNote).slice(0, 46) + '…'}）`,
+    '卡里写了展开不了的宏却一句不提示：模型会把 {{original}} 原样念给用户，看起来像"人设崩了"')
+  check(String(macroNote).includes('×1') && String(macroNote).includes('{{persona}}'),
+    '告警带「×N」计数与宏名（照 ST 预设侧同一份实现）')
+  check(String(macroNote).includes('以原文进入提示词'), '告警说清后果：这些宏会以原文进提示词')
+  check(macroCard.data.description.includes('{{persona}}') && macroCard.data.description.includes('{{original}}'),
+    '未知宏**原样保留**在正文里（只提示，不删、不替换）',
+    '告警把正文洗了：用户资产被静默改写，比不报更糟')
+
+  // 白名单宏不误报：{{char}} / {{user}} 真的会展开
+  const cleanCard = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: { name: '干净卡', description: '{{char}} 会对 {{user}} 这么说。', extensions: {} },
+  })
+  check(!collectCardWarnings(cleanCard).some(w => String(w).includes('无法展开')),
+    '{{char}} / {{user}} 能展开 → 不误报')
+
+  // 只扫「会进提示词 / 开场白」的字段：creator_notes 根本不进，报进"会以原文进入提示词"就是假话
+  const notesCard = normalizeCard({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: { name: '笔记卡', description: '干净人设。', creator_notes: '作者备注 {{zzz}}', extensions: {} },
+  })
+  check(!collectCardWarnings(notesCard).some(w => String(w).includes('无法展开')),
+    'creator_notes 不进提示词 → 不报（避免"报了个不会发生的后果"）')
 
   // P0-8：自制卡（有 aiwu 结构、原生位为空）归一化后必须带上投影，
   // 否则落盘的 CCv3 在别的酒馆前端里是空卡——插件自己读结构渲染，从外面看不出来。
@@ -1001,7 +1065,7 @@ section('V26 · 清空字段 / 清空整组真的清空（P1-3：不许被 base 
 
 // ================================================================ 存储硬化 V27
 
-section('V27 · 存储硬化：跨实例锁 / BOM / 旧卡备份 / 孤儿索引 / 重名 / 体量上限')
+section('V27 · 存储硬化：跨实例锁 / BOM / 旧卡备份 / 孤儿索引 / 重名 / 体量上限 / 世界书正则护栏')
 {
   const { Store } = await import(lib('store.js'))
   const sandbox = await mkdtemp(join(tmpdir(), 'aiwu-v27-'))
@@ -1057,18 +1121,119 @@ section('V27 · 存储硬化：跨实例锁 / BOM / 旧卡备份 / 孤儿索引 
     } catch (e) { tooBig = e.message }
     check(tooBig.includes('上限'), `角色描述超限被拒（${tooBig}）`)
 
-    // 恶意正则不再指数回溯
-    const evilBook = { entries: [{ id: 'evil', keys: ['(a+)+$'], use_regex: true, content: '设定' }] }
-    const started = Date.now()
-    const sel = selectLoreEntries(evilBook, ['a'.repeat(30) + '!'])
-    const elapsed = Date.now() - started
-    check(elapsed < 500, `恶意正则退化成字面量：30 字符文本耗时 ${elapsed}ms（修复前 >600ms）`)
-    check(Array.isArray(sel.entries), '恶意正则不会抛错')
+    // ---- 正则护栏：ReDoS 构造族（表驱动）----
+    //
+    // 判据不看计时，看**语义**：给一条「正则能匹上、字面量匹不上」的文本。
+    //   走正则 → 命中（hit=true）；被判不安全 / 超预算 → 退化字面量 → 不命中（hit=false）。
+    // 为什么不只靠计时：`(a+)+$` 之外那些族（`(.+a){12}` / `(\w+)\1`）在**能匹配**的短文本上
+    // 根本不慢，计时断言会绿着放跑它们；而 `(a|a)+$` 在旧判据下 26 字符就 745ms（>500）。
+    // 两类一起测：每族先验语义，另有一条专门验「真的不再卡住」的耗时。
+    const REDOS = [
+      { name: '嵌套量词 (a+)+$', pattern: '(a+)+$', text: 'a'.repeat(26) },
+      { name: '重复交替分组 (a|a)+$', pattern: '(a|a)+$', text: 'a'.repeat(26) },
+      { name: '重复交替分组 (a|ab)+$', pattern: '(a|ab)+$', text: 'abababab' },
+      { name: '花括号重复套分组 (a{1,3}){10}$', pattern: '(a{1,3}){10}$', text: 'a'.repeat(30) },
+      { name: '花括号重复套 .+ (.+a){12}', pattern: '(.+a){12}', text: 'a'.repeat(24) },
+      { name: '花括号重复套 .* (.*a){8}$', pattern: '(.*a){8}$', text: 'a'.repeat(8) },
+      { name: '反向引用 (a+)\\1b', pattern: '(a+)\\1b', text: 'a'.repeat(12) + 'b' },
+      { name: '反向引用 (\\w+)\\1', pattern: '(\\w+)\\1', text: 'abababab' },
+      { name: '无界量词堆叠（多项式族）', pattern: 'a*a*a*a*a*a*a*a*a*b', text: 'a'.repeat(20) + 'b' },
+    ]
+    for (const row of REDOS) {
+      const started = Date.now()
+      let hit = false
+      let threw = ''
+      try {
+        const sel = selectLoreEntries(
+          { entries: [{ id: 'evil', keys: [row.pattern], use_regex: true, content: '设定' }] },
+          [row.text],
+        )
+        hit = Array.isArray(sel.entries) && sel.entries.length > 0
+      } catch (error) {
+        threw = error instanceof Error ? error.message : String(error)
+      }
+      const elapsed = Date.now() - started
+      check(
+        threw === '' && hit === false && elapsed < 500,
+        `${row.name} 判为不安全并退化字面量（命中=${hit} 抛错=${threw === '' ? '否' : threw} ${elapsed}ms）`,
+        '没有退化：这张卡会把宿主主线程按在这次匹配上（扫描窗 8000 字符时指数级）。该找 host-core',
+      )
+    }
 
-    // 正常正则仍要能用
-    const okBook = { entries: [{ id: 'ok', keys: ['^你好'], use_regex: true, content: '问候设定' }] }
-    const okSel = selectLoreEntries(okBook, ['你好呀'])
-    check(okSel.entries.length === 1, '正常的 use_regex 仍然命中')
+    // 破坏性最大的一族单独量一次耗时：不相交的文本才是灾难回溯的触发条件
+    {
+      const started = Date.now()
+      const sel = selectLoreEntries(
+        { entries: [{ id: 'evil', keys: ['(a|a)+$'], use_regex: true, content: '设定' }] },
+        ['a'.repeat(26) + '!'],
+      )
+      const elapsed = Date.now() - started
+      check(elapsed < 500,
+        `交替分组族在 27 字符不匹配文本上不卡：${elapsed}ms（旧判据实测 745ms）`)
+      check(Array.isArray(sel.entries), '恶意正则不会抛错（抛错会让整轮对话进不去）')
+    }
+
+    // ---- 反向断言组：真卡常见写法绝不能被判不安全 ----
+    // 没有这一组，上面那张表只会越来越狠，最后变成「世界书静默少命中」的新来源。
+    const SAFE_KEYS = [
+      { pattern: '便利(贴|条)', text: '去买便利贴' },
+      { pattern: '^你好', text: '你好呀' },
+      { pattern: '^\\d{3}$', text: '123' },
+      { pattern: '^(a|b)?x$', text: 'bx' },
+      { pattern: '(?:猫|狗)叫', text: '楼下猫叫' },
+      { pattern: '^\\d+\\.\\d+$', text: '12.34' },
+      { pattern: '.*', text: '任意文本' },
+      { pattern: '\\w+\\s+\\d+', text: 'abc 123' },
+    ]
+    for (const row of SAFE_KEYS) {
+      let hit = false
+      let threw = ''
+      try {
+        const sel = selectLoreEntries(
+          { entries: [{ id: 'ok', keys: [row.pattern], use_regex: true, content: '设定' }] },
+          [row.text],
+        )
+        hit = sel.entries.length > 0
+      } catch (error) {
+        threw = error instanceof Error ? error.message : String(error)
+      }
+      check(threw === '' && hit === true, `正常写法 /${row.pattern}/ 不被误判为不安全（仍命中）`,
+        `被误判成不安全了（退化字面量后匹不上「${row.text}」）：这会让真卡的世界书条目静默消失。该找 host-core`)
+    }
+
+    // ---- 编译缓存：同一个 key 第二轮不该再 new RegExp ----
+    // 数构造次数是唯一能"从外面看见缓存"的办法：patch 掉全局 RegExp，
+    // 只统计**构造参数恰好是这条唯一 pattern** 的次数（其它正则调用不受影响）。
+    {
+      const RealRegExp = globalThis.RegExp
+      const unique = `^A I W U cache probe ${Date.now()}`
+      let built = 0
+      class CountingRegExp extends RealRegExp {
+        constructor(...args) {
+          if (args[0] === unique) built += 1
+          super(...args)
+        }
+      }
+      globalThis.RegExp = CountingRegExp
+      try {
+        const book = () => ({
+          entries: [{ id: 'c', keys: [unique], use_regex: true, content: '设定' }],
+        })
+        const text = unique.slice(1)
+        built = 0
+        const first = selectLoreEntries(book(), [text])
+        const cold = built
+        built = 0
+        const second = selectLoreEntries(book(), [text])
+        const warm = built
+        check(cold === 1 && warm === 0,
+          `正则编译缓存生效：首轮编译 ${cold} 次、次轮 ${warm} 次`,
+          '次轮还在 new RegExp：每轮每条目每条 key 都重新编译，一张 200 key 的卡每轮多付一次编译开销。该找 host-core')
+        check(first.entries.length === 1 && second.entries.length === 1, '缓存不影响命中结果（首轮次轮都命中）')
+      } finally {
+        globalThis.RegExp = RealRegExp
+      }
+    }
   } finally {
     await rm(sandbox, { recursive: true, force: true })
     process.env['AIWU_STORAGE_ROOT'] = ''

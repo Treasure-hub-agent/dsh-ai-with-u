@@ -24,6 +24,8 @@ export const ROUTES = {
   activate: '/activate',
   deactivate: '/deactivate',
   setMode: '/mode',
+  /** 纪律包三档（宿主未重启 / 版本旧时 404 → ApiUnavailableError，面板据此置灰） */
+  discipline: '/discipline',
 
   // ---- 会话级绑定（只影响某一个会话；与「全局启用」互不覆盖）----
   bind: '/bind',
@@ -217,6 +219,13 @@ export interface Overview {
   ok: true
   root: string
   active: ActiveState
+  /**
+   * 纪律包档位（`off` / `lite` / `full`）。
+   *
+   * 宿主把它当**全局偏好**（`_active.json`，换角色不重置），`GET /overview` 直接回显
+   * （`src/web.ts:250`）。老宿主没有这个字段 → 面板回落 `lite`（与宿主缺省一致）。
+   */
+  discipline?: string
   /**
    * 面板所在的**当前会话 id**（请求带 `?sessionId=` 时宿主原样回显；没带就是空串）。
    *
@@ -492,6 +501,18 @@ export interface LoreDiagPayload {
   keywordDropped?: unknown[]
   /** 老字段：只给名字 / id，没分类也没字数 */
   droppedByBudget?: unknown[]
+  /**
+   * 这份诊断的**覆盖范围**（宿主新加）。
+   *
+   *  - `'full'`：这张卡就是当前生效角色，与 `/preview` 的 `lore` 同源（含关键词部分）；
+   *  - `'constant-only'`：只算了常驻条目 —— 关键词命中依赖当轮对话，非生效卡算不出来。
+   *
+   * 面板只在 `'constant-only'` 时于诊断块上方加一行中性说明，**不猜**别的取值：
+   * 没给或给了不认识的值就当没有。
+   */
+  scope?: string
+  /** 为什么只有常驻：`not-active`（不是生效角色）/ `no-cache`（生效了但缓存还没热）。可选。 */
+  reason?: string
   maxEntries?: number
   budgetChars?: number
   usedChars?: number
@@ -627,10 +648,15 @@ export interface PreviewData {
 /**
  * 读本轮注入快照（只读，不改任何状态）。
  *
- * 宿主接口未就绪时抛 `ApiUnavailableError`：面板据此显示「接口还没好」而不是一片红字。
+ * `sessionId`（可选）按宿主 `?sessionId=` 语义给：给了就看「那个会话实际会注入什么」
+ * （会话绑定 > 全局启用），不给 = 全局视角。宿主接口未就绪时抛 `ApiUnavailableError`：
+ * 面板据此显示「接口还没好」而不是一片红字。
  */
-export function fetchPreview(): Promise<PreviewData> {
-  return request<PreviewData>(ROUTES.preview)
+export function fetchPreview(sessionId?: string): Promise<PreviewData> {
+  const path = sessionId === undefined || sessionId.trim() === ''
+    ? ROUTES.preview
+    : `${ROUTES.preview}?sessionId=${encodeURIComponent(sessionId)}`
+  return request<PreviewData>(path)
 }
 
 /** 角色簿：全部角色及其卡片、记忆条数。 */
@@ -688,6 +714,34 @@ export interface SetModeResult {
  */
 export function setInteractionMode(mode: InteractionMode, name?: string): Promise<SetModeResult> {
   return post<SetModeResult>(ROUTES.setMode, name === undefined || name === '' ? { mode } : { mode, name })
+}
+
+/**
+ * 纪律包档位（宿主 `DISCIPLINE_LEVELS`，顺序即强弱）：
+ *  - `off`  —— 该段不注入（`renderDisciplineText` 返回空串）；
+ *  - `lite` —— 基础纪律：禁止词库 / 消息形态 / 动作 / 输入识别 / 边界 / 指令确认；
+ *  - `full` —— lite + 语态锚点 + 日记自检（≈1400 字符上限）。
+ */
+export type DisciplineLevel = 'off' | 'lite' | 'full'
+
+/** `POST /discipline` 的返回（宿主回显写入的档位 + 最新 ActiveState）。 */
+export interface SetDisciplineResult {
+  /** 宿主回显的档位；拿不准时调用方按请求值兜底 */
+  discipline?: string
+  active?: ActiveState
+}
+
+/**
+ * 切换纪律包档位。
+ *
+ * 语义上它是**全局写作偏好**（写 `_active.json`，换角色、退出全局都不重置），
+ * 不是按卡的设置 —— 面板文案必须这么讲，别让用户以为只影响当前这张卡。
+ *
+ * 宿主未重启 / 版本旧时该路由不存在：`request` 会抛 `ApiUnavailableError`，
+ * 调用方据此把胶囊置灰并提示一次，**不要**当操作失败弹红条（能力缺失，不是操作错误）。
+ */
+export function setDiscipline(level: DisciplineLevel): Promise<SetDisciplineResult> {
+  return post<SetDisciplineResult>(ROUTES.discipline, { level })
 }
 
 /** 保存角色卡的结果。warnings 是后端软提示（世界书超限等）：**不拦截保存**，只是要展示给用户。 */

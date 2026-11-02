@@ -27,6 +27,19 @@ export interface DroppedLoreEntry {
 
 export interface LoreDroppedInfo {
   entries: DroppedLoreEntry[]
+  /**
+   * 这份诊断的覆盖范围（宿主 `diag.scope`，**只在宿主给了字符串时**才带）。
+   *
+   * 目前认识的取值：`'full'`（这与 `/preview` 同源，有关键词部分）/ `'constant-only'`
+   * （只算了常驻条目）。面板只在等于 `'constant-only'` 时加一句中性说明；别的取值不解释。
+   */
+  scope?: string
+  /**
+   * 为什么只有常驻（宿主 `diag.reason`，可选）：`'not-active'` = 这张卡不是生效角色；
+   * `'no-cache'` = 它是生效角色但世界书缓存还没热。两句话说的不是一回事，所以分开解释；
+   * 没给就按「非生效卡」那句讲（契约里 constant-only 的主用途）。
+   */
+  reason?: string
   /** 本轮注入条数上限（宿主给才显示） */
   maxEntries?: number
   /** 关键词命中那本的字符预算（宿主给才显示） */
@@ -98,6 +111,14 @@ function readFromPayload(payload: unknown): LoreDroppedInfo | undefined {
 
   return {
     entries,
+    // 只认字符串：宿主没给 / 给了别的类型就当「不知道范围」，面板据此不加说明
+    scope: typeof record['scope'] === 'string' && record['scope'].trim() !== ''
+      ? record['scope'].trim()
+      : undefined,
+    // 同上：`reason` 只用来挑一句说明，认不出就不带（面板退回「非生效卡」那句）
+    reason: typeof record['reason'] === 'string' && record['reason'].trim() !== ''
+      ? record['reason'].trim()
+      : undefined,
     maxEntries: asNumber(record['maxEntries'] ?? record['max_entries']),
     budgetChars: asNumber(record['budgetChars'] ?? record['budget_chars']),
     constantBudgetChars: asNumber(record['constantBudgetChars'] ?? record['constant_budget_chars']),
@@ -113,19 +134,51 @@ function firstPayload(candidates: unknown[]): LoreDroppedInfo | undefined {
   return undefined
 }
 
-/** `GET /character` 的详情：优先 `detail.diag`，其次世界书扩展里的几个可疑位置。 */
-export function readLoreDroppedFromDetail(detail: CharacterDetail | undefined): LoreDroppedInfo | undefined {
-  if (detail === undefined) return undefined
+/** `GET /character` 里可能装着 diag 的几个位置（顺序即优先级，宿主挂哪儿都认）。 */
+function detailDiagCandidates(detail: CharacterDetail | undefined): unknown[] {
+  if (detail === undefined) return []
   const ccv3 = detail.ccv3
   const data = asRecord(asRecord(ccv3)?.['data'])
   const extensions = asRecord(data?.['extensions'])
   const aiwu = asRecord(extensions?.['aiwu'])
-  return firstPayload([
+  return [
     detail.diag,
     aiwu?.['diag'],
     aiwu?.['loreDiag'],
     data?.['diag'],
-  ])
+  ]
+}
+
+/** `GET /character` 的详情：优先 `detail.diag`，其次世界书扩展里的几个可疑位置。 */
+export function readLoreDroppedFromDetail(detail: CharacterDetail | undefined): LoreDroppedInfo | undefined {
+  return firstPayload(detailDiagCandidates(detail))
+}
+
+/**
+ * 宿主这次**到底给没给**诊断 —— 与「有没有被裁条目」是两件事。
+ *
+ * 为什么必须拆开：面板决定「要不要退 `/preview`」只能看 diag **在不在**。
+ * 若按「有没有被裁条目」判，非生效卡恰好没有超预算条目时就会退到 `/preview`，
+ * 而那份是按**当前生效角色**算的 —— 于是把别人的被裁名单挂在这张卡上
+ * （本轮修复的那类 bug 的最后一个口子）。
+ *
+ * 判据：候选位置里有一个是对象，且**带着 diag 的任一已知键**（空数组也算「给了」）。
+ * 用键名而不是「只要是对象」，是为了不被卡片自带的同名趣味字段（`data.diag`）误触发；
+ * 一个键都不认识就当宿主没提供 → 面板才可以走老宿主那条退路。
+ */
+export function hasDetailLoreDiag(detail: CharacterDetail | undefined): boolean {
+  const KNOWN_KEYS = [
+    'constantDropped', 'keywordDropped', 'droppedByBudget',
+    'scope', 'reason',
+    'maxEntries', 'max_entries', 'budgetChars', 'budget_chars',
+    'constantBudgetChars', 'constant_budget_chars', 'usedChars',
+  ]
+  for (const candidate of detailDiagCandidates(detail)) {
+    const record = asRecord(candidate)
+    if (record === undefined) continue
+    if (KNOWN_KEYS.some(key => key in record)) return true
+  }
+  return false
 }
 
 /** `GET /preview` 的 `lore`：宿主新字段与老计数混在一起，只认被裁列表。 */

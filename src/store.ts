@@ -67,6 +67,25 @@ export type { Preset, PresetActive, PresetIndex, PresetIndexEntry, PresetModule,
 export const INDEX_FILE = '_index.json'
 export const ACTIVE_FILE = '_active.json'
 /**
+ * 「预置卡墓碑」：这些名字的卡被用户删过，`seedPresets` 重启时**不再复活**。
+ *
+ * 为什么必须有这个文件：`seedPresets` 的幂等判据是「目标 card.json 存不存在」，
+ * 而"用户删掉预置卡"和"上次没种完"在磁盘上长得一模一样——没有墓碑就只能靠
+ * 「目录在 = 种过」来猜，删掉的卡重启又回来（README:270 承诺的是"删了不会自己长回来"）。
+ */
+export const SEED_TOMBSTONE_FILE = '_seed_deleted.json'
+/**
+ * 「已种入的预置卡」登记（名字 → 种入时刻）。
+ *
+ * 墓碑只能记**预置卡**：用户自己建的卡被删掉时写墓碑是无意义的噪音（而且会让人以为
+ * "自建卡也算预置"）。删卡时 Store 拿不到 `presets/` 目录，所以判断依据只能是
+ * "这张卡当初是不是由 seedPresets 种进来的"——种入那一刻登记在这里。
+ *
+ * 迁移：老安装没有这个文件，下一次启动的 `seedPresets` 会把「种子里有、盘上也有」的名字
+ * 补登记（那是之前种过、或用户自己放了同名卡——两种情况下"删掉不再复活"都是用户想要的结果）。
+ */
+export const SEED_INSTALLED_FILE = '_seed_installed.json'
+/**
  * 会话绑定表（`{ [sessionId]: { character, boundAt } }`）。
  *
  * 「当前会话启用」写在这里，与全局启用（`_active.json`）互不影响；
@@ -676,7 +695,12 @@ export class Store {
         if (rebuilt[name] === undefined) rebuilt[name] = entry
       }
       index = rebuilt
-      await atomicWrite(join(this.root, INDEX_FILE), `${JSON.stringify(rebuilt, null, 2)}\n`)
+      // 索引回写与 `touchIndex` / `deleteCharacter` **抢同一把 `#index` 锁**：
+      // 旧实现是锁外裸写，两个实例（桌面 + web profile）同时「扫描目录 → 重建 → 原子写」时，
+      // 后写的会把对方刚落盘的条目整份覆盖掉（实测表现：刚存的新卡在列表里闪一下就没了）。
+      await this.locked('#index', async () => {
+        await atomicWrite(join(this.root, INDEX_FILE), `${JSON.stringify(rebuilt, null, 2)}\n`)
+      })
     }
     return { index, rebuilt: needsRebuild, broken }
   }
@@ -847,6 +871,10 @@ export class Store {
         const index = await this.readIndex()
         delete index[safe]
         await atomicWrite(join(this.root, INDEX_FILE), `${JSON.stringify(index, null, 2)}\n`)
+        // 墓碑只对**预置卡**有意义（自建卡删了不该在墓碑里留名）：先查种入登记，
+        // 命中才写墓碑 —— 这样「删掉预置卡 → 重启不复活」与「自建卡照常删」同时成立。
+        const seededNames = await this.readSeededNames()
+        if (seededNames[safe] !== undefined) await this.markSeedDeletedUnlocked(safe)
       })
     })
   }
@@ -903,6 +931,10 @@ export class Store {
       // 札记段：`>` 只是写入器的装饰，用户/模型手写时常常没有它；
       // 以前不带 `>` 的行会被静默丢弃、下一次重写就永久消失，这里一律收下。
       else if (section === 'notes') current.notes.push(body.replace(/^>\s*/u, '').trim())
+      // 没有 `**时间线**` 分节的自由文本：以前整行丢掉（用户手写 / 老版本写下的日记，
+      // 下一次「追加一条」触发整份重写时**永久消失**）。没有分节标记就按时间线收下——
+      // 内容保住；下次写盘会补上 `**时间线**` 小标题，那是格式规范化，不是删内容。
+      else current.timeline.push(body)
     }
     return entries
   }
@@ -977,7 +1009,8 @@ export class Store {
   private async writeDiaryUnlocked(name: string, entries: DiaryEntry[]): Promise<void> {
     // 条目内换行会破坏「一行一条」的格式：写入前拍平，避免自己写出读不回来的文件
     const flatten = (item: string): string => String(item ?? '').replace(/\s*\r?\n\s*/gu, ' ').trim()
-    const blocks = [`# ${name}的日记`]
+    // 标题沿用文件里那个（用户改成「和她的日子」之后不能被每次追加覆盖回默认值）
+    const blocks = [await this.diaryTitleOf(name)]
     for (const entry of entries) {
       blocks.push(`\n## ${entry.date}`)
       const timeline = entry.timeline.map(flatten).filter(s => s !== '')
@@ -992,6 +1025,30 @@ export class Store {
       }
     }
     await atomicWrite(this.diaryPath(name), `${blocks.join('\n')}\n`)
+  }
+
+  /**
+   * 日记正文的一级标题（`# …`）。
+   *
+   * 旧实现每次写盘都硬写 `# {name}的日记`：用户（或面板）把标题改成「和她的日子」之后，
+   * **下一次追加日记就把它覆盖回去**——内容都在，标题丢了，而且是静默的。
+   * 规则：沿用文件里第一个一级标题；没有（新文件 / 只有日期分组）才按默认值生成。
+   */
+  private async diaryTitleOf(name: string): Promise<string> {
+    const fallback = `# ${name}的日记`
+    let text: string
+    try {
+      text = await readFile(this.diaryPath(name), 'utf8')
+    } catch {
+      return fallback
+    }
+    for (const raw of text.split(/\r?\n/u)) {
+      const line = raw.trim()
+      // 只认一级标题：`## 2026 10 05` 是日期分组，不能当标题沿用
+      if (/^#[^#\s]/u.test(line) || /^#\s+\S/u.test(line)) return line
+      if (/^##\s/u.test(line)) break // 已经进入日期分组：上面没有标题
+    }
+    return fallback
   }
 
   // ---------------------------------------------------------------- 会话
@@ -1878,13 +1935,86 @@ export class Store {
     await atomicWrite(join(this.root, ACTIVE_FILE), `${JSON.stringify(state, null, 2)}\n`)
   }
 
+  // ---------------------------------------------------------------- 预置卡墓碑
+
   /**
-   * 首次使用时幂等种入预置卡：**逐张按目标 card.json 是否存在判幂等**。
+   * 读「已删除的预置卡」墓碑（名字 → 删除时刻）。文件不存在 = 从来没有墓碑。
+   *
+   * 解析刻意宽松：坏文件当成"没有墓碑"（宁可让卡再种一次，也不能因为一个辅助文件坏了
+   * 就永久卡住种入）；损坏本身由 `readJson` 统一改名成 `.corrupt-*` 留痕。
+   */
+  private async readSeedTombstones(): Promise<Record<string, string>> {
+    const raw = await readJson<Json>(join(this.root, SEED_TOMBSTONE_FILE))
+    const deleted = isRecord(raw?.['deleted']) ? raw['deleted'] : {}
+    const out: Record<string, string> = {}
+    for (const [name, at] of Object.entries(deleted)) {
+      const key = name.trim()
+      if (key === '') continue
+      out[key] = typeof at === 'string' ? at : ''
+    }
+    return out
+  }
+
+  /**
+   * 写墓碑（**调用方必须已持有 `#index` 锁**）。
+   *
+   * 与索引回写共用同一把锁：两个实例同时删两张不同的卡时，各自「读墓碑 → 加自己那条 → 写回」
+   * 在锁外会互相覆盖，被盖掉的那张卡下次启动就会复活。
+   */
+  private async markSeedDeletedUnlocked(name: string): Promise<void> {
+    const tombstones = await this.readSeedTombstones()
+    tombstones[name] = localIsoTimestamp()
+    await atomicWrite(
+      join(this.root, SEED_TOMBSTONE_FILE),
+      `${JSON.stringify({ version: 1, deleted: tombstones }, null, 2)}\n`,
+    )
+  }
+
+  /** 读「已种入的预置卡」登记（坏文件 / 缺失按空处理，理由同 {@link readSeedTombstones}）。 */
+  private async readSeededNames(): Promise<Record<string, string>> {
+    const raw = await readJson<Json>(join(this.root, SEED_INSTALLED_FILE))
+    const installed = isRecord(raw?.['installed']) ? raw['installed'] : {}
+    const out: Record<string, string> = {}
+    for (const [name, at] of Object.entries(installed)) {
+      const key = name.trim()
+      if (key === '') continue
+      out[key] = typeof at === 'string' ? at : ''
+    }
+    return out
+  }
+
+  /** 登记「这些名字是预置卡」（**调用方必须已持有 `#index` 锁**；幂等合并，不覆盖已有时间）。 */
+  private async recordSeededUnlocked(names: readonly string[]): Promise<void> {
+    if (names.length === 0) return
+    const installed = await this.readSeededNames()
+    const at = localIsoTimestamp()
+    let changed = false
+    for (const name of names) {
+      if (installed[name] !== undefined) continue
+      installed[name] = at
+      changed = true
+    }
+    if (!changed) return
+    await atomicWrite(
+      join(this.root, SEED_INSTALLED_FILE),
+      `${JSON.stringify({ version: 1, installed }, null, 2)}\n`,
+    )
+  }
+
+  /**
+   * 首次使用时幂等种入预置卡：**逐张按目标 card.json 是否存在 + 有没有墓碑**判幂等。
    *
    * v0.5.1 修两处（审查中危项）：
    *   - 不再「characters/ 目录存在即整体跳过」——上次启动 mkdir 后、种子写完前被杀，
    *     预置卡会永远缺失；逐张判存在即可自愈补齐；
    *   - 种入改走 {@link atomicWrite}：与全项目写盘铁律对齐，断电不落半个 JSON。
+   *
+   * 2026-11-02 补第三处（README:270 的承诺是「删掉的预置卡不会自己长回来」）：
+   * 只判 `card.json` 存在时，"用户删了"和"上次没种完"在磁盘上**长得一模一样**，
+   * 于是删掉的卡每次重启都复活。现在删除路径会写 {@link SEED_TOMBSTONE_FILE} 墓碑，
+   * 这里先读墓碑、命中就跳过（墓碑只记名字与时间，不含任何卡内容）；
+   * 同时把「盘上确实有这张预置卡」登记进 {@link SEED_INSTALLED_FILE}，
+   * 删除侧据此判断该不该写墓碑（用户自建卡被删不该在墓碑里留名）。
    *
    * 预置卡现在本身就是 CCv3（2026-10-30 换过）；旧格式卡的迁移回归由
    * `scripts/fixtures/legacy-cards` 承担，不再依赖预置卡。
@@ -1892,8 +2022,11 @@ export class Store {
   async seedPresets(presetRoot: string): Promise<number> {
     const dirRoot = join(this.root, CHARACTERS_DIR)
     let seeded = 0
+    /** 这次确认"盘上确实有"的预置卡名（新种的 + 早就种过的）：随后登记，供删卡时判墓碑。 */
+    const confirmed: string[] = []
     try {
       await mkdir(dirRoot, { recursive: true })
+      const tombstones = await this.readSeedTombstones()
       const entries = await readdir(presetRoot, { withFileTypes: true })
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
@@ -1901,16 +2034,28 @@ export class Store {
         try {
           const raw = JSON.parse(await readFile(src, 'utf8')) as Json
           const name = normalizeName(cardName(raw) !== '' ? cardName(raw) : entry.name)
+          // 用户删过这张预置卡：跳过（不给"删完重启又回来"的后门）
+          if (tombstones[name] !== undefined) continue
           const dst = this.cardPath(name)
-          if (existsSync(dst)) continue
+          if (existsSync(dst)) {
+            // 早就种过（或用户自己放了同名卡）：登记下来 —— 老安装没有登记文件，
+            // 这一步就是迁移，让"删掉不再复活"对已存在的预置卡也生效。
+            confirmed.push(name)
+            continue
+          }
           await mkdir(dirname(dst), { recursive: true })
           // 旧格式原样写（迁移在读取时发生，第二次写盘才落成 CCv3）
           await atomicWrite(dst, `${JSON.stringify(raw, null, 2)}\n`)
           await this.touchIndex(name, cardSource(raw))
+          confirmed.push(name)
           seeded += 1
         } catch (error) {
           process.stderr.write(`[ai-with-u] 预置卡 ${entry.name} 种入失败：${error instanceof Error ? error.message : String(error)}\n`)
         }
+      }
+      // 登记与索引回写共用 #index 锁（两个实例同时启动时不能互相盖掉对方的名字）
+      if (confirmed.length > 0) {
+        await this.locked('#index', async () => { await this.recordSeededUnlocked(confirmed) })
       }
     } catch (error) {
       process.stderr.write(`[ai-with-u] 预置卡种入失败：${error instanceof Error ? error.message : String(error)}\n`)

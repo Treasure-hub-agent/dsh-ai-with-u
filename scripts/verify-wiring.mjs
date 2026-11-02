@@ -112,6 +112,41 @@ function sliceRoute(source, fragment) {
 }
 
 /**
+ * 取某个 JSX 元素从开标签到配对闭标签的整段文本（按特征串定位）。
+ *
+ * 用途：判断「某个按钮是不是在这个容器里」——只认结构，不认行号。
+ * 自闭合组件（`<CardMenu ... />`）只返回它自己那一段（props 都在里面）。
+ * 只在同名标签的嵌套深度上做配平，够用于面板里的 `<div className="awu-xxx">`。
+ */
+function sliceJsxBlock(text, needle) {
+  const at = text.indexOf(needle)
+  if (at < 0) return undefined
+  const open = text.lastIndexOf('<', at)
+  if (open < 0) return undefined
+  const tag = /^<\s*([A-Za-z][\w.]*)/u.exec(text.slice(open, open + 40))?.[1]
+  if (tag === undefined) return undefined
+  const tagEnd = text.indexOf('>', at)
+  if (tagEnd < 0) return undefined
+  if (text.slice(tagEnd - 1, tagEnd) === '/') return text.slice(open, tagEnd + 1)
+  const token = new RegExp(`<\\s*(\\/?)\\s*${tag.replace('.', '\\.')}\\b`, 'gu')
+  token.lastIndex = tagEnd + 1
+  let depth = 1
+  let match
+  while ((match = token.exec(text)) !== null) {
+    if (match[1] === '/') {
+      depth -= 1
+      if (depth === 0) {
+        const end = text.indexOf('>', token.lastIndex)
+        return text.slice(open, end < 0 ? token.lastIndex : end + 1)
+      }
+    } else {
+      depth += 1
+    }
+  }
+  return undefined
+}
+
+/**
  * 读 `const NAME = ...` 的字符串内容（支持反引号模板、单双引号、`+` 拼接）。
  *
  * 目的只有一个：**数清真正会进提示词的字符数**。
@@ -1606,6 +1641,148 @@ head('[25] ST 预设判据对齐真原件（结构占位白名单 · 不按 mark
     else {
       skipped('宿主与客户端判据同源',
         '两侧注释都没写「同源 / 真原件」：判据可能各写一套（面包屑对不上）。建议补注释，但静态判不出真实差异')
+    }
+  }
+}
+
+// ================================================================ 26. 面板入口：纪律包 + 全局启用同级
+head('[26] 面板入口 · 纪律包三档胶囊（真的调 /discipline）与「全局启用」提到 heroActions 同级')
+{
+  const api = await readSource('client/api.ts')
+  const panel = await readSource('client/index.tsx')
+
+  // ① api 层：路由常量（宿主那条 POST /discipline）
+  if (api === undefined) {
+    bad('client/api.ts 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    const hasRoute = /discipline\s*:\s*['"]\/discipline['"]/u.test(api)
+    if (hasRoute) ok('client/api.ts 有 /discipline 路由常量')
+    else {
+      bad('client/api.ts 有 /discipline 路由常量',
+        'ROUTES 里没有 discipline：纪律包只有宿主实现，面板永远发不出改档请求。该找 client-ui')
+    }
+
+    // ② api 层：真的 POST 到它（不是只登记了一个常量）
+    const fn = /export\s+function\s+setDiscipline\s*\(([\s\S]{0,600}?)\n\}/u.exec(api)?.[1] ?? ''
+    if (fn === '' ) {
+      bad('client/api.ts 有 setDiscipline 发起函数',
+        '找不到 setDiscipline()：面板想改档也没有可调用的出口。该找 client-ui')
+    } else if (/post<\s*\w+\s*>\s*\(\s*ROUTES\.discipline/u.test(fn) || /ROUTES\.discipline/u.test(fn)) {
+      ok('client/api.ts 的 setDiscipline 发 POST /discipline')
+    } else {
+      bad('client/api.ts 的 setDiscipline 发 POST /discipline',
+        'setDiscipline 存在但里面没用 ROUTES.discipline：可能是死函数（面板点了没请求）。该找 client-ui')
+    }
+  }
+
+  // ③ 面板真的调用它（api 层有、界面没接 = 用户看不见入口）
+  if (panel === undefined) {
+    bad('client/index.tsx 可读', '文件不存在或读不到 —— 该找 client-ui')
+  } else {
+    const importBlock = /import\s*\{([\s\S]{0,600}?)\}\s*from\s*['"]\.\/api['"]/u.exec(panel)?.[1] ?? ''
+    const imported = /\bsetDiscipline\b/u.test(importBlock)
+    const callSites = (panel.match(/\bsetDiscipline\s*\(/gu) ?? []).length
+    if (imported && callSites > 0) ok('面板导入并调用 setDiscipline', `${callSites} 个调用点`)
+    else {
+      bad('面板导入并调用 setDiscipline',
+        imported
+          ? '导入了但没有任何调用点：胶囊点了不会发请求。该找 client-ui'
+          : '界面上没有 setDiscipline：宿主实现了 POST /discipline，但用户在面板里改不了档位（只能看到预览里的只读文字）。该找 client-ui')
+    }
+  }
+
+  // ④ 纪律包胶囊这一组本身：可访问 + 三档齐全 + 点击落到 applyDiscipline
+  if (panel !== undefined) {
+    const group = sliceJsxBlock(panel, 'data-group="discipline"')
+    if (group === undefined) {
+      bad('有纪律包三档胶囊（data-group="discipline"）',
+        '找不到纪律包胶囊组：宿主 L0.5 有三档，面板却没有入口——用户不知道这个能力存在。该找 client-ui')
+    } else {
+      const hasRole = /role="group"/u.test(group)
+      const hasLabel = /aria-label=/u.test(group)
+      const hasPressed = /aria-pressed=/u.test(group)
+      if (hasRole && hasLabel && hasPressed) ok('纪律包胶囊是可访问的单选组', 'role=group + aria-label + aria-pressed')
+      else {
+        bad('纪律包胶囊是可访问的单选组',
+          `缺 ${[hasRole ? '' : 'role="group"', hasLabel ? '' : 'aria-label', hasPressed ? '' : 'aria-pressed'].filter(Boolean).join(' / ')}：`
+          + '三个按钮读屏时分不出「同一组里的当前档」。该找 client-ui')
+      }
+
+      const levels = ['off', 'lite', 'full'].filter(level =>
+        new RegExp(`value:\\s*'${level}'`, 'u').test(panel))
+      const wired = /applyDiscipline\s*\(|setDiscipline\s*\(/u.test(group)
+      if (levels.length === 3 && wired) ok('三档齐全且点击真的改档', levels.join(' / '))
+      else {
+        bad('三档齐全且点击真的改档',
+          `档位 ${levels.join('/') || '解析不出'}；onClick 里${wired ? '有' : '没有'} applyDiscipline/setDiscipline —— `
+          + '宿主 DISCIPLINE_LEVELS 是 off/lite/full 三档，面板少一档或点了不发请求都是「看起来有开关」。该找 client-ui')
+      }
+    }
+  }
+
+  // ⑤ 「全局启用」提升到 heroActions（与「绑定到本会话」同级，不再藏在 ⋯ 里）
+  if (panel !== undefined) {
+    // ⋯ 菜单就地渲染在 .awu-heroActions 内部（`position:relative` 的锚点），所以
+    // 「在 heroActions 里」必须再减掉 <CardMenu> 那一段——否则「仍藏在 ⋯ 里」也会算通过。
+    const menu = sliceJsxBlock(panel, '<CardMenu')
+    const heroRaw = sliceJsxBlock(panel, 'className="awu-heroActions"')
+    const hero = heroRaw !== undefined && menu !== undefined && heroRaw.includes(menu)
+      ? heroRaw.replace(menu, '')
+      : heroRaw
+    if (hero === undefined) {
+      bad('有 .awu-heroActions 动作区',
+        '找不到 .awu-heroActions：详情页主操作区结构变了，本组断言无从谈起。该找 client-ui')
+    } else {
+      const hasOn = /detail\.globalOn/u.test(hero)
+      const hasOff = /detail\.globalOff/u.test(hero)
+      const hasOnClick = /onClick=\{\s*onActivate\b/u.test(hero)
+      const hasOffClick = /onClick=\{\s*onDeactivate\b/u.test(hero)
+      const hasBind = /detail\.bindSession|detail\.bindSessionOff|onBindSession|onUnbindSession/u.test(hero)
+      if (hasOn && hasOff && hasOnClick && hasOffClick) {
+        ok('全局启用 / 退出全局在 .awu-heroActions 里', '两态文案 + 两个 onClick 都在（且不在 ⋯ 菜单里）')
+      } else {
+        const lack = [
+          hasOn ? '' : 'detail.globalOn',
+          hasOff ? '' : 'detail.globalOff',
+          hasOnClick ? '' : 'onClick={onActivate}',
+          hasOffClick ? '' : 'onClick={onDeactivate}',
+        ].filter(Boolean)
+        bad('全局启用 / 退出全局在 .awu-heroActions 里',
+          `缺 ${lack.join(' / ')}：主人明确要求两个作用域同级、都看得见；`
+          + '藏进 ⋯ 就得先点开菜单才知道有「全局启用」这个作用域存在。该找 client-ui')
+      }
+      if (hasBind && hasOn) ok('两种作用域在同一动作区（同级）')
+      else {
+        skipped('两种作用域在同一动作区（同级）',
+          '本会话绑定按钮与全局按钮不在同一块里：可能只是一处文案/条件分支改了名，静态判不出是否有意为之')
+      }
+
+      // 中性实心 token：作用是「与主色的绑定按钮同级、但不抢主按钮」。
+      // 断言它的意义不在样式，而在**防止有人又把这枚按钮挪回菜单**——
+      // 挪回去时这一行风格 token 通常会被一起删掉，红点会先出现。
+      const scopeTone = (hero.match(/data-tone="scope"/gu) ?? []).length
+      if (scopeTone >= 2) ok('全局启用两态都带 data-tone="scope"（同级中性实心）', `${scopeTone} 处`)
+      else {
+        bad('全局启用两态都带 data-tone="scope"（同级中性实心）',
+          `只有 ${scopeTone} 处：两态要共用同一档中性色（不再当"次要动作"弱化，也不抢主色）。该找 client-ui`)
+      }
+    }
+
+    // ⑥ ⋯ 菜单里不许再留全局项（留着就是两套入口，点哪个都不知道）
+    if (menu === undefined) {
+      skipped('⋯ 菜单不再含全局启用项', '找不到 <CardMenu> 用法（可能换了组件名），无法判断菜单项')
+    } else {
+      const leftover = /key:\s*'global'/u.test(menu)
+      const keepsOthers = ['mode', 'opening', 'export'].every(key =>
+        new RegExp(`key:\\s*'${key}'`, 'u').test(menu))
+      if (!leftover && keepsOthers) ok('⋯ 菜单不再含全局启用项', 'mode / opening / export 仍在')
+      else if (leftover) {
+        bad('⋯ 菜单不再含全局启用项',
+          "CardMenu 的 items 里还有 key: 'global'：同一功能两套入口，用户会以为它们是两件事。该找 client-ui")
+      } else {
+        bad('⋯ 菜单保住 mode / opening / export',
+          '把全局项挪走时顺手删掉了其它菜单项（切模式 / 换开场白 / 导出）。该找 client-ui')
+      }
     }
   }
 }

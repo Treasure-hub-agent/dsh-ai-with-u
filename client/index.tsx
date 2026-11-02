@@ -39,6 +39,7 @@ import {
   saveCharacter,
   saveCharacterCcv3,
   draftCard,
+  setDiscipline,
   setInteractionMode,
   editDiary,
   forgetKeyword,
@@ -46,6 +47,7 @@ import {
   fetchRelation,
   nextOpening,
   unbindCharacter,
+  isUnavailable,
   IMPORT_LIMITS,
 } from './api'
 import { CardEditor } from './card-editor'
@@ -75,6 +77,7 @@ import type {
   CharacterDetail,
   CharacterSummary,
   DiaryEntry,
+  DisciplineLevel,
   ImportCharacterResult,
   InteractionMode,
   Overview,
@@ -87,6 +90,7 @@ import {
   IconChevron,
   IconClose,
   IconEject,
+  IconGlobe,
   IconImport,
   IconMask,
   IconMotion,
@@ -99,7 +103,7 @@ import {
   IconText,
   IconTrash,
 } from './icons'
-import { hasDroppedLore, readLoreDroppedFromDetail, readLoreDroppedFromPreview } from './lore-diag'
+import { hasDetailLoreDiag, hasDroppedLore, readLoreDroppedFromDetail, readLoreDroppedFromPreview } from './lore-diag'
 import type { LoreDroppedInfo } from './lore-diag'
 import { toLoreDraftFromCard } from './lorebook-schema'
 import { PresetPanel } from './preset-view'
@@ -143,6 +147,21 @@ const MODE_OPTIONS: Array<{ value: InteractionMode; labelKey: string; hintKey: s
   { value: 'text', labelKey: 'mode.text', hintKey: 'mode.textHint' },
   { value: 'text+action', labelKey: 'mode.action', hintKey: 'mode.actionHint' },
 ]
+
+/**
+ * 左栏的纪律包三档胶囊（顺序即强弱，与宿主 `DISCIPLINE_LEVELS` 一字不差）。
+ *
+ * 档位名复用预览弹层那三个键（中英都齐）：同一件事在面板里必须叫同一个名字，
+ * 否则「预览里写精简、胶囊里写中等」这种漂移迟早被当成 bug 报上来。
+ */
+const DISCIPLINE_OPTIONS: Array<{ value: DisciplineLevel; labelKey: string }> = [
+  { value: 'off', labelKey: 'preview.discipline.off' },
+  { value: 'lite', labelKey: 'preview.discipline.lite' },
+  { value: 'full', labelKey: 'preview.discipline.full' },
+]
+
+/** 宿主缺省档位（`PromptController.disciplineLevel` 的缺省值）。拿不到数据时高亮它。 */
+const DISCIPLINE_FALLBACK: DisciplineLevel = 'lite'
 
 /** 面板与按钮之间的间距（px）。 */
 /** 面板最小可用宽/高，用于贴边时的兜底夹取。 */
@@ -194,6 +213,16 @@ function readBindingRows(rows: unknown[]): Record<string, string> {
     if (key !== '' && name !== '') out[key] = name
   }
   return out
+}
+
+/**
+ * 把宿主给的纪律包档位读成三档之一。
+ *
+ * 只认 `off` / `lite` / `full` 三个字面量：别的值一律当「没给」——老宿主没有这个字段、
+ * 或者将来加了新档位时，面板宁可回落到缺省档，也不显示一个自己都说不清的胶囊。
+ */
+function readDisciplineLevel(value: unknown): DisciplineLevel | undefined {
+  return value === 'off' || value === 'lite' || value === 'full' ? value : undefined
 }
 
 function isSavePayload(value: unknown): value is CardSavePayload {
@@ -1796,15 +1825,27 @@ function CharacterDetailView(props: {
         </div>
         <div className="awu-heroActions">
           {/*
-            动作收敛成「1 主 + 1 次 + ⋯」（契约 §2.5，C 报告 P1-4）：
-            - 主：本会话绑定（已绑定时**同位置**变「解除绑定」，不再并排两枚）
-            - 次：编辑
-            - ⋯：全局启用 / 退出全局、切模式、换开场、导出（危险项不在这里）
-            主按钮同时写 `data-tone="primary"`（契约给 CSS 的钩子）与 `data-kind="primary"`
-            （现有 .awu-btn 主色规则）：两边都在，样式合并期任一侧都不会丢样子。
+            动作排布（2026-11-02 主人明确要求：两个作用域同级、都看得见）：
+            - 第 1 枚 = **本会话绑定**（主）：已绑定时**同位置**变「解除绑定」，不并排两枚；
+              主色两写 —— `data-tone="primary"`（契约给 CSS 的钩子）+ `data-kind="primary"`
+              （现有 .awu-btn 主色规则），样式合并期任一侧都不会丢样子。
+            - 第 2 枚 = **全局启用**（与绑定同级、不弱化、不进 ⋯）：全局启用中**同位置**变
+              「退出全局」。它以前藏在 ⋯ 第一项里，用户得先点开菜单才知道有这个作用域。
+            - 第 3 枚 = 编辑（次）。
+            - 第 4 枚 = ⋯（切模式 / 换开场白 / 导出；危险项在页面底部的 dangerZone）。
+            两枚作用域按钮与下方 `.awu-bindHints` 的两条说明一一对应（顺序也一致）。
           */}
           {boundHere ? (
-            <button type="button" className="awu-btn" data-size="md" onClick={onUnbindSession} disabled={busy}>
+            <button
+              type="button"
+              className="awu-btn"
+              data-size="md"
+              data-kind="primary"
+              data-tone="primary"
+              onClick={onUnbindSession}
+              disabled={busy}
+              title={t('bind.hint.session')}
+            >
               <IconEject size={12} />
               {t('detail.bindSessionOff')}
             </button>
@@ -1823,6 +1864,33 @@ function CharacterDetailView(props: {
               {t('detail.bindSession')}
             </button>
           )}
+          {live ? (
+            <button
+              type="button"
+              className="awu-btn"
+              data-size="md"
+              data-tone="scope"
+              onClick={onDeactivate}
+              disabled={busy}
+              title={t('bind.hint.globalOff')}
+            >
+              <IconGlobe size={12} />
+              {t('detail.globalOff')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="awu-btn"
+              data-size="md"
+              data-tone="scope"
+              onClick={onActivate}
+              disabled={busy}
+              title={t('bind.hint.global')}
+            >
+              <IconGlobe size={12} />
+              {t('detail.globalOn')}
+            </button>
+          )}
           <button
             type="button"
             /* 稳定 id：编辑器关闭后按它还焦（见 CharacterPanel 里的 wasEditingRef 说明） */
@@ -1839,10 +1907,7 @@ function CharacterDetailView(props: {
             label={t('detail.more')}
             busy={busy}
             items={[
-              live
-                ? { key: 'global', label: t('detail.globalOff'), onSelect: onDeactivate }
-                : { key: 'global', label: t('detail.globalOn'), onSelect: onActivate },
-              { key: 'mode', label: t('active.mode.switch'), onSelect: onSwitchMode, sepBefore: true },
+              { key: 'mode', label: t('active.mode.switch'), onSelect: onSwitchMode },
               { key: 'opening', label: t('opening.next'), onSelect: onNextOpening },
               { key: 'export', label: t('detail.export'), onSelect: onExport, sepBefore: true },
             ]}
@@ -1913,7 +1978,8 @@ function CharacterDetailView(props: {
 
       {/*
         危险操作下沉到页面最底部、与「改点什么」彻底分开（C 报告 P1-4）：
-        hero 里只留 1 主 + 1 次 + ⋯，删除改在这里，复用日记页那套 dangerZone 样式。
+        hero 里只有「两枚作用域 + 编辑 + ⋯」（见上方动作排布），删除改在这里，
+        复用日记页那套 dangerZone 样式。
       */}
       <div className="awu-dangerZone">
         <div className="awu-sectionHead">{t('diary.actions')}</div>
@@ -2363,6 +2429,22 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const [modePref, setModePref] = useState<InteractionMode | undefined>(undefined)
 
   /**
+   * 纪律包档位（L0.5）。
+   *
+   * 与模式不同，它是**纯全局偏好**（宿主写 `_active.json`，换角色 / 退出全局都不重置），
+   * 所以没有「按卡」这一层：`/overview.discipline` 就是权威，这里这份 state 只是
+   * 「刷新回来之前先按用户点的走」的回显镜像（以及 overview 取不到时的兜底）。
+   */
+  const [disciplineLevel, setDisciplineLevel] = useState<DisciplineLevel | undefined>(undefined)
+  /**
+   * 宿主还没提供 `POST /discipline`（未重启 / 版本旧）。
+   *
+   * 置灰是**能力缺失**的降级，不是操作失败：不写进 `error`（否则整条 ErrorBar 红着），
+   * 只在第一次撞到 404 时给一条 warn 提示。宿主能力不会在一次会话里中途出现，所以不必重置。
+   */
+  const [disciplineUnavailable, setDisciplineUnavailable] = useState(false)
+
+  /**
    * 会话级绑定。
    *
    * - `sessionId`：宿主 `/overview.sessionId`（当前这个会话的 id）。**拿不到就是空串**，
@@ -2723,6 +2805,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         // 会话绑定：老宿主没有这几个字段 → 空串 / 空表（界面自动退化成只用全局）
         setSessionId(typeof ov.sessionId === 'string' ? ov.sessionId : '')
         setBindings(readBindings(ov.bindings))
+        // 纪律包档位：宿主回显什么就信什么，老宿主没这个字段 → 不动（保留本地镜像/缺省）
+        const level = readDisciplineLevel(ov.discipline)
+        if (level !== undefined) setDisciplineLevel(level)
       }
       setError('')
     } catch (e) {
@@ -2861,6 +2946,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         ov?.active?.character ?? '',
         ov?.active?.enabled === true ? '1' : '0',
         ov?.active?.mode ?? '',
+        ov?.discipline ?? '',
         ov?.sessionId ?? '',
         ov?.bindings === undefined ? '' : JSON.stringify(ov.bindings),
         ov?.stats === undefined ? '' : `${ov.stats.characters}|${ov.stats.memoryEntries}|${ov.stats.turns}|${JSON.stringify(ov.stats.bySource)}`,
@@ -2875,6 +2961,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
         setActive(ov.active ?? { enabled: false })
         setSessionId(typeof ov.sessionId === 'string' ? ov.sessionId : '')
         setBindings(readBindings(ov.bindings))
+        const level = readDisciplineLevel(ov.discipline)
+        if (level !== undefined) setDisciplineLevel(level)
       }
     } catch (error) {
       console.warn('[ai-with-u] 面板静默刷新失败（下轮重试）：', error)
@@ -3109,6 +3197,51 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   }
 
   const onModePick = (next: InteractionMode): void => { applyMode(next, () => setDialog('')) }
+
+  /** 纪律包档位的展示名（三个键都写死，避免动态拼 key 逃过字典自检）。 */
+  const disciplineLabel = (level: DisciplineLevel): string => t(
+    level === 'off'
+      ? 'preview.discipline.off'
+      : level === 'lite' ? 'preview.discipline.lite' : 'preview.discipline.full',
+  )
+
+  /**
+   * 切纪律包档位（`POST /discipline`）。
+   *
+   * 与 `applyMode` 同一套形态：禁用 → busy、先乐观回显、成功刷新、失败回滚。
+   * 唯一的额外分支是 **404 优雅降级**：宿主没重启时这条路由还不存在，抛
+   * `ApiUnavailableError`；这时把胶囊置灰 + 一条 warn，不把面板打成错误态 ——
+   * 用户没法「重试」一个宿主根本没装的接口。
+   */
+  const applyDiscipline = (next: DisciplineLevel): void => {
+    if (busy) return
+    const previous = disciplineLevel
+    setBusy(true)
+    dismissNotice()
+    // 乐观：本地接口往返也要几十毫秒，胶囊先跟手，失败再回滚（绝不假装已生效）
+    setDisciplineLevel(next)
+    void setDiscipline(next)
+      .then(result => {
+        const level = readDisciplineLevel(result.discipline) ?? next
+        if (aliveRef.current) {
+          setDisciplineLevel(level)
+          setDisciplineUnavailable(false)
+          showNotice(t('discipline.done', { level: disciplineLabel(level) }), 'ok')
+        }
+        return reload()
+      })
+      .catch((error: unknown) => {
+        if (!aliveRef.current) return
+        setDisciplineLevel(previous)
+        if (isUnavailable(error)) {
+          setDisciplineUnavailable(true)
+          showNotice(t('discipline.unavailable'), 'warn')
+          return
+        }
+        setError(errorText(error))
+      })
+      .finally(() => { if (aliveRef.current) setBusy(false) })
+  }
   const openDelete = (name: string): void => { setDeleteTarget(name); setDialogError(''); setDialog('delete') }
   const openDialog = (which: 'new' | 'import' | 'preview' | 'preset' | 'mode' | 'forget' | 'resetAll' | 'resetSession' | ''): void => { setDialogError(''); setDialog(which) }
 
@@ -3567,8 +3700,15 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   /**
    * 打开卡片编辑器时解析「本轮被裁掉」的世界书条目。
    *
-   * 两路数据都容错：`GET /character` 的 diag 优先；没有就退 `GET /preview` 的 `lore`；
-   * 两路都拿不到（老宿主 / 接口未就绪 / 只读失败）就保持 undefined，世界书里那块警示不渲染。
+   * **判据是「宿主给没给 diag」，不是「有没有被裁条目」**（两者混用会漏出别人的名单）：
+   *  1. `detail.diag` 存在（`scope: 'full'` 或 `'constant-only'`）→ **只用它，绝不回退**。
+   *     本卡没有超预算条目就是「没有要看的」：`droppedLore` 留空 → 整块不显示（不报错）。
+   *     `constant-only` 的 `keywordDropped` 按宿主契约必然为空（关键词命中依赖当轮对话），
+   *     那是**事实**而不是缺数据，所以也不需要拿别处的快照来补。
+   *  2. 只有 diag **完全不存在**（老宿主 / 首启）时，才退 `GET /preview` 的 `lore`；
+   *     且必须校验「preview 反映的就是正在编辑的这张卡」——`/preview` 永远只说当前生效
+   *     角色的事，名字对不上就整块不显示（宁缺，不显示错人）。
+   *
    * 失败**不打扰用户**（console 留痕即可）——这只是锦上添花的诊断。
    */
   useEffect(() => {
@@ -3578,11 +3718,22 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       setDroppedLore(fromDetail)
       return undefined
     }
+    // 宿主这次给了 diag（只是本卡没有超预算条目）→ 到此为止，**不走 /preview**
+    if (hasDetailLoreDiag(currentDetail)) {
+      setDroppedLore(undefined)
+      return undefined
+    }
+    const target = currentDetail.name
     let cancelled = false
     setDroppedLore(undefined)
-    void fetchPreview()
+    // 老宿主退路：带上面板所在会话，宿主据此按「会话绑定 > 全局启用」决议目标角色。
+    // 不带的话预览永远只说全局角色，会话绑定的卡就永远对不上（退路白退）。
+    void fetchPreview(sessionIdRef.current)
       .then(preview => {
         if (cancelled || !aliveRef.current) return
+        // 退路必须「同一张卡」：未启用 / 启用的是别人 → 直接不用这份数据
+        const previewName = typeof preview.active?.character === 'string' ? preview.active.character : ''
+        if (preview.active?.enabled !== true || previewName !== target) return
         const fromPreview = readLoreDroppedFromPreview(preview)
         setDroppedLore(hasDroppedLore(fromPreview) ? fromPreview : undefined)
       })
@@ -3596,6 +3747,16 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   const mode: InteractionMode = live
     ? (active.mode ?? 'text+action')
     : (modePref ?? 'text+action')
+
+  /**
+   * 纪律包胶囊当前高亮哪一档。
+   *
+   * 三路兜底：本地镜像（刚点过，刷新还没回来）→ 本次 overview → 宿主缺省 `lite`。
+   * 纪律包是全局偏好，**不看**当前启用的是哪张卡（换角色不重置，与 mode 不同）。
+   */
+  const discipline: DisciplineLevel = disciplineLevel
+    ?? readDisciplineLevel(overview?.discipline)
+    ?? DISCIPLINE_FALLBACK
 
   // 侧栏徽记显示**本会话**实际生效的角色（绑定优先，其次全局）
   const badgeName = (() => {
@@ -3913,12 +4074,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 )}
               </div>
               {/*
-                状态带**只显示状态**，不再放动作（第 2 批收口，契约 §6「退出全局入口」）。
+                状态带**只显示状态**，不放动作（第 2 批收口，契约 §6「退出全局入口」）。
                 原因：这里是「谁在生效」的仪表，放按钮会让同一件事有两个入口
                 （「退出全局」原先在状态带和详情页 ⋯ 菜单各一份）。
-                现在取消类动作唯一的入口是详情页的 hero（解除绑定）/ ⋯ 菜单（退出全局）。
-                代价：没打开任何卡时没有"退出全局"的入口 —— 已淘汰的卡点进去就有，
-                第 3 批如果要做"全局开关"设置项，应该做在 ⋯ 菜单而不是这里。
+                2026-11-02 主人要求两个作用域都在详情页 hero 里看得见，于是「退出全局」
+                从 ⋯ 菜单提级成 hero 的第二枚同级按钮 —— 状态带这边仍然只显示状态，
+                所以入口依旧**只有一处**，没有回到当年的重复。
               */}
             </div>
           ) : (
@@ -4077,8 +4238,41 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                   </div>
 
                   {/*
-                    工具行已经挤（计数 + 模式胶囊 + 三个入口）：三枚都压成小按钮，
+                    纪律包三档（L0.5）：与左边的模式胶囊**同构、同区域**。
+                    它和「纯文本 / 文本+动作」一样决定模型怎么写，却一直只在预览弹层的
+                    只读文字里露面 —— 主人看不到就等于没有入口。
+                    档位是**全局偏好**（换角色不重置），所以放在全局工具栏而不是详情页。
+                    宿主未重启时 POST /discipline 仍是 404：胶囊整组置灰 + 一条 warn，
+                    不弹红条（能力缺失 ≠ 操作失败）。可见标签给扫读用，读屏走 role=group。
+                  */}
+                  <div
+                    className="awu-modePills"
+                    data-group="discipline"
+                    role="group"
+                    aria-label={t('preview.discipline')}
+                    title={t('discipline.hint')}
+                  >
+                    <span className="awu-modePillGroupLabel" aria-hidden="true">{t('preview.discipline')}</span>
+                    {DISCIPLINE_OPTIONS.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className="awu-modePill"
+                        data-on={discipline === option.value ? 'true' : 'false'}
+                        aria-pressed={discipline === option.value}
+                        onClick={() => applyDiscipline(option.value)}
+                        disabled={busy || disciplineUnavailable}
+                      >
+                        {t(option.labelKey)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/*
+                    工具行已经挤（计数 + 两组胶囊 + 三个入口）：三枚都压成小按钮，
                     完整名字进 title，主操作仍然只有「蒸馏 / 自创」那两枚大 CTA。
+                    两组胶囊在同一行放不下时由 `.awu-toolbar[data-wrap="true"]` 整组换行
+                    （胶囊之间不会被拆开），不要在这里再加内层容器。
                   */}
                   <div className="awu-toolbarActions">
                     <button

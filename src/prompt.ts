@@ -41,6 +41,7 @@ import {
   type CharacterCardV3,
   type L1Extras,
   type LoreDroppedEntry,
+  type LoreSelectOptions,
   type LoreSelection,
   CARD_CONTENT_GUARD,
   LORE_DEFAULTS,
@@ -247,6 +248,24 @@ export interface PreviewSnapshot {
     /** 首条常驻超额度仍被注入（说明人设比预算重要）。 */
     forcedConstantOverBudget: boolean
   }
+}
+
+/**
+ * 世界书预算诊断的载荷。
+ *
+ * `GET /preview` 的 `lore` 与 `GET /character` 的 `diag` 是**同一份结构**（客户端
+ * `client/lore-diag.ts` 按这份结构做容错读取，只认 `constantDropped` / `keywordDropped` /
+ * `droppedByBudget` 三个列表 + 三个预算数字），这里只额外挂两个说明字段。
+ */
+export type LoreDiagPayload = PreviewSnapshot['lore'] & {
+  /**
+   * 诊断范围：
+   *   - `'full'`：这张卡就是当前生效角色 → 与 `/preview` 完全同源（含关键词命中与被裁明细）；
+   *   - `'constant-only'`：只是一张**没启用**的卡 → 只算「常驻」那一本预算。
+   */
+  scope: 'full' | 'constant-only'
+  /** 为什么只有常驻：`not-active`（这卡不是生效角色）/ `no-cache`（是生效角色但缓存还没热）。 */
+  reason?: 'not-active' | 'no-cache'
 }
 
 /**
@@ -552,9 +571,38 @@ export class PromptController {
    *
    * 子代理有自己的 agent/sessionId，查不到绑定 → 这里自然退回全局角色：
    * **子代理不继承父会话绑定**（已写进文档，不是隔离漏了）。
+   *
+   * ⚠️ 所以工具层**不能只用这个返回值判"我该扮演谁"**：它会把子代理按全局角色处理。
+   * 工具侧先问 {@link subAgentVerdict}，判为子代理就直接拒绝（与注入侧同一判据）。
    */
   characterForSession(sessionId?: string): string | undefined {
     return this.resolveTarget(sessionId).character
+  }
+
+  /**
+   * **工具侧的子代理判定**（与注入侧 `setSubAgentPredicate` **同一判据、同一实现**）。
+   *
+   * 为什么工具侧必须单独问一句：`characterForSession` 对子代理会回落全局角色，
+   * 于是子代理里一句「记一下」就会把日记 / 关系写进**全局启用角色**名下——
+   * 注入侧早就不给子代理注入人设了，写路径却还在按全局角色落盘，这就是用户完全看不到的串台。
+   *
+   * 返回四态（**故意不用布尔**，因为"判不了"必须能被当成一个独立结果上报）：
+   *   - `'subagent'`：判定为子代理 → 调用方必须拒绝（不扮演，也不落全局）；
+   *   - `'main'`：主会话 → 照常按会话决议走；
+   *   - `'unknown'`：装了判定器，但上下文里既没有 agent 也没有 sessionId，**判不了**
+   *     → 调用方必须如实报告并给退化方案，不许静默按全局处理（那就是串台的来源）；
+   *   - `'unavailable'`：判定器没注入（自检 / 无 agents 服务的宿主）→ 与注入侧同口径按主会话处理。
+   */
+  subAgentVerdict(assembly: unknown, sessionId?: string): 'subagent' | 'main' | 'unknown' | 'unavailable' {
+    if (this.subAgentCheck === undefined) return 'unavailable'
+    const envelope = (assembly ?? null) as { agent?: unknown } | null
+    const agent = typeof envelope === 'object' && envelope !== null ? envelope.agent : undefined
+    const hasAgent = typeof agent === 'object' && agent !== null
+    // 判定器判子代理靠的是 agent 本体或 sessionId 对账；两样都没有时它只会返回 false，
+    // 那个 false 是"没判"，不是"不是子代理"——必须区分开，否则守卫等于没有。
+    if (!hasAgent && (sessionId === undefined || sessionId.trim() === '')) return 'unknown'
+    // 判定器抛错按主会话（与 isSubAgentAssembly 同口径：宁可误注入，也不误吞主会话）
+    return this.isSubAgentAssembly(assembly, sessionId) ? 'subagent' : 'main'
   }
 
   /** 当前绑定表快照（面板/自检用；不含正文），按 sessionId 排序稳定输出。 */
@@ -1018,8 +1066,6 @@ export class PromptController {
       ? context.recentTexts
       : [...(session?.recent ?? []), session?.topic ?? ''].filter(text => text.trim() !== '')
 
-    const aiwu = awiuOf(card)
-    const loreConfig = aiwu?.prompt?.lore
     const turnKey = context?.turnKey
     // 防粘 / 防抖：同一轮内多次 pre-step（工具循环）直接复用上一次的命中集合，不重算、不叠加。
     // 跨轮则整批重算——命中集合永远是"本轮最近几条消息"的函数，不会跨轮累积。
@@ -1027,19 +1073,9 @@ export class PromptController {
     const reuse = turnKey !== undefined && previous?.character === name && previous.loreTurnKey === turnKey
     const lore = reuse && previous?.lore !== undefined
       ? previous.lore
-      : selectLoreEntries(card.data.character_book, recentTexts, {
-        enabled: loreConfig?.enabled !== false,
-        scanDepth: typeof loreConfig?.scanDepth === 'number' ? loreConfig.scanDepth : undefined,
-        budgetChars: typeof loreConfig?.budgetChars === 'number' ? loreConfig.budgetChars : undefined,
-        // 常驻与关键词分开预算：卡级可覆盖常驻额度（默认 12000，见 LORE_DEFAULTS）
-        constantBudgetChars: typeof loreConfig?.constantBudgetChars === 'number' ? loreConfig.constantBudgetChars : undefined,
-        maxEntries: typeof loreConfig?.maxEntries === 'number' ? loreConfig.maxEntries : undefined,
-        charName: cardName(card),
-        userName: typeof aiwu?.userPersona?.displayName === 'string' && aiwu.userPersona.displayName.trim() !== ''
-          ? aiwu.userPersona.displayName.trim()
-          : '你',
-        turnSeed: turnKey,
-      })
+      // 选项（卡级 lore 配置 / char / user / turnSeed）统一由 loreOptionsOf 读，`/character`
+      // 的按卡诊断走同一份 —— 两处各写一份的话"预算按哪个算"就有两个答案。
+      : selectLoreEntries(card.data.character_book, recentTexts, this.loreOptionsOf(card, turnKey))
 
     const next: L1Cache = {
       character: name,
@@ -1233,29 +1269,103 @@ export class PromptController {
         },
       segments,
       total: segments.reduce((sum, item) => sum + item.chars, 0),
-      lore: {
-        count: cache?.lore?.entries.length ?? 0,
-        constantCount: diag?.constantCount ?? 0,
-        hitCount: diag?.hitCount ?? 0,
-        constantKeptCount: diag?.constantKeptCount ?? 0,
-        keywordKeptCount: diag?.keywordKeptCount ?? 0,
-        usedChars: diag?.usedChars ?? 0,
-        // `selectLoreEntries` 在「卡里没有世界书」时返回的 diag 全是 0（早退分支），
-        // 这里回落到默认预算——否则面板会显示「预算 0」，看着像坏了。
-        budgetChars: diag?.budgetChars !== undefined && diag.budgetChars > 0
-          ? diag.budgetChars
-          : LORE_DEFAULTS.budgetChars,
-        constantUsedChars: diag?.constantUsedChars ?? 0,
-        constantBudgetChars: diag?.constantBudgetChars !== undefined && diag.constantBudgetChars > 0
-          ? diag.constantBudgetChars
-          : LORE_DEFAULTS.constantBudgetChars,
-        // 被裁条目明细：面板要能逐条说「这条设定没进提示词」，只报条数等于没说
-        constantDropped: diag?.constantDropped ?? [],
-        keywordDropped: diag?.keywordDropped ?? [],
-        unsupportedDepthN: diag?.unsupportedDepthN ?? 0,
-        forcedConstantOverBudget: diag?.forcedConstantOverBudget ?? false,
-      },
+      // 世界书诊断的字段映射只有一份实现（`lorePayloadOf`），/character 也走它
+      lore: this.lorePayloadOf(diag, cache?.lore?.entries.length ?? 0),
     }
+  }
+
+  /**
+   * 世界书 diag → 面板载荷（**单一实现**：`preview()` 与 {@link loreDiagForCard} 共用）。
+   *
+   * 字段含义与 `PreviewSnapshot['lore']` 的注释一致；两个预算都做「0 → 默认值」回落，
+   * 因为 `selectLoreEntries` 在「卡里没有世界书 / 世界书关闭」时返回的 diag 全是 0（早退分支），
+   * 面板显示「预算 0」看着像坏了。
+   */
+  private lorePayloadOf(
+    diag: LoreSelection['diag'] | undefined,
+    count: number,
+  ): PreviewSnapshot['lore'] {
+    return {
+      count,
+      constantCount: diag?.constantCount ?? 0,
+      hitCount: diag?.hitCount ?? 0,
+      constantKeptCount: diag?.constantKeptCount ?? 0,
+      keywordKeptCount: diag?.keywordKeptCount ?? 0,
+      usedChars: diag?.usedChars ?? 0,
+      budgetChars: diag?.budgetChars !== undefined && diag.budgetChars > 0
+        ? diag.budgetChars
+        : LORE_DEFAULTS.budgetChars,
+      constantUsedChars: diag?.constantUsedChars ?? 0,
+      constantBudgetChars: diag?.constantBudgetChars !== undefined && diag.constantBudgetChars > 0
+        ? diag.constantBudgetChars
+        : LORE_DEFAULTS.constantBudgetChars,
+      // 被裁条目明细：面板要能逐条说「这条设定没进提示词」，只报条数等于没说
+      constantDropped: diag?.constantDropped ?? [],
+      keywordDropped: diag?.keywordDropped ?? [],
+      unsupportedDepthN: diag?.unsupportedDepthN ?? 0,
+      forcedConstantOverBudget: diag?.forcedConstantOverBudget ?? false,
+    }
+  }
+
+  /**
+   * 世界书选择的选项（**刷新与按卡诊断共用**）。
+   *
+   * 卡级 `extensions.aiwu.prompt.lore` 的读取只写在这里：以前这套映射内联在 `refreshCache` 里，
+   * 再给 `/character` 抄一份就必然漂移（预算按哪份算会变成两个答案）。
+   */
+  private loreOptionsOf(card: CharacterCardV3, turnKey?: string): LoreSelectOptions {
+    const aiwu = awiuOf(card)
+    const loreConfig = aiwu?.prompt?.lore
+    return {
+      enabled: loreConfig?.enabled !== false,
+      scanDepth: typeof loreConfig?.scanDepth === 'number' ? loreConfig.scanDepth : undefined,
+      budgetChars: typeof loreConfig?.budgetChars === 'number' ? loreConfig.budgetChars : undefined,
+      // 常驻与关键词分开预算：卡级可覆盖常驻额度（默认 12000，见 LORE_DEFAULTS）
+      constantBudgetChars: typeof loreConfig?.constantBudgetChars === 'number' ? loreConfig.constantBudgetChars : undefined,
+      maxEntries: typeof loreConfig?.maxEntries === 'number' ? loreConfig.maxEntries : undefined,
+      charName: cardName(card),
+      userName: typeof aiwu?.userPersona?.displayName === 'string' && aiwu.userPersona.displayName.trim() !== ''
+        ? aiwu.userPersona.displayName.trim()
+        : '你',
+      turnSeed: turnKey,
+    }
+  }
+
+  /** 只算「常驻」那一本预算（不喂对话文本 → 关键词永不命中，常驻完全不依赖当轮内容）。 */
+  private constantOnlyLore(card: CharacterCardV3): PreviewSnapshot['lore'] {
+    const selection = selectLoreEntries(card.data.character_book, [], this.loreOptionsOf(card))
+    return this.lorePayloadOf(selection.diag, selection.entries.length)
+  }
+
+  /**
+   * 按**指定角色卡**算世界书预算诊断（`GET /character` 用）。
+   *
+   * 为什么不能直接复用 `/preview` 的 `lore`：那份是「当前生效角色」的快照。面板里编辑一张
+   * **没启用**的卡时拿它，显示的就是别人的被裁名单——用户以为是自己的设定被裁，全是假数据。
+   *
+   * 两条路：
+   *   - 这张卡正是该会话（或全局）的生效角色 → 直接用它的缓存 diag（含关键词被裁明细，与
+   *     `/preview` 同源）；
+   *   - 否则 → 只跑 **常驻**那一本预算（常驻按 `LORE_DEFAULTS` / 卡级配置裁，结果确定）；
+   *     关键词命中依赖当轮对话文本，未生效卡**无从得知**——不编，`keywordDropped` 保持空数组，
+   *     并用 `scope` / `reason` 说明为什么没有关键词部分。
+   */
+  loreDiagForCard(card: CharacterCardV3, sessionId?: string): LoreDiagPayload {
+    const name = cardName(card)
+    // 与 preview() 同一判据：子代理会话一律「未启用」（连全局都不回落）
+    const subAgent = this.isSubAgentAssembly(undefined, sessionId)
+    const target: SessionTarget = subAgent
+      ? { key: sessionId ?? '', source: 'none' }
+      : this.resolveTarget(sessionId)
+    if (target.character === name) {
+      const cache = this.cacheOf(target.key)
+      if (cache !== undefined && cache.character === name && cache.lore !== undefined) {
+        return { scope: 'full', ...this.lorePayloadOf(cache.lore.diag, cache.lore.entries.length) }
+      }
+      // 生效但缓存还没热（面板比第一轮对话先打开）：常驻仍是能算的真数据
+      return { scope: 'constant-only', reason: 'no-cache', ...this.constantOnlyLore(card) }
+    }
+    return { scope: 'constant-only', reason: 'not-active', ...this.constantOnlyLore(card) }
   }
 
   /** L0.5 纪律包段 / 预设段 / L1 段共用的「有没有角色」判定。 */

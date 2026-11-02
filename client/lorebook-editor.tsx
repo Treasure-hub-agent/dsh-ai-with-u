@@ -479,7 +479,15 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
               {/*
                 本轮被预算裁掉的条目（宿主提供才显示）。数据来自 lore-diag.ts：
                 优先 GET /character 的 diag，取不到退 GET /preview.lore，两路都没有就整块不渲染。
+                `diag.scope === 'constant-only'`（只有常驻那半）时在块上方补一行**中性说明**：
+                这是事实、不是可处理的问题，所以不用警告色。宿主还给了 `reason` 就分两种说法 ——
+                非生效卡（关键词要生效才算）与「生效了但缓存还没热」不是同一件事。没给就不解释。
               */}
+              {dropped !== undefined && dropped.entries.length > 0 && dropped.scope === 'constant-only' && (
+                <div className="awu-editGroupHint">
+                  {dropped.reason === 'no-cache' ? t('lore.dropped.cacheCold') : t('lore.dropped.constantOnly')}
+                </div>
+              )}
               {dropped !== undefined && dropped.entries.length > 0 && (
                 <div className="awu-loreDropped" data-open={showDropped ? 'true' : 'false'}>
                   <button

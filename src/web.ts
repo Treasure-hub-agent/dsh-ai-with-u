@@ -531,6 +531,11 @@ export function buildRoutes(
             /** 当前会话最终用哪个角色（会话绑定 > 全局启用 > 未启用） */
             effective: { character: target.character ?? '', source: target.source },
           },
+          // ---- 世界书预算诊断：**按这张卡**算，绝不借用"当前生效角色"的名单 ----
+          // 形状与 `/preview` 的 `lore` 同源（客户端 lore-diag.ts 只认那三个 dropped 列表 +
+          // 三个预算数字）。这张卡不是生效角色时只算「常驻」那本预算，并用 scope/reason 说明
+          // 为什么没有关键词部分——关键词命中依赖当轮对话，未生效卡编出来就是假数据。
+          diag: prompt.loreDiagForCard(ccv3, querySessionId === '' ? undefined : querySessionId),
           openingState: await store.openingState(name),
         })
       }),

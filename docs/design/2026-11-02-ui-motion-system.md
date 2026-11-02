@@ -69,16 +69,31 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 左栏保留：`.awu-railHead`（蒸馏 / 自创 CTA + 过滤 + 预设/预览/导入）→ `.awu-grid` 卡片列表。
 左栏在 `diary` tab 下额外显示一行 `.awu-railNow`（「正在看：<角色名>」），`data-empty` 时隐藏。
 
-### 2.5 详情页动作收敛
+### 2.5 详情页动作收敛（2026-11-02 二次修订：两个作用域同级）
+
+原先的「1 主 + 1 次 + ⋯」把**全局启用**藏进 ⋯ 第一项，用户得先点开菜单才知道有这个作用域。
+主人明确要求「两种启用同级、都看得见」之后，动作区改成**四枚固定顺序**：
 
 ```
 .awu-hero .awu-heroActions
-  .awu-btn[data-tone="primary"]        ← 1 主（启用/绑定）
-  .awu-btn[data-size="md"]             ← 1 次（编辑）
-  .awu-menuBtn                          ← ⋯ 溢出菜单（导出 / 改模式 / 换开场白）
-.awu-detail > .awu-dangerZone          ← 删除下沉到详情底部（复用现有维护区样式）
-.awu-menu                               ← 溢出菜单浮层（Esc/点外部关；焦点归还 ⋯ 按钮）
+  .awu-btn[data-tone="primary"]                  ← 1 主：绑定到本会话（已绑定 → 同位置变「解除绑定」）
+  .awu-btn[data-tone="scope"]                    ← 2 同级：全局启用（启用中 → 同位置变「退出全局」）
+  .awu-btn[data-size="md"][data-kind="edit"]     ← 3 次：编辑
+  .awu-menuBtn                                   ← 4 ⋯ 溢出菜单（改模式 / 换开场白 / 导出）
+.awu-detail > .awu-dangerZone                    ← 删除下沉到详情底部（复用现有维护区样式）
+.awu-menu                                        ← 溢出菜单浮层（Esc/点外部关；焦点归还 ⋯ 按钮）
 ```
+
+四条硬约束（改这里之前先读完）：
+
+1. **两枚作用域按钮同高、同区、不弱化**：绑定走 `data-tone="primary"`（主色），全局走 `data-tone="scope"`
+   （中性实心）——同级但可区分，谁都不许再退回 ⋯ 菜单；
+2. **同一位置换文案**，不并排两枚：已绑定显示「解除绑定」，全局启用中显示「退出全局」；
+3. ⋯ 菜单里**只剩** `mode` / `opening` / `export` 三项，危险动作（删除）在页面底部 dangerZone；
+4. 两枚作用域按钮与下方 `.awu-bindHints` 的说明条**顺序一一对应**（绑定在前、全局在后）。
+
+> 三个由 `verify-wiring` §[26] 盯着：全局按钮在 `.awu-heroActions` 里（且不在 `CardMenu` 项内）、
+> 两态都带 `data-tone="scope"`、⋯ 菜单没有 `key: 'global'`。
 
 ### 2.6 视觉令牌（第 1 批新增，CSS 侧定义、JSX 可读）
 
@@ -125,7 +140,7 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 4. `a11y.ts` 三 hook 与 `escYield` 让位协议不拆不改序。
 5. `ink-faint` 只作装饰，不作文本色。
 6. 卡片高整数 px、hover 只提亮不压暗、错峰 `min(index,8)×34ms` 不放大。
-7. 每批结束必须 `npm run build` 全绿（基线 1032 项）。
+7. 每批结束必须 `npm run build` 全绿（项数以当次 build 输出为准，不写死基线数字）。
 8. **`.awu-panel` 及其任何祖先不得有 `opacity`/`transform`/`scale` 动画，也不得挂
    `will-change: opacity|transform`** —— 会让 `backdrop-filter` 失去页面背板、玻璃变「假半透明」
    （2026-11-02 主人实测两次踩到，见 §7.1）。进场动效只能落在面板内部的内容层。
@@ -147,7 +162,7 @@ CSS 用 `transform: translateX(calc(var(--awu-tab-i) * 100%))` 驱动 `::before`
 | 指针高光 | JS 写内联 `--awu-mx/-my` | CSS 侧 `::after` 已就绪（240px 圆，静息 .85 / hover 1，仅 fine pointer），**JS 未接** | 第 2 批接：`useFinePointer()` + rAF 合帧 + `[data-fx="off"]` 开关 |
 | 动画期降模糊 | `data-still="true"` | CSS 已就绪，**JS 未接** | 第 2 批接：面板 `animationstart/end` 挂属性 |
 | 死代码 `SCOPED_ATTR` | 删 | `index.tsx:102` 仍 import，CSS 侧已确认无 `[data-awu-scoped]` 规则 | 第 2 批随 index.tsx 一起删 |
-| 「退出全局」入口 | 唯一 | 状态带右侧与 ⋯ 菜单各一份（重复） | 第 2 批去重（保留菜单项，状态带改为纯状态） |
+| 「退出全局」入口 | 唯一 | 当时状态带右侧与 ⋯ 菜单各一份（重复） | **已按此表之后的决定收口**：不做「保留菜单项 + 状态带纯状态」，而是**两个作用域同级并列**（绑定 / 全局），⋯ 只剩 mode / opening / export。现行结构见 §2.5 |
 
 ---
 

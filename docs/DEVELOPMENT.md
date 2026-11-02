@@ -37,6 +37,7 @@
 |---|---|---|---|
 | **L0 底线** | 启用期间 | 优先级声明 + 扮演底线（「只让我是谁、不让怎么做事」） | 365 字符（退出即消失） |
 | **L0.5 纪律包** | 启用期间，按档位 | 真人感纪律：禁止词库 / 消息形态 / 动作 / 输入识别 / 内容边界 / 指令确认 | lite 555、full 736，`off` 为 0 |
+| **预设** | 启用了预设就常驻（**与角色启用正交**） | 一组可复用的提示词模块：文风 / 语气 / 回复规则 | 按预设体量，超 8000 字符给警告 |
 | **L1 角色** | 启用期间 | 酒馆卡 CCv3 渲染（声线优先）+ 最近日记 + 会话摘要 | 约 1.9–2.4K，随卡增长 |
 | **世界书** | 命中才注入 | 关键词 / 常驻条目，12 条 · 6000 字预算 | 典型约 0.2K |
 | **时间差** | 启用期间 | 隔多久了、该用什么语气接上 | 每轮随分钟数变，垫底 |
@@ -45,6 +46,8 @@
 > v0.2.0 把「世界书命中」从 L1 里拆成了独立段（order 10300，时间差 10350 垫底）：易变段越靠后，
 > 缓存失效范围越小；混在 L1 里会导致每轮命中变化就把整段 L1 重新计费。
 > L0.5 纪律包是 2026-10-31 加的（见 §十），order 5050，夹在 L0 与 L1 之间。
+> 预设段是 2026-11-01 加的（见 §十五），order 5080；它**不跟着角色进退**——退出角色时该段照样非空，
+> 因为预设属于「这台宿主怎么说话」，不属于「此刻扮演谁」。
 
 对比原 skill：`SKILL.md` 13 KB 每轮全量注入；本插件启用态实测 **3286 字符**（丰川祥子 + lite 档，`verify-host` 量的），未启用时为 0。
 
@@ -57,7 +60,10 @@
 - `ctx.systemPrompt.section()` 在 **host 层**注册 → 进 `global` 层 → 对所有 agent 生效
 - L1 段的 `text` 是**函数**，每次组装重新求值：未启用返回空串（DSH 过滤空段，等于不存在），启用返回角色卡
 - 启用状态落盘 `_active.json`，启动时读回自动恢复
-- `awu_*` 工具与角色**同进同出**：启用才挂载，退出即卸下
+- `awu_*` 工具的挂载判据是「**全局启用 或 任一未失效的会话绑定**」，不是「启用角色才挂载」——会话绑定态下模型
+  同样要能记日记 / 查关系，所以判据比「全局启用」宽一档；两个条件都不成立才整批卸下（`src/index.ts:269-283`，`sync()` 里的
+  `pc.characterName !== undefined || 存在 binding.dead !== true`）。唯一例外是 `awu_card_save`：它**常驻注册**、
+  由「蒸馏武装」门控是否可用（`src/index.ts:264-290`），见 §五。
 
 ### 与 AGENTS.md 的优先级问题（重要）
 
@@ -355,40 +361,97 @@ CCv3 卡里 `{{char}}` / `{{user}}` 是通用写法 ⇒ 不关插值 = **启用�
 我们的四段位见 §四「v0.2.0 数据格式」。另外**没有**用 `systemPrompt.context()`：它确实能落到消息数组末尾，
 但会以 `source.kind='runtime-context'` 的 **user 消息落进会话表面**，与 L0 的「零系统痕迹」冲突。
 
+### 🔴 坑 15：面板显示"没有数据" ≠ 宿主没提供——同一个空字段可以有多种原因
+
+`GET /character` 的 `diag`（世界书预算诊断）就是活例子。它有两个维度：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `scope` | `full` | 这张卡正是该会话/全局的生效角色，diag 来自缓存（含关键词被裁明细，与 `/preview` 同源） |
+| | `constant-only` | 只算了**常驻**那一本预算 |
+| `reason` | `not-active` | 原因一：这张卡**没生效** |
+| | `no-cache` | 原因二：卡生效了，但缓存还没热（面板比第一轮对话先打开） |
+
+`constant-only` 下 `keywordDropped` 必为空——**不是"没被裁"，是"根本没法算"**（关键词命中依赖当轮对话文本）。
+
+两条纪律：
+
+1. **文案不许把两种原因合并**。「没生效」要给用户"启用它才能看关键词命中"，「缓存没热」要给"发一句话再看"。
+   写成同一句"暂无数据"，用户会以为卡有问题；
+2. **空数组不等于 0**。`keywordDropped: []` 在 `constant-only` 下表示「不可知」，在 `full` 下才表示「一条没被裁」。
+   前端一看到空数组就回退去借 `/preview` 的 `lore`（那是**当前生效角色**的名单），等于把串卡 bug 换个出口——
+   2026-11-02 就在客户端残留过这一处。`verify-session §23` 现在钉死：`constant-only` 时 `keywordDropped` 必须为空，
+   且请求未启用卡时被裁名单里必须是**这张卡**的条目名。
+
+### 🟡 坑 16：断言只测一条构造 = 假信心；静态断言要先减掉嵌套容器
+
+两类"绿得没意义"的断言，本轮各踩一次：
+
+1. **ReDoS 只测 `(a+)+$`**：这一条被挡住之后，V27 就在报"ReDoS 已防"。实测同一份实现下
+   `(a|a)+$` 在 26 字符上要 **745ms**、`(a|ab)+$` / `(a{1,3}){10}` / `反向引用` 全都没挡。
+   现在的判据是**表驱动 + 语义探针**：给一条「正则能匹上、字面量匹不上」的文本——走正则=命中、退化字面量=不命中，
+   不看计时。理由：`(.+a){12}` / `(\w+)\1` 在**能匹配的短文本**上根本不慢（0–4ms），只测耗时会绿着放跑它们；
+   耗时只能作为**附加**一条（`(a|a)+$` × 27 字符不匹配文本 < 500ms）。
+   反向也必须测：8 条真卡常见写法（`便利(贴|条)` / `^\d{3}$` / `^(a|b)?x$` / `\w+\s+\d+` …）不许被判不安全——
+   否则粗判据会变成下一个「世界书静默少命中」的来源。
+2. **静态断言只看"串在不在文件里"**：判断「全局启用按钮是否在 `.awu-heroActions`」时，`CardMenu` 菜单是**就地渲染
+   在 heroActions 内部**的，直接搜 "heroActions 里有 `detail.globalOn`" 会在「仍藏在 ⋯ 里」时也通过。
+   必须先 `sliceJsxBlock()` 取出 heroActions、再**减掉 `<CardMenu>` 那一段**再判定。
+   **判据**：凡是断言"某个东西在/不在某个容器里"，先确认容器边界是不是被嵌套组件撑大了。
+
 ---
 
 ## 四、当前架构
 
 ```
 dsh-ai-with-u/
-├── package.json          # dsh.bundle.patch + dsh.client 声明
+├── package.json          # dsh.bundle.patch + dsh.client 声明 + build 串（13 步）
 ├── cordis.patch.yml      # 插件行
-├── tsconfig.json
-├── presets/              # 3 张范例角色卡（蒸馏产出的 IP 卡，CCv3；首次安装幂等种入）
+├── tsconfig.json / tsconfig.client.json
+├── presets/              # 3 张范例角色卡（蒸馏产出的 IP 卡，CCv3；逐张幂等种入，删除写墓碑不复活）
+├── distill/              # 蒸馏流程文档（flow.md / flow-create.md，工具按需读，不进系统提示词）
 ├── src/                  # 宿主侧（Node）
-│   ├── index.ts          # 生命周期、服务等待、插拔联动、会话钩子
-│   ├── prompt.ts         # L0/L1 分层注入、时间差档位
-│   ├── store.ts          # 存储层（卡/日记/会话/索引）
-│   ├── tools.ts          # 8 个 awu_* 工具
-│   └── web.ts            # 32 条 REST 路由
-├── client/               # 浏览器侧（React）
-│   ├── entry.tsx         # 插件入口（inject/apply/slot 注册）
-│   ├── index.tsx         # 面板主体
-│   ├── card-editor.tsx   # 角色卡编辑器
-│   ├── card-schema.ts    # 编辑器字段 schema
-│   ├── styles.ts         # 「夜繭」设计语言
-│   ├── api.ts            # REST 封装
-│   ├── text.ts           # 文案
-│   └── icons.tsx
+│   ├── index.ts          # 生命周期、服务等待、插拔联动、会话钩子、蒸馏武装（内存态时间窗）
+│   ├── prompt.ts         # 六段注入（L0 / L0.5 纪律包 / 预设 / L1 / 世界书 / 时间差）、会话决议
+│   ├── store.ts          # 存储层（卡 / 日记 / 会话 / 索引 / 预置种子与墓碑 / 会话绑定与 dead 标记）
+│   ├── tavern.ts         # 酒馆卡格式层：normalizeCard / renderL1 / selectLoreEntries（纯函数零 IO）
+│   ├── preset.ts         # 预设层：ST chat-completion 预设转换 + 模块拼接（纯函数）
+│   ├── import-card.ts    # 容器解析：PNG(tEXt/iTXt) / CHARX(zip) / 裸 JSON（纯函数，零新依赖）
+│   ├── distill.ts        # 蒸馏：读 flow.md、生成发进当前会话的指令、武装状态机
+│   ├── tools.ts          # awu_* 工具（9 个按需组 + 1 个 awu_card_save）
+│   └── web.ts            # 32 条 REST 路由（buildRoutes）
+├── client/               # 浏览器侧（React，按职责分组见下）
+│   ├── entry.tsx         # 插件入口（inject / apply / slot 注册）
+│   ├── index.tsx         # 侧栏入口 + 面板主体（两栏主从 + 四分区）
+│   ├── styles.ts         # 「Liquid Glass」设计语言（PANEL_WIDTH=1120，见 §五）
+│   ├── api.ts            # REST 封装（与宿主信封一致）
+│   ├── text.ts           # 文案 + 角色卡解析
+│   ├── parts.tsx / icons.tsx / motion.ts / a11y.ts / dragdrop.ts   # 共享零件：图标、动效令牌、焦点管理、拖放交界
+│   ├── card-editor.tsx / card-schema.ts / card-source.ts           # 角色卡编辑器（10 组 34 字段）
+│   ├── lorebook-editor.tsx / lorebook-schema.ts / lore-diag.ts     # 世界书分区（第 11 块）+ 被裁诊断
+│   ├── editor-focus.tsx  # 长文本整屏编辑层
+│   ├── diary-review.tsx  # 记忆回顾
+│   ├── preview.tsx       # 注入预览（六段真实渲染快照）
+│   ├── preset-view.tsx   # 预设页
+│   ├── distill.tsx / distill.styles.ts                             # 蒸馏工作台
+│   └── guide.tsx / guide.styles.ts                                 # 指南（面板第 4 个 tab）
 ├── scripts/
-│   ├── build-client.mjs  # 前端打包（ModuleLoader 格式）
+│   ├── build-client.mjs  # 前端打包（esbuild，ModuleLoader 格式）
+│   ├── helpers.mjs       # 自检共享夹具（makeReq / makeRes / restCall）
 │   ├── verify.mjs        # 产物自检
-│   ├── verify-session.mjs# 会话/指令自检（92 项）
-│   └── verify-host.mjs   # 真实 cordis 宿主验证（14 项）
+│   ├── verify-bundle.mjs / verify-ui.mjs / verify-a11y.mjs / verify-wiring.mjs
+│   ├── verify-tavern.mjs / verify-distill.mjs / verify-import.mjs
+│   ├── verify-session.mjs / verify-host.mjs
+│   └── fixtures/legacy-cards/  # 旧 34 字段卡迁移样本（与 presets/ 分离）
+├── tools/preview/        # 脱离宿主的面板预览沙盒
+├── tools/qa/             # 真机取证工具链（CDP 截图 / 状态矩阵 / 崩溃与折叠复现）
 └── lib/                  # 构建产物（已 gitignore）
 ```
 
-### 数据格式
+> 这棵树只列**入口与职责**，不列文件数：`client/` 还会加文件，新增文件不必回填本树（以目录为准）。
+> 各套自检的项数同理不写死——以 `npm run build` 当次输出为准（见 §六）。
+
+### 数据格式（v0.1 的中文键视图；落盘格式见下一节）
 
 ```
 ~/.dsh/ai-with-u/               # 可用 AIWU_STORAGE_ROOT 覆盖
@@ -439,14 +502,20 @@ dsh-ai-with-u/
    ⚠️ 换预置卡时记得同步检查夹具：`verify-host` 曾把 `虞照` 写死在启用断言里，换卡后 5 条断言全红，
    而报错看起来像「L0 坏了」——已经改成从 `presets/` 取第一张，不再写死名字。
 
-**四个提示词段位（v0.2.0 起；`src/prompt.ts`）**
+**六个提示词段位（`src/prompt.ts:67-98` 的段名常量）**
 
 | order | 段名 | 内容 | 易变度 |
 |---|---|---|---|
 | 5000 | `aiwu:baseline` | L0 底线（**启用时才注入**，`renderBaselineSection`；未启用返回空串） | 启用时才注入（退出即消失） |
+| 5050 | `aiwu:discipline` | L0.5 纪律包（2026-10-31 加，见 §十） | 只随档位变（off/lite/full） |
+| 5080 | `aiwu:preset` | 预设模块拼接（文风 / 语气 / 回复规则，2026-11-01 预设轮加，见 §十五） | 只随切预设变 |
 | 5100 | `aiwu:active-character` | 酒馆卡渲染 + 会话摘要 + 日记 + 交互模式 + 关系口径 + 收尾提醒 | 每轮（会话写盘后） |
 | 10300 | `aiwu:lore` | 世界书命中（关键词 + 预算） | 命中集合变才变 |
 | 10350 | `aiwu:clock` | 距上次互动 + 当前时间 | 每分钟 |
+
+> v0.2.0 当时只有四个（5000 / 5100 / 10300 / 10350）；5050 与 5080 是后来插进去的，
+> 都落在「比 L1 稳定」的区间里——插在 L1 之前，换角色不会连带重算它们。
+> 段位增减以 `src/prompt.ts` 的常量表为准，`GET /preview` 会按 order 升序列出全部段。
 
 易变段**垫底**的理由：宿主文档（`dsh-system-prompt/README.zh.md:152-154`）说头节点重写会从首个变化的 token
 起失去前缀复用 —— 把每分钟都变的内容放最前，等于每轮把后面的缓存全烧掉（坑 14）。
@@ -466,7 +535,10 @@ dsh-ai-with-u/
 
 ## 五、功能清单
 
-### 模型工具（9 个，仅启用角色时挂载）
+### 模型工具（10 个：9 个按需挂载 + 1 个常驻门控）
+
+挂载判据：**全局启用 或 任一未失效的会话绑定**（`src/index.ts:269-283`）。不是「启用角色才挂载」——
+会话绑定态下模型也要能记日记 / 查关系；两个条件都不成立才整批卸下。`awu_card_save` 走另一条路（见下表末行）。
 
 | 工具 | 用途 |
 |---|---|
@@ -479,8 +551,14 @@ dsh-ai-with-u/
 | `awu_relation` | 查询关系档位依据；带 `set` 时按里程碑写回 |
 | `awu_mode` | 切换纯文本 / 文本 + 动作 |
 | `awu_opening_next` | 换一句开场 |
+| `awu_card_save` | **常驻注册**（`src/index.ts:264-290`），由「蒸馏武装」两小时时间窗门控：未武装时调用一律返回 `not-armed`，与「工具不存在」对模型等效。保存一次后自动失效 |
 
-### REST 接口（32 条，`/_dsh/ai-with-u/`）
+> `awu_card_save` 为什么不用条件挂载：早期在 `POST /distill/arm` 的请求作用域里 `tools.register()`，
+> 请求结束该作用域销毁、工具被连带移除（会话里表现为「已添加工具 → 很快又已移除」），二次武装还会撞
+> `cannot create effect on inactive context`。现在注册发生在插件 fiber 里（`src/index.ts:209-219`），
+> 门控在工具内部。**武装状态不落盘，重启即失效。**
+
+### REST 接口（32 条，`/_dsh/ai-with-u/`，`src/web.ts` 的 `buildRoutes`）
 
 `overview` `preview` `characters` `character` `character/save` `character/import` `character/delete`
 `activate` `deactivate` `bind` `unbind` `mode` `discipline` `relation` `relation/set`
@@ -490,12 +568,27 @@ dsh-ai-with-u/
 
 > ⚠️ `session/reset` 的 `scope:'all'`（彻底重置）**必须同时传 `confirmAll:true`**。
 
-### 设计语言「夜繭 / Night Cocoon」
+### 设计语言「Liquid Glass」（v0.3.0 起；`client/styles.ts`）
 
-- **配色**：深夜褐黑画布 + 琥珀金 → 玫瑰金 → 烟霞粉渐变
-- **字体**：衬线体承担人物感（名字/日记）、无衬线体承担工具感（按钮/数字）、等宽体只用于日期
-- **动效**：一档缓动 `cubic-bezier(.22,.61,.36,1)`，卡片错峰升起、启用态呼吸辉光
-- **入口**：左侧栏底部（`sidebar.footer.action`），宽态显示「角色管理 + 角色名」，收起态自动收成 36px 圆徽
+设计全文：`docs/design/2026-10-30-liquid-glass.md`。
+
+- **材质**：iOS 液态玻璃——半透明层叠 + 模糊背板 + 细描边；面板从 452px 小气泡换成 **1120px 主面板**
+  （`PANEL_WIDTH = 1120` / `PANEL_MAX_H = 80`，对齐已装的 `dsh-context` 的 `.lc-ov-card`，不是它的 720px 小模态）
+- **三条保留**（换血不是全丢，`client/styles.ts:9-14`）：
+  1. **衬线体只留给「人物感」**：角色名 + 日记正文，这是产品辨识度；
+  2. **对比度纪律**：ink 四级仍按实测比值管着（ink-faint 只作线条，不作文字）；
+  3. **状态走 `data-*`、颜色走 token**：不写死色值，不靠加删 class
+- **暖金降级成「角色专属色」**：只出现在头像、角色名、启用态辉光/描边，其余走 iOS 灰阶 + 系统蓝
+- **动效**：一档 iOS 弹簧缓动 `cubic-bezier(.32,.72,0,1)`（`EASE`）+ 少数线性「机器转动」类；
+  卡片错峰升起按 `CARD_STAGGER = 34ms`（上限 8 张，`verify-ui` 盯着）
+- **依赖宿主只有两处**：`data-ds-dark-theme`（明暗主题，宿主打在 `body` 上）与 `prefers-reduced-motion`（降级）
+- **入口**：左侧栏底部（`sidebar.footer.action`，与用量统计同席位），宽态显示「角色管理 + 角色名」，
+  收起态收成 36px 圆徽
+
+> **历史**：v0.3.0 之前用的是「夜繭 / Night Cocoon」——深夜褐黑画布 + 琥珀金→玫瑰金渐变、
+> 一档缓动 `cubic-bezier(.22,.61,.36,1)`、452px 小气泡。它已被整体换掉，**不再代表现状**；
+> 上面这条只用来解释旧截图与旧文档里的色彩描述。换血原因：面板从小气泡变成 1120px 主面板后，
+> 需要「明亮、层叠、有材质」的语言，而不是深夜烛光。
 
 ---
 
@@ -515,15 +608,15 @@ npm run verify:host    # 真实 cordis 宿主验证
 
 > ⚠️ `build:client` 只打包、不查类型；改完前端务必跑 `npm run typecheck:client`（或直接 `npm run build`）。
 
-> **v0.2.0 追加**（上面的命令一条没少，只是 `build` 串的自检变多了）：
-> `npm run build` 现在依次跑 **产物自检 → `verify-tavern` → `verify-import` → `verify-session` → `verify-host`**，
-> 另有独立入口 `npm run verify:tavern` / `npm run verify:import`。
-> （历史快照里的各套项数已删除：断言增减是常态，各套总数以当次 verify 输出为准。）
+> **`build` 串现状（13 步，顺序即 `package.json` 的 `scripts.build`）**：
+> `tsc`(宿主) → `tsc`(前端类型) → `build-client.mjs`(esbuild) → `verify-bundle` → `verify-ui` → `verify-a11y`
+> → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。
+> 任何一步非 0 退出就整体失败（`&&` 串起来，不是 `;`）。
+> 位置有讲究：`bundle` 先确认产物可被 ModuleLoader 加载，`ui`/`a11y` 查前端纪律，`wiring` 查「后端做了、前端有没有人调用」，
+> 之后才是各套行为断言——前四步红了就没必要往下跑几千条断言。
 
-> **2026-10-31 追加**：`verify-bundle` 与 `verify-wiring` 也进了 `build` 串，位置在产物自检（`verify.mjs`）之前——bundle 先验产物可加载，wiring 随后做接线体检；
-> 合计数以 verify 输出实测为准（旧徽章的 515 只数六套，不含 `verify` 与 `verify:wiring`，口径变更曾导致图表数字跳变）。
-
-> **2026-11-01 快照**：全链 `npm run build` 实测各套 `verify 16 + bundle 9 + wiring 72 + tavern 306 + distill 121 + import 58 + session 324 + host 126 = 1032`，README 徽章按它回填；断言再增减时重测回填，此处快照不再逐次更新。
+> **各套项数不写在这里**：断言增减是常态，数字一律以当次 `npm run build` 输出为准；
+> README 徽章与它的分解是**唯一登记处**（每次全链实测后回填，别处不再维护第二份）。
 
 ### 安装到 DSH（desktop profile）
 
@@ -1508,3 +1601,50 @@ P0 1 / P1 6 / P2 20+，全部已修。关键的几条：`data-still` 的 `will-c
 
 字体放大走 rem（全 px）、`distill` 的 busy 分支缺实机证据、预设/预览的 `ErrorBar` 无重试按钮、
 `cards` 骨架在窄弹层是两列网格。均已记录在 `docs/design/2026-11-02-ui-upgrade-report.md` §6.1。
+
+---
+
+## 十七、2026-11-02 · 契约对齐轮（文档对齐实现 + 四块新断言，1047 → 1107）
+
+这一轮不是加功能，是**把「文档说的」和「代码做的」对齐**，并给三处只有口头承诺的行为补上断言。
+
+### 文档对齐（逐条按代码核过，不按印象改）
+
+| 文档 | 原来写的 | 实际 | 依据 |
+|---|---|---|---|
+| DEVELOPMENT §四 架构树 | `client` 仅 8 文件、`styles.ts` 是「夜繭」、scripts 里写死「session 92 项 / host 14 项」 | 树按职责分组重写（不再写死文件数与项数）、`styles.ts` = Liquid Glass | 目录实况 + `client/styles.ts:1-37` |
+| DEVELOPMENT §五 设计语言 | 整节「夜繭 / Night Cocoon」当现状 | 改成「Liquid Glass」+ 一段**明确标历史**的夜繭说明（旧截图/旧文档里的色彩描述只在那里成立） | `docs/design/2026-10-30-liquid-glass.md` |
+| DEVELOPMENT §五 模型工具 | 「9 个，仅启用角色时挂载」 | **10 个**：9 个按需 + `awu_card_save`（常驻注册、武装期门控）；挂载判据是「全局启用 **或** 任一未失效的会话绑定」 | `src/index.ts:197-219` / `264-290`、`src/tools.ts:59` / `364` |
+| DEVELOPMENT §四 段位表 | 「四个提示词段位」 | **六个**（5000 baseline / 5050 discipline / 5080 preset / 5100 active / 10300 lore / 10350 clock） | `src/prompt.ts:67-98` |
+| README 工具挂载 | 「启用才挂载，退出即卸下」 | 「全局启用 或 任一会话还有有效绑定」才挂载 | 同上 `index.ts:269-283` |
+| README `awu_card_save` | 「条件挂载」 | 「**常驻注册 + armed 门控**」：窗口外调用返回 `not-armed`，保存一次即失效，武装不落盘 | `src/index.ts:209-219` |
+| README 预置卡种入 | 「`characters/` 已存在就跳过」 | **逐张**按 `card.json` 存在 + **墓碑**判幂等（承诺「删掉的不复活」保留原文） | `src/store.ts` `seedPresets` / `_seed_deleted.json` |
+| README 能力清单 | 详情页主操作「绑定 / 编辑 / ⋯」 | 四枚：绑定（主）/ **全局启用（`data-tone="scope"`，同级）** / 编辑 / ⋯；纪律包三档胶囊进左栏工具栏 | `client/index.tsx` `.awu-heroActions` |
+
+新增 README「**明确不做**」一节（8 条 + 理由）：立绘/表情、多角色同场、卡内前端、EJS/MVU/TavernHelper、
+display 侧正则、PNG/CHARX 导出、深度注入（`position: 4` / `@D`）、装饰器的运行期语义。
+定位一句话：**控制 DSH agent 的人格，不是酒馆模拟器**——凡是要「劫持消息流 / 自建渲染层 / 自建运行期状态机」的都不做。
+（`probability` 是**做了**的：稳定哈希、同轮固定；不做的只有 ST 那种每轮重摇的语义。）
+
+### 四块新断言（每条都先在旧实现上跑红，再在修复后转绿）
+
+| 组 | 条数 | 红在哪（旧实现） |
+|---|---|---|
+| `verify-tavern` V27 · 世界书正则护栏 | +24 | 只挡 `(a+)+$`：`(a|a)+$` 26 字符 **745ms**，`(a|ab)+$` / `(a{1,3}){10}` / `(.+a){12}` / `(.*a){8}` / 反向引用 / 多项式族全没挡；没有编译缓存；卡侧未知宏一句不报 |
+| `verify-session` · 日记 / 子代理 / 墓碑 / diag | +27 | 无分节自由文本**读的时候就丢**；子代理里 `awu_diary_write` 会把日记写进全局角色名下；删掉的预置卡重启复活；`GET /character` 没有 `diag`（面板只能借生效角色的名单） |
+| `verify-wiring` §[26] · 面板入口 | +9 | 面板没有 `/discipline` 调用；全局启用藏在 ⋯ 菜单里 |
+| 合计 | **+60** | 全链 1047 → **1107** |
+
+### 本轮的三条可复用判据
+
+1. **断言的判据要"语义化"，不要"指标化"**：ReDoS 不能只测耗时——`(.+a){12}` / `(\w+)\1` 在能匹配的短文本上 0–4ms，
+   只测耗时会让它们绿着漏过去。改用「正则能匹上、字面量匹不上」的探针：走正则=命中、退化=不命中。详见坑 16。
+2. **"在某个容器里"先确认容器边界**：`CardMenu` 就地渲染在 `.awu-heroActions` 内部，直接搜会让「仍藏在 ⋯ 里」也通过。详见坑 16。
+3. **面板显示"没有数据" ≠ 宿主没提供**：`diag` 的 `scope` / `reason` 有四种组合，`constant-only` 下的空数组是"不可知"而不是"没被裁"。详见坑 15。
+
+### 验收记录（全链）
+
+`npm run build` EXIT=0，十套 **1107 通过 / 0 失败**：
+`bundle 9 + ui 7 + a11y 8 + wiring 81 + verify 16 + tavern 330 + distill 121 + import 58 + session 351 + host 126`。
+首轮 build 只红 1 条（既有断言 `V21 GET /character 双视图`）——判定为**测试 fake 不完整**（web.ts 新调 `loreDiagForCard`，
+fake 缺该方法 → 路由抛 → 400），补 fake 后转绿；断言本身一个字未改。

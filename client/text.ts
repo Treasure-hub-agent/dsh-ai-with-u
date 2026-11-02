@@ -38,6 +38,10 @@ const zh = {
   'preview.discipline.off': '关闭',
   'preview.discipline.lite': '精简',
   'preview.discipline.full': '完整',
+  // ---- 纪律包胶囊（左栏工具栏；档位名复用上面的 preview.discipline.*）----
+  'discipline.hint': '纪律包：关闭 = 不注入；精简 = 基础写作纪律；完整 = 再加语态锚点与日记自检。这是全局偏好，换角色不重置。',
+  'discipline.done': '纪律包已切到「{level}」，下一轮回复起生效。',
+  'discipline.unavailable': '宿主还没提供纪律包接口（改档需要重启宿主），这一版改不了档位。',
   'preview.chars': '{n} 字',
   'preview.order': '顺序 {n}',
   'preview.emptySegment': '本轮为空',
@@ -57,7 +61,6 @@ const zh = {
   'active.none.hint': '挑一张角色卡启用，人设即刻插上；退出时干净拔出，不留痕迹。',
   'active.mode.text': '纯文本',
   'active.mode.action': '文本 + 动作',
-  'active.gExit': '退出全局',
   'active.mode.switch': '切换模式',
   'active.session': '当前会话',
   'active.global': '全局',
@@ -236,6 +239,7 @@ const zh = {
   // ---- 会话绑定 / 全局启用的边界说明（可见文案，不塞 tooltip）----
   'bind.hint.session': '本会话的提示词、日记、关系都会跟这个角色走；其它会话不受影响。',
   'bind.hint.global': '所有未绑定会话会切到该角色；已绑定的会话不变。',
+  'bind.hint.globalOff': '正在全局启用：退出后，未绑定的会话不再注入这个角色（已绑定的会话不受影响）。',
   'bind.hint.subagent': '子代理固定使用全局角色，不继承本会话绑定。',
   'bind.noSession': '当前会话不可识别，只能用全局启用。',
   'bind.done.session': '已把「{name}」绑定到当前会话（本会话的提示词、日记、关系都跟着它走）。',
@@ -453,6 +457,10 @@ const zh = {
   'lore.dropped.constant': '常驻',
   'lore.dropped.keyword': '关键词命中',
   'lore.dropped.unknown': '超预算',
+  // 宿主 diag.scope = 'constant-only' 时的一行中性说明（不是警告）：非生效卡只算常驻部分
+  'lore.dropped.constantOnly': '关键词部分只在这张卡启用时才有数据；下面是常驻条目的预算情况。',
+  // 同样是 constant-only，但原因是「这张卡生效了、世界书缓存还没热」——不能套上一句
+  'lore.dropped.cacheCold': '世界书缓存还没热起来（本会话还没走过一轮对话），关键词部分暂时没有数据；下面是常驻条目的预算情况。',
   'lore.issue.no-keys': '没关键词又不是常驻：这条永远不会被触发。',
   'lore.issue.empty-content': '内容是空的。',
   'lore.issue.long-entries': '{count} 条偏长（最长 {detail} 字）· 条目按需注入，命中时才占预算，通常不用改。',
@@ -569,6 +577,10 @@ const en: Dict = {
   'preview.discipline.off': 'Off',
   'preview.discipline.lite': 'Lite',
   'preview.discipline.full': 'Full',
+  // ---- 纪律包胶囊（左栏工具栏；档位名复用上面的 preview.discipline.*）----
+  'discipline.hint': 'Discipline: Off = inject nothing; Lite = core writing rules; Full = plus voice anchors and diary self-check. A global preference that survives character switches.',
+  'discipline.done': 'Discipline set to {level}; it applies from the next reply.',
+  'discipline.unavailable': 'This host version does not expose the discipline endpoint yet, so the level cannot be changed without a restart.',
   'preview.chars': '{n} chars',
   'preview.order': 'order {n}',
   'preview.emptySegment': 'Empty this turn',
@@ -588,7 +600,6 @@ const en: Dict = {
   'active.none.hint': 'Pick a card and enable it — the persona plugs in instantly and unplugs cleanly.',
   'active.mode.text': 'Text only',
   'active.mode.action': 'Text + action',
-  'active.gExit': 'Exit global',
   'active.mode.switch': 'Switch mode',
   'active.session': 'This chat',
   'active.global': 'Global',
@@ -766,6 +777,7 @@ const en: Dict = {
   // ---- Chat binding / global enable boundaries (visible copy, not tooltips) ----
   'bind.hint.session': 'This chat’s prompt, diary and relationship follow this character; other chats are unaffected.',
   'bind.hint.global': 'Every unbound chat switches to this character; chats that are already bound stay put.',
+  'bind.hint.globalOff': 'Currently enabled globally: after exiting, unbound chats no longer get this character (chats bound to it are unaffected).',
   'bind.hint.subagent': 'Sub-agents always use the global character; they do not inherit this chat’s binding.',
   'bind.noSession': 'This chat cannot be identified, so only global enabling is available.',
   'bind.done.session': '“{name}” is now bound to this chat (its prompt, diary and relationship follow it).',
@@ -982,6 +994,10 @@ const en: Dict = {
   'lore.dropped.constant': 'Constant',
   'lore.dropped.keyword': 'Keyword hit',
   'lore.dropped.unknown': 'Over budget',
+  // 宿主 diag.scope = 'constant-only' 时的一行中性说明（不是警告）：非生效卡只算常驻部分
+  'lore.dropped.constantOnly': 'The keyword half only has data while this character is the active one; below is the constant-entry budget.',
+  // 同样是 constant-only，但原因是「这张卡生效了、世界书缓存还没热」——不能套上一句
+  'lore.dropped.cacheCold': 'The lorebook cache is not warm yet (no turn has run in this chat), so the keyword half has no data yet; below is the constant-entry budget.',
   'lore.issue.no-keys': 'No keywords and not constant: this entry can never trigger.',
   'lore.issue.empty-content': 'Content is empty.',
   'lore.issue.long-entries': '{count} long entries (longest {detail} chars) · entries are injected on demand, so they only use the budget when they hit — usually nothing to fix.',

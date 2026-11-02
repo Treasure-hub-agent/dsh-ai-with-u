@@ -519,7 +519,32 @@ section('10. 日记往返：日期写法与手写札记都不许丢')
   await store.appendDiary(NAME, '2026 10 10', ['第一行\n第二行'], [])
   const flat = await store.readDiary(NAME)
   check(flat.find(e => e.date === '2026 10 10')?.timeline[0] === '第一行 第二行', '多行条目写入时拍平成一行')
+
+  // ---- 「没有 **时间线** 分节」的自由文本：读得到 + 再写一次不丢 + 不覆盖自定义标题 ----
+  // 来源是真的：用户手写日记、老版本写下的块、面板外直接编辑过的文件，都没有那个小标题。
+  // 旧实现只认 `**时间线**` 之后的行，这些内容**读的时候就被丢掉**，下一次追加触发整份重写后永久消失。
+  await writeFile(diaryPath,
+    '# 和她的日子\n\n## 2026 10 11\n今天去了海边，风很大。\n\n**心情札记**\n> 有点累\n', 'utf8')
+  const freeform = await store.readDiary(NAME)
+  const freeDay = freeform.find(e => e.date === '2026 10 11')
+  check(freeDay?.timeline.includes('今天去了海边，风很大。'),
+    `无 **时间线** 分节的自由文本读得回来（实际 ${JSON.stringify(freeDay?.timeline)}）`,
+    '旧实现把「没有分节标记的行」整行丢掉：内容在读的那一刻就消失了')
+  check(freeDay?.notes.includes('有点累'), '同一块里的札记也照常收下')
+
+  await store.appendDiary(NAME, '2026 10 12', ['回来路上买了贝壳'], [])
+  const afterAppend = await readFile(diaryPath, 'utf8')
+  check(afterAppend.includes('今天去了海边，风很大。'),
+    '再追加一天后自由文本仍在（不被整份重写吞掉）',
+    '追加触发整份重写时把上次读丢的行一起丢了 —— 这是不可逆的数据丢失')
+  check(afterAppend.includes('# 和她的日子') && !afterAppend.includes(`# ${NAME}的日记`),
+    '用户改过的一级标题不会被追加覆盖回默认值',
+    `实际首行：${afterAppend.split(/\r?\n/u).find(l => l.startsWith('#')) ?? '(没有标题)'}`)
+  check(afterAppend.includes('**时间线**'),
+    '重写时补上 **时间线** 小标题（格式规范化，不是删内容）')
+
   await store.resetStory(NAME)
+  await writeFile(diaryPath, '', 'utf8')
 }
 
 // ---------------------------------------------------------------- 11. REST 来源栅栏（P1-1）
@@ -1330,6 +1355,225 @@ section('20. 预设重量（chars / 8000 阈值）与 ST 未知宏统计')
 
   // 收尾：解除全局预设
   await restCall(routes, 'POST', '/preset/activate', { body: { scope: 'global' } })
+}
+
+// ---------------------------------------------------------------- 21. 子代理守卫
+
+section('21. 子代理 / 判不了会话：工具侧不落全局（写入侧不能比注入侧宽松）')
+{
+  // 注入侧早就不给子代理注入人设、也不回落全局（§18 的 binding 断言盯着）；
+  // 工具侧以前还在按全局角色落盘 —— 子代理里一句「记一下」会写进全局角色的日记，用户看不见。
+  /** 只实现用到的成员；`subAgentVerdict` 可切换，用它模拟三种判定。 */
+  const makeTools = (verdict) => {
+    const fake = {
+      characterName: NAME,
+      snapshot: () => ({ enabled: true, character: NAME, mode: 'text+action' }),
+      invalidate: () => {},
+      refresh: async () => {},
+      resolveTarget: () => ({ character: NAME, key: '', source: 'global' }),
+      characterForSession: () => NAME,
+      bindingSnapshot: () => ({}),
+      disciplineLevel: 'lite',
+      subAgentVerdict: () => verdict,
+    }
+    return createTools(store, fake)
+  }
+  const diaryTool = (tools) => tools.find(t => t.name === 'awu_diary_write')
+
+  await store.resetStory(NAME)
+  const before = (await store.readDiary(NAME)).length
+
+  // ① 子代理：写入被拒，且真的一个字节都没写
+  {
+    const tool = diaryTool(makeTools('subagent'))
+    let msg = ''
+    try { await tool.execute({ timeline: ['[事实] 子代理里记的一条'] }, { sessionId: 'sess-sub' }) } catch (e) { msg = e.message }
+    check(msg.includes('子代理'), `子代理会话里 awu_diary_write 被拒：${msg.slice(0, 40)}…`,
+      '没有拒绝：内容会以全局启用角色的名义落盘，用户在面板里永远看不到这条')
+    const after = await store.readDiary(NAME)
+    check(after.length === before, `被拒后日记没有新增条目（${before} → ${after.length}）`)
+  }
+
+  // ② 子代理：awu_whoami 如实说「这里没有角色」，绝不回落全局
+  {
+    const who = (await makeTools('subagent').find(t => t.name === 'awu_whoami').execute({}, {}))
+    check(who.active === false && who.reason === 'subagent',
+      `子代理里 awu_whoami 不回落全局（active=${who.active} reason=${who.reason}）`,
+      '回落成了全局角色 = 给模型一个假答案，它就会照着那个角色说话')
+  }
+
+  // ③ 判不了会话（既没 agent 也没 sessionId）：同样拒绝，而不是猜一个
+  {
+    const tool = diaryTool(makeTools('unknown'))
+    let msg = ''
+    try { await tool.execute({ timeline: ['[事实] 身份不明的一条'] }, {}) } catch (e) { msg = e.message }
+    check(msg.includes('无法判定'), `会话身份不明时写入被拒：${msg.slice(0, 32)}…`)
+  }
+
+  // ④ 主会话不受影响（守卫不能被写成"一律拒绝"）
+  {
+    const tool = diaryTool(makeTools('main'))
+    await tool.execute({ timeline: ['[事实] 主会话记的一条'] }, { sessionId: 'sess-main' })
+    const after = await store.readDiary(NAME)
+    check(after.some(e => e.timeline.includes('[事实] 主会话记的一条')),
+      '主会话（main）写入照常生效', '守卫误伤主会话：正常记日记全被拒 = 功能消失')
+  }
+
+  // ⑤ 判定器缺失（自检的最小 fake / 旧宿主）：按"不可用"放行，绝不因多问一句就炸
+  {
+    const noProbe = {
+      characterName: NAME,
+      snapshot: () => ({ enabled: true, character: NAME, mode: 'text+action' }),
+      invalidate: () => {},
+      refresh: async () => {},
+      resolveTarget: () => ({ character: NAME, key: '', source: 'global' }),
+      characterForSession: () => NAME,
+      bindingSnapshot: () => ({}),
+      disciplineLevel: 'lite',
+    }
+    const tool = diaryTool(createTools(store, noProbe))
+    let msg = ''
+    try { await tool.execute({ timeline: ['[事实] 无判定器'] }, { sessionId: 'sess-x' }) } catch (e) { msg = e.message }
+    check(msg === '', '判定器缺失时工具不报错（按 unavailable 放行）', `抛了：${msg}`)
+  }
+  await store.resetStory(NAME)
+}
+
+// ---------------------------------------------------------------- 22. 预置卡墓碑
+
+section('22. 预置卡墓碑：用户删掉的预置卡，重启种入不再复活')
+{
+  const storeMod = await import(lib('store.js'))
+  // 常量缺失时用字面量兜底，好让后面的断言各自报红（否则 join(undefined) 会直接抛，整节静默中断）
+  const tombstoneFile = storeMod.SEED_TOMBSTONE_FILE ?? '_seed_deleted.json'
+  check(storeMod.SEED_TOMBSTONE_FILE === '_seed_deleted.json',
+    `lib/store.js 导出墓碑文件名常量（实际 ${String(storeMod.SEED_TOMBSTONE_FILE)}）`,
+    '没有这个常量：seedPresets 的幂等判据只有「card.json 存不存在」，「用户删了」与「上次没种完」无法区分')
+
+  const seedRoot = await mkdtemp(join(tmpdir(), 'aiwu-seed-'))
+  const rootStore = new Store(await mkdtemp(join(tmpdir(), 'aiwu-tomb-')))
+  try {
+    // 造两张"预置卡"（一张留下、一张要删）：种子目录结构必须和 presets/ 一致
+    for (const name of ['预置甲', '预置乙']) {
+      await mkdir(join(seedRoot, name), { recursive: true })
+      await writeFile(join(seedRoot, name, 'card.json'), JSON.stringify({
+        spec: 'chara_card_v3',
+        spec_version: '3.0',
+        data: { name, description: `${name} 的设定` },
+      }, null, 2), 'utf8')
+    }
+
+    const first = await rootStore.seedPresets(seedRoot)
+    check(first === 2, `首次种入两张预置卡（实际 ${first}）`)
+    check((await rootStore.readCard('预置甲')) !== undefined, '预置甲已落盘')
+
+    await rootStore.deleteCharacter('预置甲')
+    const tombPath = join(rootStore.root, tombstoneFile)
+    let tombRaw = ''
+    try { tombRaw = await readFile(tombPath, 'utf8') } catch { tombRaw = '' }
+    check(tombRaw.includes('预置甲'),
+      `删除预置卡时写下墓碑（${tombstoneFile}）`,
+      '删除路径没写墓碑：下一次启动 seedPresets 会把它重新种回来 —— 用户删了又自己长回来')
+    check(tombRaw.includes('预置甲') && !tombRaw.includes('预置乙'),
+      '墓碑只记被删的那张（不是"删一张就全跳过"）',
+      `墓碑内容：${tombRaw === '' ? '(文件不存在)' : tombRaw.slice(0, 120)}`)
+
+    const second = await rootStore.seedPresets(seedRoot)
+    check(second === 0, `第二次种入不再种任何卡（实际 ${second}）`)
+    check((await rootStore.readCard('预置甲')) === undefined,
+      '删掉的预置甲**没有复活**',
+      '重启后又长回来了：README 承诺的「删掉的卡不会自己长回来」是假的')
+    check((await rootStore.readCard('预置乙')) !== undefined, '没删的预置乙不受影响')
+
+    // 反例守卫：非预置的自建卡删掉不该被当成"预置卡跳过"，也不该进墓碑
+    await rootStore.writeCard('自建卡', { name: '自建卡', basic: { 姓名: '自建卡' } })
+    await rootStore.deleteCharacter('自建卡')
+    let tombRaw2 = ''
+    try { tombRaw2 = await readFile(tombPath, 'utf8') } catch { tombRaw2 = '' }
+    check(tombRaw2 !== '' && !tombRaw2.includes('自建卡'), '自建卡删除不写墓碑（墓碑只对预置卡有意义）',
+      `墓碑内容：${tombRaw2 === '' ? '(文件不存在)' : tombRaw2.slice(0, 120)}`)
+  } finally {
+    await rm(seedRoot, { recursive: true, force: true })
+    await rm(rootStore.root, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------- 23. /character 的世界书 diag
+
+section('23. GET /character 的 diag：按**这张卡**算，不借用当前生效角色的名单')
+{
+  // 背景：面板编辑一张「没启用」的卡时，以前只能拿 /preview 的 lore —— 那是**当前生效角色**的快照。
+  // 于是用户看到的是别人的被裁名单，以为自己的设定被裁了。
+  const { pc } = await makePromptHost()
+  const routes = buildRoutes(store, pc)
+
+  /** 一张卡：常驻条目超预算（默认 12000 字），用来制造确定的「被裁名单」。 */
+  const bigBookCard = (name, marker) => ({
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+      name,
+      description: '世界书很大的卡',
+      character_book: {
+        entries: [0, 1, 2].map(i => ({
+          id: `${marker}-${i}`,
+          name: `${marker}常驻${i}`,
+          keys: [],
+          // 内容必须各不相同：世界书有「同内容去重」（V7），三条一样的只会留一条、也就没有"被裁名单"
+          content: `${marker}${i}${'长'.repeat(7000)}`,
+          enabled: true,
+          constant: true,
+          insertion_order: 100 + i,
+        })),
+      },
+      extensions: {},
+    },
+  })
+  await store.writeCard('旁卡', bigBookCard('旁卡', '旁卡'))
+  // 生效角色（makePromptHost 里已 activate(NAME)）的卡保持小世界书 → 两者的被裁名单必然不同
+  await store.writeCard(NAME, CARD)
+
+  // ① 返回 diag（旧实现根本没有这个字段）
+  const cardRes = await restCall(routes, 'GET', '/character', {
+    url: `/_dsh/ai-with-u/character?name=${encodeURIComponent('旁卡')}`,
+  })
+  const diag = cardRes.body?.diag
+  check(diag !== undefined && typeof diag === 'object',
+    `GET /character 返回 diag（${diag === undefined ? '缺失' : Object.keys(diag).join(',')}）`,
+    '没有 diag：面板只能借当前生效角色的被裁名单，编辑未启用卡时显示的是别人的数据')
+
+  // ② 「这张卡不是生效角色」要说清楚，并只算常驻那本预算（关键词依赖当轮对话，编不出来）
+  check(diag?.scope === 'constant-only' && diag?.reason === 'not-active',
+    `未启用卡标 scope=constant-only / reason=not-active（实际 ${String(diag?.scope)}/${String(diag?.reason)}）`,
+    '没有区分「这张卡是否生效」：关键词部分对未生效卡是编不出来的，给个数就是假数据')
+  // ②b 宿主契约：constant-only 分支**不许**塞关键词数据。
+  //     关键词命中依赖当轮对话文本，未生效卡无从得知；一旦这里回填了，面板显示的就是
+  //     别处借来的名单 —— 那正是本轮要修的串卡 bug 换了个出口。
+  check(diag !== undefined
+    && (diag.scope !== 'constant-only'
+      || (Array.isArray(diag.keywordDropped) && diag.keywordDropped.length === 0)),
+    `constant-only 时 keywordDropped 必为空（实际 ${JSON.stringify((diag?.keywordDropped ?? []).slice(0, 3))}）`,
+    'constant-only 分支里塞了关键词被裁明细：那份数据只能来自「当前生效角色」，等于把串卡 bug 换个出口')
+  check(Array.isArray(diag?.constantDropped) && diag.constantDropped.length > 0,
+    `未启用卡的常驻被裁名单非空（${Array.isArray(diag?.constantDropped) ? diag.constantDropped.length : '非数组'} 条）`)
+
+  // ③ 关键断言：名单必须是**这张卡**的条目名
+  const droppedNames = (diag?.constantDropped ?? []).map(item => String(item?.name ?? item ?? ''))
+  check(droppedNames.some(name => name.includes('旁卡')),
+    `被裁名单里是这张卡的条目（实际 ${JSON.stringify(droppedNames.slice(0, 3))}）`,
+    '名单不是这张卡的：借用当前生效角色的 diag，用户会以为自己的设定被裁了')
+
+  // ④ 反向：请求生效角色时，绝不能出现旁卡的条目
+  const activeRes = await restCall(routes, 'GET', '/character', {
+    url: `/_dsh/ai-with-u/character?name=${encodeURIComponent(NAME)}`,
+  })
+  const activeDiag = activeRes.body?.diag
+  const activeDropped = (activeDiag?.constantDropped ?? []).map(item => String(item?.name ?? item ?? ''))
+  check(activeDiag !== undefined && (activeDiag.scope !== 'constant-only' || activeDiag.reason !== 'not-active'),
+    `生效角色的 diag 存在且不标 not-active（实际 ${String(activeDiag?.scope)}/${String(activeDiag?.reason)}）`)
+  check(activeDiag !== undefined && !activeDropped.some(name => name.includes('旁卡')),
+    '生效角色的名单里没有旁卡的条目（两张卡互不串）',
+    '生效角色拿到了别的卡的被裁名单：这正是本条断言要防的「借用别人的 diag」')
 }
 
 // ---------------------------------------------------------------- 清理

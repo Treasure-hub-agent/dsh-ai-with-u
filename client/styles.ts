@@ -1264,6 +1264,19 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-modePill:disabled { opacity: .45; cursor: default; }
 .awu-modePill:focus-visible { outline: 2px solid var(--awu-focus-ring); outline-offset: var(--awu-focus-offset-inset); }
 
+/* 胶囊组内的小标签（纪律包那组用）。
+   为什么要有它：模式胶囊（2 档）与纪律包胶囊（3 档）同构并排，若不标名字，用户会把
+   它们读成「一组 5 个并列选项」。标签只给扫读用，JSX 里挂 aria-hidden —— 读屏拿的是
+   外层 role=group 的 aria-label，不会念两遍。 */
+.awu-modePills > .awu-modePillGroupLabel {
+  align-self: center;
+  padding: 0 var(--awu-gap-1) 0 var(--awu-gap-3);
+  font-size: var(--awu-fs-caption);
+  font-weight: 600;
+  color: var(--awu-ink-mute);
+  white-space: nowrap;
+}
+
 /* ---- 提示条：成功（info）自动淡出，警告（warn）留给人手动关 ---- */
 .awu-status[data-status="warn"] {
   background: color-mix(in srgb, var(--awu-gold) 12%, var(--awu-surface-2));
@@ -1844,11 +1857,14 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 }
 
 /* hero 右侧的动作组。
-   W1-C 起收敛成「1 主 + 1 次 + 1 个 ⋯」（契约 §2.5）：原来编辑/启用/删除/绑定四五个平铺，
-   宽度一挤就折成两行半，而且四个按钮一样重，看不出主次。
-   现在的层级：data-tone="primary"（或 data-kind="primary"）1 个实心主操作、
-   data-size="md" 1 个中性次要、.awu-menuBtn 收走其余（导出/改模式/换开场白）。
-   2026-10-30 主人原话「编辑/启用/删除 三个按钮太小，而且挨得很近」——间距 6→10px 保留。 */
+   2026-11-02 主人要求：两个**作用域**（本会话绑定 / 全局启用）必须同级并排、都看得见 ——
+   「全局启用 / 退出全局」不再藏在 ⋯ 菜单里；编辑与 ⋯ 跟在它们后面。
+   层级靠底色与字重区分，不靠减少数量：
+   - data-kind="primary"：本会话绑定（唯一实心主操作；已绑定时**同位置**变「解除绑定」）；
+   - data-tone="scope"：全局启用 / 退出全局 —— 与主操作同高同字重，但不填主色（同级 ≠ 同权重）；
+   - data-kind="edit"：中性描边（编辑是次要动作）；
+   - .awu-menuBtn：收走切模式 / 换开场白 / 导出。
+   间距 6→10px 保留：2026-10-30 主人原话「编辑/启用/删除 三个按钮太小，而且挨得很近」。 */
 .awu-heroActions {
   position: relative; /* .awu-menu 的定位锚点 */
   display: flex;
@@ -1869,10 +1885,24 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   font-weight: 600;
 }
 
-/* 窄屏：动作等宽铺满一行，避免「两个半」这种最难看的折法 */
+/* 第二枚作用域按钮（全局启用 / 退出全局）：
+   与主操作**同级**——同高、同字重（都由上面那条 md 规则给），底色留在中性面，
+   不为它再造一个主色块（详情页只允许一枚实心主操作）。JSX 挂 data-tone="scope"
+   与主操作的 data-tone="primary" 对称，作为将来细调的稳定钩子 —— 现在没有额外规则，
+   层级就是「主色实心 > 中性实心 > 中性描边」这三档。 */
+
+/* 窄屏（<900 单栏）：hero 里头像 + 名字 + 动作必然折行，让动作组整组占一行、从左排。
+   四枚按钮允许换行；⋯ 若换到下一行就靠右收尾，不会出现「三个挤第一行、最后一个吊在
+   第二行最左」的半截排布。按钮文字是 nowrap，min-width 保持内容宽 —— 所以只会换行，
+   不会被压到文字溢出。 */
 @media (max-width: 900px) {
-  .awu-heroActions { justify-content: flex-start; }
-  .awu-heroActions .awu-btn[data-size="md"] { flex: 1 1 auto; padding: 0 var(--awu-gap-6); }
+  .awu-heroActions {
+    justify-content: flex-start;
+    width: 100%;
+    gap: var(--awu-gap-4) var(--awu-gap-5);
+  }
+  .awu-heroActions .awu-btn[data-size="md"] { flex: 1 1 auto; padding: 0 var(--awu-gap-5); }
+  .awu-heroActions .awu-menuBtn { margin-left: auto; }
 }
 
 .awu-heroActions .awu-btn svg { flex: none; }

@@ -947,16 +947,22 @@ export function assertCardLimits(card: CharacterCardV3): void {
 const BOOK_WARNING_SAMPLE = 3
 
 /**
- * 世界书**单条偏长**的软警告（保存/导入共用这一份文案，单一真源）。
+ * 角色卡**软警告**（保存 / 导入共用这一份文案，单一真源）。三条语义都是「保存成功 + 提示」：
  *
- * 语义：卡片照常保存、世界书一个字都不改，只是把「单条偏长」这件事如实告诉用户。
- * ⚠️ 全本字数超限**不再提醒**（2026-11-01 主人要求：按需注入，全本多大都不影响这一轮）。
+ *   ① 世界书单条偏长 → 提示拆条，绝不截断；
+ *   ② 展开不了的宏（`{{setvar::…}}` 之类）→ 提示它们会以原文进提示词，**绝不删正文**；
+ *   ③ 全本字数超限**不再提醒**（2026-11-01 主人要求：按需注入，全本多大都不影响这一轮）。
+ *
+ * ⚠️ ② 与预设侧**同一份实现**（`scanUnsupportedMacros` / `unsupportedMacrosWarning`，
+ * 实现在本文件「宏扫描」一节）：2026-11-02 之前只有预设侧会报，卡里写坏宏是静默的——
+ * 用户看到的是"模型怎么把我的 `{{original}}` 原样念出来了"，却没有任何提示。
  */
 export function collectCardWarnings(card: CharacterCardV3): string[] {
-  const book = card.data.character_book
-  if (book === undefined) return []
-  const entries = Array.isArray(book.entries) ? book.entries : []
   const warnings: string[] = []
+  const book = card.data.character_book
+  const entries = book !== undefined && Array.isArray(book.entries) ? book.entries : []
+
+  // ---- ① 世界书单条偏长（软警告，不拦、不截断）
   const longEntries: string[] = []
   for (const entry of entries) {
     const content = str(entry.content)
@@ -973,7 +979,69 @@ export function collectCardWarnings(card: CharacterCardV3): string[] {
       + '世界书按需注入，超出预算的部分不会进提示词，卡片本身功能不受影响；想让命中更稳可以拆成多条。',
     )
   }
+
+  // ---- ② 展开不了的宏：只告警，正文一个字都不动（项目决策 = 保留 + 明示）
+  const macroWarning = unsupportedMacrosWarning(scanUnsupportedMacros(cardMacroSources(card)))
+  if (macroWarning !== undefined) {
+    warnings.push(`${macroWarning}（角色卡正文、世界书与开场白同此口径；一个字都不会删，只是提示）`)
+  }
   return warnings
+}
+
+/**
+ * 这条「未知宏」告警要扫的正文（**只扫真正会进提示词 / 开场白的字段**）。
+ *
+ * 为什么按字段点名，而不是"全卡字符串叶子一把梭"：
+ *   - `extensions.aiwu.imported.raw` 是原生字段的镜像，一起扫会把同一段正文数两遍；
+ *   - `creator_notes` / `tags` 根本不进提示词——报进「会以原文进入提示词」就是假话。
+ *
+ * 扫的范围与 `renderL1Static` / `renderL1` 实际展开的范围一致：原生字段（原文优先）、
+ * `extensions.aiwu` 里会进 L1 的六组结构、以及世界书条目的正文与关键词。
+ * 开场白（`first_mes` / `alternate_greetings`）不经 `expandMacros`（原样展示给用户），
+ * 未知宏会直接露在对话里，所以同样计入。
+ */
+function cardMacroSources(card: CharacterCardV3): Array<{ content: string }> {
+  const data = card.data
+  const aiwu = awiuOf(card) ?? {}
+  const importedRaw = rec(aiwu.imported?.raw)
+  const sources: Array<{ content: string }> = []
+  const push = (text: unknown): void => {
+    const value = str(text)
+    if (value.trim() !== '') sources.push({ content: value })
+  }
+  // 任意 JSON 子树里的字符串叶子（只用于 aiwu 那几组结构，不碰 imported.raw）
+  const walkStrings = (node: unknown): void => {
+    if (typeof node === 'string') { push(node); return }
+    if (Array.isArray(node)) { for (const item of node) walkStrings(item); return }
+    if (isRecord(node)) { for (const value of Object.values(node)) walkStrings(value) }
+  }
+
+  // 原生字段：`imported.raw` 优先（导入原文才是真正渲染的那份，见 renderL1Static 的 raw()）
+  const nativeOf = (key: string): unknown => {
+    const raw = str(importedRaw[key]).trim()
+    if (raw !== '') return raw
+    return (data as unknown as Json)[key]
+  }
+  for (const key of ['description', 'personality', 'scenario', 'system_prompt', 'post_history_instructions', 'mes_example']) {
+    push(nativeOf(key))
+  }
+  // 开场白
+  push(data.first_mes)
+  for (const greeting of list(data.alternate_greetings)) push(greeting)
+  // 结构里会进 L1 的六组（含世界书命中的标题文案不在这里：它是固定文本）
+  for (const branch of [
+    aiwu.voice, aiwu.relationship, aiwu.userPersona,
+    aiwu.memoryAnchors, aiwu.dynamicState, aiwu.interactionPref,
+  ]) {
+    walkStrings(branch)
+  }
+  // 世界书：条目正文 + 关键词（key 也会被 expandMacros 展开，见 expandKeyList）
+  for (const entry of Array.isArray(data.character_book?.entries) ? data.character_book.entries : []) {
+    push(str(entry.content))
+    for (const key of list(entry.keys)) push(key)
+    for (const key of list(entry.secondary_keys)) push(key)
+  }
+  return sources
 }
 
 export function stampCardTimes(card: CharacterCardV3, now: Date): void {
@@ -1297,6 +1365,110 @@ export function expandMacros(text: string, ctx: MacroContext): string {
   return out
 }
 
+// ---------------------------------------------------------------- 宏扫描（预设 / 角色卡共用一份口径）
+
+/**
+ * 宏扫描为什么住在 tavern 而不是 preset：
+ *
+ * `preset.ts` 已经 `import { expandMacros } from './tavern.js'`（宏语义的唯一实现在这儿），
+ * 所以"哪些宏展开得了"的判据也必须留在**下层**——放 preset 里再让 tavern 反向 import 就是循环依赖。
+ * 预设侧（`convertStPreset`）与角色卡侧（{@link collectCardWarnings}）都调用本节的函数，
+ * 两边的告警口径因此**物理上不可能漂移**（2026-11-02 收敛，原实现只在 preset.ts）。
+ */
+
+/** `{{…}}` 的通用提取（不含花括号，两侧空白剥掉）。 */
+const MACRO_RE = /\{\{\s*([^{}]*?)\s*\}\}/gu
+
+/** 从 `{{xxx:yyy}}` 里取宏名（`xxx`；注释类 `//` 原样当名字）。 */
+function macroNameOf(body: string): string {
+  if (body.startsWith('//')) return '//'
+  const match = /^([A-Za-z_][\w-]*)/u.exec(body.trim())
+  return match?.[1] ?? ''
+}
+
+/**
+ * 我们**能展开**的宏名（白名单，逐个对上 `expandMacros` 的真实分支，不含"应该有"的想象）。
+ *
+ * 依据（2026-11-01 实测 `expandMacros`，不是凭印象）：
+ *   - `{{char}}` / `{{user}}` —— `SIMPLE_MACRO`，**只认小写**（`{{CHAR}}` 不会被展开，会原样留下）；
+ *   - `{{random:A,B}}` / `{{pick:A,B}}` —— `LIST_MACRO`，**必须带参数**（`{{random}}` 不展开）；
+ *   - `{{roll:N}}` / `{{roll:1dN}}` —— `ROLL_MACRO`，**大小写不敏感**（`{{Roll:6}}` 也能展开）；
+ *   - 注释 `{{// …}}` / `{{comment: …}}` —— `COMMENT_MACRO`（`comment` 必须带冒号、只认小写）。
+ *
+ * ⚠️ 明确**不支持**（只报进 `unsupportedMacros`，正文原样保留）：
+ * `{{trim}}` / `{{setvar::…}}` / `{{getvar::…}}` / `{{newline}}` / `{{persona}}` / `{{original}}` /
+ * `{{charIfNotGroup}}` / `{{description}}` 等 ST 专有变量。
+ * 不"顺手实现"它们：`trim` 在 ST 里是「裁掉上一段末尾的换行」（不是普通字符串 trim），
+ * `setvar/getvar` 依赖 ST 的变量作用域——猜一个语义只会让两端行为对不上（假绿）。
+ */
+export const EXPANDABLE_MACROS: readonly string[] = ['char', 'user', 'random', 'pick', 'roll', 'comment', '//']
+
+/** 宏扫描结果：宏名 → 出现次数（按次数降序、同次数按名字排序，输出稳定）。 */
+export type UnsupportedMacroCounts = Record<string, number>
+
+/**
+ * 这一段 `{{…}}` 会不会真的被展开（**逐条对齐 `expandMacros` 的正则**）。
+ *
+ * 为什么要精确到"是否带参数 / 大小写"：只按宏名放行会让 `{{random}}`（无参数）、
+ * `{{CHAR}}`（大写）这类**实际原样注入**的宏被当成"已知"，面板就会说"能展开"——那是假绿。
+ */
+function isExpandableMacro(name: string, body: string): boolean {
+  if (body.startsWith('//')) return true
+  switch (name) {
+    // 只认小写、无参数
+    case 'char':
+    case 'user':
+      return true
+    // 必须带参数（LIST_MACRO 要求 `:`）
+    case 'random':
+    case 'pick':
+      return body.includes(':')
+    // 注释：必须带冒号
+    case 'comment':
+      return /^comment\s*:/u.test(body)
+    default:
+      // roll 的正则带 i 标志：大小写都算，但必须是 `roll:N` / `roll:1dN`
+      return /^roll\s*:\s*(?:1?d)?\d+$/iu.test(body)
+  }
+}
+
+/**
+ * 一批文本里**我们展开不了**的宏及出现次数。
+ *
+ * 入参只要求「有 `content` 字符串」：预设模块（`PresetModule`）与角色卡正文片段都能直接传。
+ * 只统计、不改正文：这些宏会以原文进提示词（行为可预测，用户自己决定要不要留）。
+ */
+export function scanUnsupportedMacros(
+  sources: ReadonlyArray<{ content?: unknown }>,
+): UnsupportedMacroCounts {
+  const counts = new Map<string, number>()
+  for (const source of sources) {
+    const text = typeof source?.content === 'string' ? source.content : ''
+    if (text === '') continue
+    for (const match of text.matchAll(MACRO_RE)) {
+      const body = match[1] ?? ''
+      const name = macroNameOf(body)
+      // 取不到名字（如 `{{}}` / `{{  }}`）不算宏，跳过，避免造出 `''` 这种脏键
+      if (name === '' || isExpandableMacro(name, body)) continue
+      counts.set(name, (counts.get(name) ?? 0) + 1)
+    }
+  }
+  const out: UnsupportedMacroCounts = {}
+  for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+    out[name] = count
+  }
+  return out
+}
+
+/** 未知宏的汇总告警（**一条**，含总量与前 5 个），没有未知宏时返回 undefined。 */
+export function unsupportedMacrosWarning(counts: UnsupportedMacroCounts): string | undefined {
+  const entries = Object.entries(counts)
+  if (entries.length === 0) return undefined
+  const total = entries.reduce((sum, [, count]) => sum + count, 0)
+  const sample = entries.slice(0, 5).map(([name, count]) => `{{${name}}} ×${count}`).join('、')
+  return `${total} 处 ST 变量无法展开（前 5 个：${sample}${entries.length > 5 ? ' 等' : ''}），它们会以原文进入提示词`
+}
+
 /**
  * 剥离世界书条目里的 `@@` 装饰器。
  *
@@ -1475,12 +1647,13 @@ export function countDepthEntries(book?: CharacterBook): number {
  */
 function wholeWordHit(needle: string, haystack: string, caseSensitive: boolean): boolean {
   const escaped = needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-  try {
-    const flags = caseSensitive ? 'u' : 'iu'
-    return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, flags).test(haystack)
-  } catch {
+  // 这条正则在**每条条目、每个 key、每一轮**都会跑一次，编译结果必须进缓存
+  // （见 compiledRegex 的注释：`new RegExp` 的编译开销和 8000 字符扫描本身同量级）。
+  const compiled = compiledRegex(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, caseSensitive ? 'u' : 'iu')
+  if (compiled === undefined) {
     return caseSensitive ? haystack.includes(needle) : haystack.toLowerCase().includes(needle.toLowerCase())
   }
+  return compiled.regex.test(haystack)
 }
 
 /** 世界书 / 收尾提醒 / 日记共用的一条信任边界声明：卡内文本是「资料」，不是「指令」。 */
@@ -1492,43 +1665,169 @@ const REGEX_MAX_KEY_CHARS = 64
 const REGEX_SCAN_CHARS = 8000
 
 /**
+ * 单次正则匹配的时间预算（毫秒）：超过就认定这条 key 会拖慢主线程，之后**一律退化字面量匹配**，
+ * 并留一条 stderr 说明（每个写法只留一次，不刷屏）。
+ *
+ * 为什么静态判据之外还要这一层：{@link unsafeRegex} 只能穷举已知家族，新写法永远可能漏；
+ * 而 `RegExp#test` 是同步的，真跑起来再慢也打断不了——只能"付一次学费、以后别再付"。
+ * 25ms 取正常 key（实测 8000 字符上 < 3ms）的 8 倍余量，不会误伤正常正则。
+ */
+const REGEX_MATCH_BUDGET_MS = 25
+
+/** 编译缓存上限：一张卡的 key 通常 < 200 条；超了整表丢弃重来，绝不无限增长。 */
+const REGEX_CACHE_LIMIT = 256
+
+/**
+ * 无界量词个数阈值（`*` / `+` / `{n,}`）：≥ 这个数就**直接判不安全**、退字面量。
+ *
+ * 阈值取 5 是实测出来的折中：常见的正常写法 `\w+\s+\d+`（3 个）、`^(a|b)?\w+$`（1 个）都过得去，
+ * 而多项式炸弹（`a*a*a*a*a*a*a*a*a*b`，9 个）一网打尽。
+ * 2026-11-02 实测这条：9 个量词在 20 字符上 381ms；同一张卡可以放 200 条这种 key。
+ */
+const UNBOUNDED_QUANTIFIER_LIMIT = 5
+
+/**
+ * `key → RegExp` 编译缓存（**每轮不再重复编译**）。
+ *
+ * 为什么必须有：`matchesKey` 会被「每条条目 × 每个 key × 每一轮」调用，而 `new RegExp`
+ * 每次都要走一遍解析 + 编译；实测编译开销与 8000 字符的扫描本身同量级。
+ * 只缓存**不带 `g` / `y`** 的正则（本项目只用 `u` / `iu`）：那两种 flags 会留下 `lastIndex`
+ * 状态，复用同一个对象会串味；不带它们时 `.test()` 无状态，缓存安全。
+ */
+const regexCache = new Map<string, RegExp>()
+
+/**
+ * 被耗时预算判为「贵」的写法（`flags\0pattern`）→ 后续直接走字面量，不再执行。
+ * 进程内有效：重启后重新学习一次。一张卡最多多付一次学费，不会永久禁用某个写法。
+ */
+const expensiveRegexKeys = new Set<string>()
+
+function regexCacheKey(pattern: string, flags: string): string {
+  return `${flags}\u0000${pattern}`
+}
+
+/** 取（必要时编译）正则；写坏的正则返回 undefined，调用方退化成字面量匹配。 */
+function compiledRegex(pattern: string, flags: string): { regex: RegExp; cacheKey: string } | undefined {
+  const cacheKey = regexCacheKey(pattern, flags)
+  const cached = regexCache.get(cacheKey)
+  if (cached !== undefined) return { regex: cached, cacheKey }
+  let regex: RegExp
+  try {
+    regex = new RegExp(pattern, flags)
+  } catch {
+    return undefined
+  }
+  if (regexCache.size >= REGEX_CACHE_LIMIT) regexCache.clear()
+  regexCache.set(cacheKey, regex)
+  return { regex, cacheKey }
+}
+
+/**
  * 保守判断「明显会灾难回溯」的正则构造。
  *
- * 不做完整的安全分析（那需要 RE2），只挡最常见、也最容易误杀的是嵌套量词
- * `(a+)+` / `(a*)*` / `(.*)+` 这类——实测 `(a+)+$` 在 26 个 a 上就要 633ms。
- * 命中后**退化成字面量匹配**，宁可少命中一条世界书，也不让宿主流程卡死。
+ * 不做完整的安全分析（那需要 RE2），但**覆盖真卡里能见到的五个家族**：
+ *   1. **嵌套量词** `(a+)+` / `(a*)*` / `(.*)+`：内层多解、外层再重复 → 指数回溯
+ *      （实测 `(a+)+$` 在 26 个 a 上 633ms）；
+ *   2. **重复的交替分组** `(a|a)+` / `(a|ab)*` / `(a|a){20}`：同长度分支互相覆盖，
+ *      回溯树按重复次数翻倍（2026-11-02 实测 `(a|a)+$` 在 26 字符上 745ms、24 字符 190ms
+ *      ——旧判据只有"嵌套量词"，完全挡不住这一族）；
+ *   3. **花括号重复套分组** `(a{1,3}){10}` / `(.+a){5}`：上两族的花括号写法；
+ *   4. **反向引用** `(\w+)\1`：引擎无法线性化候选，配合量词同样会爆；
+ *   5. **多项式族的分母保护**：无界量词 ≥ {@link UNBOUNDED_QUANTIFIER_LIMIT} 个
+ *      （`a*a*a*a*a*a*a*a*a*b` 这类相邻重叠量词）。这不是精确分析，是一道粗闸——
+ *      实测 9 个量词在 **20 字符**上就要 381ms，而扫描窗 8000 字符、一张卡可以放 200 条 key，
+ *      首次代价叠加起来是分钟级阻塞；预算层只能"跑完才知道"，挡不住首次。
+ *
+ * 命中后**退化成字面量匹配**——宁可少命中一条世界书，也不让宿主主线程卡死（REGEX_SCAN_CHARS=8000）。
+ * 判据刻意偏保守（`(a|b){3}` 这种安全写法也会被挡）：代价只是这一条 key 丢掉正则语义，不丢正文。
  */
 function unsafeRegex(pattern: string): boolean {
   if (pattern.length > REGEX_MAX_KEY_CHARS) return true
-  if (/\([^()]*[+*]\)[+*{]/u.test(pattern)) return true
-  if (/(\.\*|\.\+)[+*{]/u.test(pattern)) return true
+  // 相邻量词（`a+*` / `a**`）：语法上多半非法，能编译也几乎只可能是构造出来的病态写法
   if (/[+*][+*]/u.test(pattern)) return true
+  // 反向引用：`(\w+)\1` / `(.)\1{9,}`
+  if (/\\[1-9]/u.test(pattern)) return true
+  if (countUnboundedQuantifiers(pattern) >= UNBOUNDED_QUANTIFIER_LIMIT) return true
+
+  // 逐层扫「有括号的分组 + 紧跟它的重复量词」，判断组内是否自带多义/重复。
+  // 只扫一层（`[^()]*`）：嵌套分组由它自己那一层命中，不必递归。
+  const group = /\(([^()]*)\)((?:\{[^}]{0,16}\})|[+*?])?/gu
+  for (let match = group.exec(pattern); match !== null; match = group.exec(pattern)) {
+    const body = match[1] ?? ''
+    // `?` / `{0,1}` 只走一遍，不存在指数展开；只有 ≥2 次或无限次的重复才危险
+    if (repeatUpperBoundOf(match[2]) <= 1) continue
+    if (body.includes('|')) return true   // 交替分组被重复
+    if (/[+*?{]/u.test(body)) return true // 组内已有量词 / 花括号重复 → 嵌套量词
+  }
   return false
+}
+
+/**
+ * 数「无界量词」的个数（`*` / `+` / `{n,}`）——多项式族的粗闸。
+ *
+ * 先把转义字符与字符类剥掉再数：`\+` 是字面加号、`[\w+*]` 是字符集合，
+ * 不剥就会把正常写法数成量词（`[\w+*]` 一条就贡献 2 个），那是莫名其妙的误杀。
+ */
+function countUnboundedQuantifiers(pattern: string): number {
+  const bare = pattern.replace(/\\[\s\S]/gu, '\u0001').replace(/\[[^\]]*\]/gu, '\u0002')
+  return (bare.match(/[+*]|\{\d+,\}/gu) ?? []).length
+}
+
+/**
+ * 分组后面那个量词的「重复上限」：`+` / `*` / `{n,}` / `{n,m}` → 上限；`{n}` → n；`?` / `{0,1}` → 1。
+ *
+ * 只给 {@link unsafeRegex} 判断「这层分组到底重不重复」用：`(a|b)?` 一遍过，不该被拦。
+ * 认不出的量词一律按"无上限"处理（保守）。
+ */
+function repeatUpperBoundOf(token: string | undefined): number {
+  if (token === undefined) return 1
+  if (token === '+') return Number.POSITIVE_INFINITY
+  if (token === '*') return Number.POSITIVE_INFINITY
+  if (token === '?') return 1 // 只走一遍，不存在指数展开
+  const match = /^\{(\d*)(,?)(\d*)\}$/u.exec(token)
+  if (match === null) return Number.POSITIVE_INFINITY
+  const min = match[1] === '' ? 0 : Number(match[1])
+  if (match[2] !== ',') return min // `{n}`：正好 n 次
+  return match[3] === '' ? Number.POSITIVE_INFINITY : Number(match[3]) // `{n,}` / `{n,m}`
 }
 
 function matchesKey(key: string, text: string, entry: CharacterBookEntry): boolean {
   const needle = key.trim()
   if (needle === '') return false
   const caseSensitive = entry.case_sensitive === true
+  /** 字面量兜底：正则不可信/写坏时走它（在**全量文本**上查找，线性的，不需要扫描窗）。 */
+  const literalHit = (): boolean =>
+    caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
   if (entry.use_regex === true) {
     // 正则来自不受信的角色卡：限制长度、拒绝明显会灾难回溯的构造，
     // 并只在前 8000 字符里匹配——否则一张恶意卡就能把宿主主线程卡死（实测指数级）。
     const pattern = needle.length > REGEX_MAX_KEY_CHARS ? needle.slice(0, REGEX_MAX_KEY_CHARS) : needle
-    if (unsafeRegex(pattern)) {
-      return caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
-    }
+    const flags = caseSensitive ? 'u' : 'iu'
+    const cacheKey = regexCacheKey(pattern, flags)
+    // 静态判据命中，或这条写法之前已被耗时预算判为"贵"：直接字面量，连编译都不做
+    if (unsafeRegex(pattern) || expensiveRegexKeys.has(cacheKey)) return literalHit()
+    const compiled = compiledRegex(pattern, flags)
+    // 用户写坏正则：退化成字面量匹配（不抛错，否则整轮对话进不去）
+    if (compiled === undefined) return literalHit()
     const haystack = text.length > REGEX_SCAN_CHARS ? text.slice(0, REGEX_SCAN_CHARS) : text
-    try {
-      return new RegExp(pattern, caseSensitive ? 'u' : 'iu').test(haystack)
-    } catch {
-      // 用户写坏正则：退化成字面量匹配（不抛错，否则整轮对话进不去）
-      return caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
+    const startedAt = Date.now()
+    const matched = compiled.regex.test(haystack)
+    const elapsed = Date.now() - startedAt
+    // 预算超支：本次结果照用（已经算出来了），但把这个写法记下来，之后一律字面量 +
+    // 留一条可诊断的 stderr（带上写法与扫描长度，方便定位是哪张卡）。
+    if (elapsed > REGEX_MATCH_BUDGET_MS && !expensiveRegexKeys.has(compiled.cacheKey)) {
+      expensiveRegexKeys.add(compiled.cacheKey)
+      process.stderr.write(
+        `[ai-with-u] 世界书正则超出单次匹配预算（${elapsed}ms > ${REGEX_MATCH_BUDGET_MS}ms，扫描 ${haystack.length} 字符）：`
+        + `/${pattern}/${flags} 之后一律按字面量匹配（不删正文，只退化为包含匹配）\n`,
+      )
     }
+    return matched
   }
   const extensions = entryExtensions(entry)
   const wholeWord = extensions['match_whole_words'] === true || extensions['matchWholeWords'] === true
   if (wholeWord) return wholeWordHit(needle, text, caseSensitive)
-  return caseSensitive ? text.includes(needle) : text.toLowerCase().includes(needle.toLowerCase())
+  return literalHit()
 }
 
 /** FNV-1a 稳定哈希：`probability` 用它，**绝不用 `Math.random`**（那会让系统提示每轮变化、KV 缓存全废）。 */

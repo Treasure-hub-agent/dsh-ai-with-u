@@ -9,7 +9,13 @@
  * 落盘与决议在 `store.ts` / `prompt.ts`（`_presets.json` / `presets/<id>.json` / `_presets_active.json`）。
  * @module dsh-ai-with-u/preset
  */
-import { expandMacros, type MacroContext } from './tavern.js'
+import {
+  expandMacros,
+  scanUnsupportedMacros,
+  unsupportedMacrosWarning,
+  type MacroContext,
+  type UnsupportedMacroCounts,
+} from './tavern.js'
 
 /** 预设文件格式版本（只增不改；读时幂等补默认值）。 */
 export const PRESET_VERSION = 1
@@ -40,94 +46,19 @@ export interface PresetModule {
 export const PRESET_HEAVY_CHARS = 8000
 
 /**
- * 我们**能展开**的宏名（白名单，**逐个对上 `tavern.expandMacros` 的真实分支**，不含"应该有"的想象）。
+ * 我们**能展开**的宏名在这里只是**再导出**：实现与判据已下沉到 `tavern.ts`
+ * （`EXPANDABLE_MACROS` / `scanUnsupportedMacros` / `unsupportedMacrosWarning`）。
  *
- * 依据（2026-11-01 实测 `expandMacros`，不是凭印象）：
- *   - `{{char}}` / `{{user}}` —— `SIMPLE_MACRO`，**只认小写**（`{{CHAR}}` 不会被展开，会原样留下）；
- *   - `{{random:A,B}}` / `{{pick:A,B}}` —— `LIST_MACRO`，**必须带参数**（`{{random}}` 不展开）；
- *   - `{{roll:N}}` / `{{roll:1dN}}` —— `ROLL_MACRO`，**大小写不敏感**（`{{Roll:6}}` 也能展开）；
- *   - 注释 `{{// …}}` / `{{comment: …}}` —— `COMMENT_MACRO`（`comment` 必须带冒号、只认小写）。
- *
- * ⚠️ 明确**不支持**（导入时报进 `unsupportedMacros`，正文原样保留）：
- * `{{trim}}` / `{{setvar::…}}` / `{{getvar::…}}` / `{{newline}}` / `{{persona}}` / `{{original}}` /
- * `{{charIfNotGroup}}` / `{{description}}` 等 ST 专有变量。
- * 不"顺手实现"它们：`trim` 在 ST 里是「裁掉上一段末尾的换行」（不是普通字符串 trim），
- * `setvar/getvar` 依赖 ST 的变量作用域——猜一个语义只会让两端行为对不上（假绿）。
+ * 为什么下沉（2026-11-02）：角色卡侧的 `collectCardWarnings` 也要报「展开不了的宏」，
+ * 而 preset 本来就单向依赖 tavern（`expandMacros` 的唯一实现）；判据留在 preset 就只能让
+ * tavern 反向 import（循环依赖），或者两边各写一份（必然漂移）。现在只有一份。
  */
-export const EXPANDABLE_MACROS: readonly string[] = ['char', 'user', 'random', 'pick', 'roll', 'comment', '//']
-
-/** 宏扫描结果：宏名 → 出现次数（按次数降序、同次数按名字排序，输出稳定）。 */
-export type UnsupportedMacroCounts = Record<string, number>
-
-/** `{{…}}` 的通用提取（不含花括号，两侧空白剥掉）。 */
-const MACRO_RE = /\{\{\s*([^{}]*?)\s*\}\}/gu
-
-/** 从 `{{xxx:yyy}}` 里取宏名（`xxx`；注释类 `//` 原样当名字）。 */
-function macroNameOf(body: string): string {
-  if (body.startsWith('//')) return '//'
-  const match = /^([A-Za-z_][\w-]*)/u.exec(body.trim())
-  return match?.[1] ?? ''
-}
-
-/**
- * 这一个 `{{…}}` 会不会真的被展开（**逐条对齐 `expandMacros` 的正则**）。
- *
- * 为什么要精确到"是否带参数 / 大小写"：只按宏名放行会让 `{{random}}`（无参数）、
- * `{{CHAR}}`（大写）这类**实际原样注入**的宏被当成"已知"，面板就会说"能展开"——那是假绿。
- */
-function isExpandableMacro(name: string, body: string): boolean {
-  if (body.startsWith('//')) return true
-  switch (name) {
-    // 只认小写、无参数
-    case 'char':
-    case 'user':
-      return true
-    // 必须带参数（LIST_MACRO 要求 `:`）
-    case 'random':
-    case 'pick':
-      return body.includes(':')
-    // 注释：必须带冒号
-    case 'comment':
-      return /^comment\s*:/u.test(body)
-    default:
-      // roll 的正则带 i 标志：大小写都算，但必须是 `roll:N` / `roll:1dN`
-      return /^roll\s*:\s*(?:1?d)?\d+$/iu.test(body)
-  }
-}
-
-/**
- * 扫描一批模块正文里的 `{{…}}`，返回**我们展开不了**的宏及其出现次数。
- *
- * 只统计、不改正文：这些宏会以原文进提示词（行为可预测，用户自己决定要不要留）。
- */
-export function scanUnsupportedMacros(modules: readonly PresetModule[]): UnsupportedMacroCounts {
-  const counts = new Map<string, number>()
-  for (const module of modules) {
-    const text = typeof module?.content === 'string' ? module.content : ''
-    if (text === '') continue
-    for (const match of text.matchAll(MACRO_RE)) {
-      const body = match[1] ?? ''
-      const name = macroNameOf(body)
-      // 取不到名字（如 `{{}}` / `{{  }}`）不算宏，跳过，避免造出 `''` 这种脏键
-      if (name === '' || isExpandableMacro(name, body)) continue
-      counts.set(name, (counts.get(name) ?? 0) + 1)
-    }
-  }
-  const out: UnsupportedMacroCounts = {}
-  for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
-    out[name] = count
-  }
-  return out
-}
-
-/** 未知宏的汇总告警（**一条**，含总量与前 5 个），没有未知宏时返回 undefined。 */
-export function unsupportedMacrosWarning(counts: UnsupportedMacroCounts): string | undefined {
-  const entries = Object.entries(counts)
-  if (entries.length === 0) return undefined
-  const total = entries.reduce((sum, [, count]) => sum + count, 0)
-  const sample = entries.slice(0, 5).map(([name, count]) => `{{${name}}} ×${count}`).join('、')
-  return `${total} 处 ST 变量无法展开（前 5 个：${sample}${entries.length > 5 ? ' 等' : ''}），它们会以原文进入提示词`
-}
+export {
+  EXPANDABLE_MACROS,
+  scanUnsupportedMacros,
+  unsupportedMacrosWarning,
+} from './tavern.js'
+export type { UnsupportedMacroCounts } from './tavern.js'
 
 /** 「预设偏重」的告警文案；没超过阈值返回 undefined（启用/保存时展示）。 */
 export function heavyPresetWarning(chars: number): string | undefined {
