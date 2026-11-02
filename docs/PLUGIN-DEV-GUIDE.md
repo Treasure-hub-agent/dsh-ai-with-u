@@ -152,7 +152,7 @@ ctx.on('agent/turn-stopping', (payload) => { ... })                   // serial�
 
 ---
 
-## 3. 踩坑清单（按类，共 27 条）
+## 3. 踩坑清单（按类，共 39 条）
 
 ### A. 提示词 / 注入
 
@@ -260,6 +260,89 @@ window.addEventListener('dragend', reset)   // ← 唯一兜底复位口
 **#27 计量脚本自己会算错**
 一次"字数 750 vs 产物 736"的误判，根因是计量脚本把 `export type` 那行的字面量算进了正文。**任何数字都要有第二份独立实现复算**，尤其是要写进徽章/文档的数字。
 
+### F. 视觉 / 动效 / 玻璃材质（2026-11-02 UI 升级轮，四版收敛）
+
+> 这一组全部来自「面板打开动画」的四次返工。前三条是同一条渲染规则的三张面孔，
+> 后六条是**这类文件（4000 行 CSS 模板串 + 3000 行 JSX）特有的**工程坑。
+
+**#28 给「含 `backdrop-filter` 的元素」的祖先加 opacity/transform = 玻璃变假半透明**
+现象：把进场淡入/放大挪到面板外面那层壳上，面板整块变半透明，后面的聊天内容透出来。
+根因：Chromium 里只要祖先有 `opacity < 1` 或 `transform`，祖先会被提升为**独立渲染表面**，
+`backdrop-filter` 采到的就不再是页面背景（而是那个空表面），玻璃退化成"假半透明"，
+并可能**停在中间帧不回落**（视觉上像动画卡死）。
+对策（铁律，已进 `styles.ts` 注释与设计文档 §5 第 8 条）：
+**带 `backdrop-filter` 的元素及其任何祖先，都不得有 `opacity`/`transform`/`scale` 动画，
+也不得挂 `will-change: opacity|transform`。** 进场动效只能落在它**内部的内容层**上
+（内容画在模糊之上，不参与背板采样）。
+
+**#29 给 `backdrop-filter` 元素本身播动画 = 逐帧重采样**
+表现：动画时间推进不动（`getAnimations()[0].currentTime` 恒为 0、`startTime` 为 `null`），
+或掉帧到肉眼可见。1.12M px 的 18px 模糊在软件合成下一帧要秒级。
+判据：`element.getAnimations()` 有动画但 `currentTime` 不前进，先怀疑它带了模糊/滤镜。
+
+**#30 动画期把模糊摘掉、`animationend` 再装回去 = 一帧硬切（"二段式"）**
+`backdrop-filter` 与 `box-shadow` 都**不可过渡**，换档那一帧没有中间态。用户读到的就是
+「先半透明发白、顿一下才变实」。逐帧采样能直接看到：`t≈401ms` 从 `none` 跳到 `blur(18px) saturate(1.85)`。
+教训：**省性能不能靠"摘掉不可过渡的属性"**——省下的重绘抵不过一次观感事故。
+
+**#31 `animation-fill-mode: both` 会让"动画不跑"变成"元素隐身"**
+`both` = 动画开始前就套用 `from` 帧。若动画因环境原因不启动（层提升、合成器暂停、旧内核），
+元素就永远停在 `opacity: 0`。**进场动画一律用 `backwards`**：基线保持"完全可见"，
+最坏情况只是没有入场效果。同理，压暗/遮罩这类"必须有"的东西，基线要写成"已生效"。
+
+**#32 CSS 写在模板字符串里时，注释里出现反引号会截断模板（一轮内踩了 3 次）**
+症状：`tsc` 报一串 `TS1005/TS1128` 指向某行注释，或沙盒整页只剩「预览打包失败」。
+根因：`const CSS = \`…\`` 里任何反引号（哪怕在注释里）都会提前闭合模板。
+对策：注释里引用类名/属性一律用「」或裸写；`scripts/verify-ui.mjs` 断言模板范围内
+反引号必须为 0、`${` 只允许白名单插值。**这条护栏在本轮抓到过 3 次真人事故（含我自己两次）。**
+
+**#33 React 的布尔属性会被序列化成字符串 `"false"`，存在性选择器会误命中**
+`data-empty={空 ? 'true' : undefined}` 才是对的；写成 `'true'/'false'` 时，React 输出
+`data-empty="false"`，而 CSS 的 `[data-empty]`（存在性匹配）照样命中 → 那一行永远不显示。
+对策：**属性选择器一律带值** `[data-empty="true"]`，且 JSX 侧"否"要用 `undefined` 而不是 `false`。
+`verify-ui.mjs` 第 6 条盯这个（宿主 `[data-ds-dark-theme]` 是唯一白名单：它是属性存在即语义）。
+
+**#34 `createPortal` 到 `body` 的元素拿不到 token → `var()` 解析失败 → 整条动画静默失效**
+新增的外壳 `.awu-panelFade` 没有 `.awu-scope` 类，`var(--awu-t-base)` 无值，
+`animation: awu-panel-in var(--awu-t-base) …` 整条简写变成无效声明，`getComputedStyle().animationName`
+返回 `"none"`——不报错、不红、只是**没有动画**。
+对策：任何 portal 出去的新容器都要进变量作用域清单（本文件有 4 张清单：变量层、
+浅色覆盖、两处 reduced-transparency），改一张就要同步其余（清单"逐字一致"是硬约定）。
+
+**#35 用脚本改文件时行尾符会被改写，进而把"自检"变成"假红"**
+现象：`verify-ui` 突然报 `styles.ts` 有 7 个反引号 + 非白名单插值，而代码其实没问题。
+根因：Python 文本模式写入把整份文件转成 CRLF，扫描器的模板收尾正则只认 `\n\``，
+匹配失败后退化成"扫整个文件"，把 `installStyles` 里的代码模板串当成了 CSS。
+对策：① 脚本用 `open(..., newline='')`；② **扫描器一律容忍 `\r?\n`**；③ 看到"自检红但代码没错"先查
+行尾符与文件编码（同 §排查表最后一行）。
+
+**#36 新增一层外壳会造新的层叠上下文，可能把弹层压到面板下面**
+加 `.awu-panelFade`（`z-index: 2147482000`）后必须重验：弹层 scrim 的 `z-index` 是否仍更高
+（本项目是 2147482100）、`elementFromPoint` 命中的是不是弹层。
+顺带：外壳要 `pointer-events: none` + 面板 `auto`，否则会吞掉"点面板外面回宿主"的行为。
+
+**#37 动画进行中 `getBoundingClientRect()` 拿到的是被 transform 缩过的尺寸**
+做「共享元素/FLIP」时若在动画期间量 rect 并反推缩放比，会得到错值（本项目把 `scale` 算成
+`.6786` 而实际是 `36/56=.6428`，差的正是动画中的 `transform`）。
+对策：**量基准尺寸用 `offsetWidth/offsetHeight`**，`getBoundingClientRect()` 只用于"当前位置"。
+
+**#38 UI 动效不能靠"看代码觉得对"，但也不能靠无头环境的计时采样**
+- DSH 桌面版**不是可注入 Chromium**，`browser-skill` 连不上 → 用本机 Playwright chromium +
+  CDP 驱动预览沙盒（本项目 `tools/qa/shots.mjs`，纯 CDP，不依赖 playwright 模块）；
+- 但**无头 + 软件合成下 CSS 动画可能永远停在首帧**（`currentTime` 恒 0），
+  这时"每 16ms 采样一次"得到的是假数据；
+- 可用姿势：① 用 `Page.captureScreenshot` **强制出帧**再读计算样式；
+  ② 只断言**结构性事实**（动画名/时长/延迟/fill-mode、换档前后 `backdrop-filter` 与
+  `box-shadow` 是否逐字相同、`pointer-events` 与 `z-index`、`getAnimations().length`）；
+  ③ 真实观感交给人在真机上判。
+- 判断"是否有硬切"的最快办法：采 `backdrop-filter` / `box-shadow` 的**变化时刻**，
+  而不是看动画时长。
+
+**#39 "护栏"本身要有红灯自测**
+`verify-a11y` 第一版的图标按钮正则 `<Icon|svg` 匹配不到 `<IconSpinner`——14 个图标按钮只认出 1 个，
+护栏半瞎却一直绿。对策：**每条断言都要构造一个违规样本，确认它会变红**（本项目在临时目录注入
+11 个违规，全部按预期变红后才认定护栏可信）。永远绿的护栏比没有护栏更危险。
+
 ---
 
 ## 4. 可复用模式
@@ -298,15 +381,37 @@ window.addEventListener('dragend', reset)   // ← 唯一兜底复位口
 
 **⑫ i18n 双字典 + 键集一致性脚本**——中英各一份，缺 key 会裸显 key；写脚本核对"无重复 + 两边键集完全相同 + 模板里用到的 key 都存在"。
 
+**⑬ 「玻璃面板进场」的安全配方**（四版返工换来的，做任何带 `backdrop-filter` 的浮层都适用）
+
+```
+结构：外壳（只定位，不带头 blur） > 玻璃层（backdrop-filter，全程不动） > 内容层（承担动画）
+
+外壳      .panelFade         position:fixed/inset:0/z-index；pointer-events:none
+  ::before                   全屏压暗淡入（纯色层，200ms；基线 opacity:1 + fill:backwards）
+  玻璃    .panel             无 animation、无 will-change、无 opacity<1（这条是铁律）
+    内容  .head/.status/.workspace   opacity 0→1 + scale .98→1 + translateY 6px→0，
+                                     200ms、错开 0/40/80ms、fill: backwards
+```
+
+判据三条：
+1. 想动的东西里有没有 `backdrop-filter`？有 → 只能动它**内部**的节点；
+2. 要换的属性可不可以过渡（`backdrop-filter` / `box-shadow` 不可）？不可 → 全程恒定，别换档；
+3. 动画不跑会怎样？会隐身 → 基线写成"已是终态"，用 `backwards` 而非 `both`。
+
+**验收口径**：不跑动画而是断言结构 —— 外壳 `animation: none`、玻璃 `getAnimations()=0`、
+换档前后 `backdrop-filter` 与 `box-shadow` 计算值逐字相同、`pointer-events` 与 `z-index` 正确。
+
 ---
 
 ## 5. 自检体系
 
-**八套，串在 `npm run build` 里**（任何一套红 = 构建失败）：
+**十套，串在 `npm run build` 里**（任何一套红 = 构建失败）：
 
 | 脚本 | 覆盖 |
 |---|---|
-| `verify-bundle` | 客户端产物形状（`__ModuleLoader__`、外部依赖） |
+| `verify-bundle` | 客户端产物形状（`__ModuleLoader__`、外部依赖）；顺带**真执行一遍模块**（所以 CSS 模板串里不许有反引号） |
+| `verify-ui` | **UI 纪律**（2026-11-02 新增）：模板串反引号/插值白名单/花括号、keyframes 闭环（无死动画、无悬空引用）、时长只走令牌、字号字面量预算、禁 `transition: all`、`data-*` 选择器必须带值、卡片错峰上限 ≤8 |
+| `verify-a11y` | **无障碍**（同日新增）：0 处 `div+onClick`、图标按钮必须有可访问名、`<button type="button">`、错误提示可播报（`role="alert"`）、zh/en 键集对称且 `t('字面量')` 全部命中、CSS 模板闭合形态、焦点环走 token |
 | `verify-wiring` | **接线体检**：后端做了前端没接、产物与源码漂移、文案 key 缺失 |
 | `verify` | 产物形状 / 新鲜度 / 孤儿产物 |
 | `verify-tavern` | 卡格式 / 迁移 / 世界书 / 忘却 / 宏 / 正则屏蔽 |
@@ -321,6 +426,9 @@ window.addEventListener('dragend', reset)   // ← 唯一兜底复位口
 - 断言要**独立复算**（见 #27）
 - `skip` 只用于"依赖未就绪"，且必须在报告里说明为什么跳过
 - 徽章口径写死：**总通过项之和，失败与 skip 都必须为 0**
+- **每条失效类断言都要有红灯自测**（见 #39）：注入违规 → 必须变红 → 还原 → 回绿
+- 纯静态扫描（`verify-ui` / `verify-a11y`）放在 `build-client` 之后、重脚本之前：**便宜的先跑**，违规时不必先付打包时间
+- 结构性守卫比"数值守卫"耐用：`verify-ui` 只盯 7 条不可能误判的事实（反引号数、动画引用闭环、时长来源、选择器写法），不盯具体像素值
 
 ---
 
@@ -382,3 +490,11 @@ ST 的启停不在 `prompts[i].enabled`，而在 `prompt_order[].order[i].enable
 | 产物里搜不到中文 | esbuild `\uXXXX`（坑 #19） |
 | 产物里搜不到自己的函数名 | minify 改名（坑 #20） |
 | 自检红但代码看着对 | 产物是否比源码旧（坑 #24）；断言是否绑死了实现位置（坑 #25） |
+| 面板整块半透明、后面内容透出来 | 有祖先带了 `opacity`/`transform`/`will-change`，玻璃背板采样失效（坑 #28） |
+| 打开面板「先发白、顿一下才变实」 | 某处不可过渡属性被换了档（`backdrop-filter` / `box-shadow`）（坑 #30） |
+| 动画写了却没反应（`animationName: none`） | `var()` 令牌没解析到（portal 出去的元素不在作用域清单里）（坑 #34） |
+| 元素一直隐身 / 只有首帧 | `animation-fill-mode: both` + 动画没跑；改 `backwards`（坑 #31） |
+| 自检突然报 CSS 模板串有反引号 | 先查注释里的 markdown 反引号（坑 #32），再查行尾符是否被脚本改成 CRLF（坑 #35） |
+| 新加的外壳把弹层压住了 | 新层叠上下文没算 z-index（坑 #36） |
+| 量出来的缩放比不对 | 动画进行中量了 `getBoundingClientRect`，用 `offsetWidth`（坑 #37） |
+| 无头环境里动画「不动」 | 软件合成会冻结动画帧，别用计时采样当证据（坑 #38） |

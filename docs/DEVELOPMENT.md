@@ -269,7 +269,7 @@ ellipsis 没有裁切上下文。
 }
 ```
 
-`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 全链自检（八套，见下方自检一节）`，
+`package.json` 里 `build` 现在是 `tsc(宿主) && tsc(前端) && esbuild && 全链自检（十套，见下方自检一节）`，
 另有独立的 `npm run typecheck:client`。
 
 > 💡 需要 `@types/react` / `@types/react-dom`（devDependencies）。宿主只提供 React 运行时，
@@ -733,7 +733,7 @@ v0.2.0 把格式层（CCv3 + 世界书）重做完了，但「聊起来像不像
 
 ### 集成验收记录（2026-10-31，C2 全量回归）
 
-`npm run build` 一次过，八套自检合计 **641 项通过 / 0 失败**（日志里 ✓ 641、✗ 0）：
+`npm run build` 一次过，八套自检合计 **641 项通过 / 0 失败**（当时的八套口径，2026-11 已扩到十套）（日志里 ✓ 641、✗ 0）：
 
 | 自检 | 通过项 |
 |---|---|

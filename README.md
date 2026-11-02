@@ -54,7 +54,7 @@
 
 有两处是**故意不做**，别当成缺功能：
 
-- **8 个场景的扮演测试**（原 skill 里那套「测一遍人设像不像」的用例）没搬。人像不像只能靠聊，靠脚本测不出来——能测的（提示词长度、字段完整性、世界书命中、导入解析）都已经进了自检，共八套。
+- **8 个场景的扮演测试**（原 skill 里那套「测一遍人设像不像」的用例）没搬。人像不像只能靠聊，靠脚本测不出来——能测的（提示词长度、字段完整性、世界书命中、导入解析）都已经进了自检，共十套。
 - **`manifest` / `full_card` 不单独落文件**，收进 `card.json` 的 `extensions.aiwu` 里。CCv3 本身只有一份真相，再存一份清单等于制造两个会互相漂移的事实来源；要读清单就 `GET /character`。
 
 ---
@@ -475,7 +475,7 @@ distill/flow  distill/arm  distill/disarm  distill/state
 ## 开发
 
 ```bash
-npm run build            # 宿主 tsc + 前端 tsc + 打包 + 八套自检（各套通过项总数以 verify 输出为准）
+npm run build            # 宿主 tsc + 前端 tsc + 打包 + 十套自检（各套通过项总数以 verify 输出为准）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
 npm run verify:bundle    # 客户端产物加载
 npm run verify:wiring    # 接线体检：25 组契约（后端做了前端没接 / 验收项回归）
@@ -489,7 +489,7 @@ npm run typecheck:client # 只查浏览器侧类型
 
 `npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
-徽章上的数字 = build 串里八套自检的通过项之和，失败项必须为 0、skip 也必须为 0。**各套总数与合计以 verify 输出实测为准，不在文档里回填逐套分解清单**——1025 时代的教训：这套数字从手写成 515 起，先后漂移出 515 / 981 / 1025 三套口径（981 与 1025 曾一度并存），自检断言增减是常态，宁可每次实测也不要维护第二份会过期的清单。
+徽章上的数字 = build 串里十套自检的通过项之和，失败项必须为 0、skip 也必须为 0。**各套总数与合计以 verify 输出实测为准，不在文档里回填逐套分解清单**——1025 时代的教训：这套数字从手写成 515 起，先后漂移出 515 / 981 / 1025 三套口径（981 与 1025 曾一度并存），自检断言增减是常态，宁可每次实测也不要维护第二份会过期的清单。
 
 当前徽章 **1032** 是 2026-11-01 发布快照的全链实测回填：`verify 16 + bundle 9 + wiring 72 + tavern 306 + distill 121 + import 58 + session 324 + host 126`。下一次增删断言后它就会过期——重新跑全链按实测改徽章，不必另行更新本段。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
