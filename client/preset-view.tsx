@@ -37,10 +37,12 @@ import { FocusEditor } from './editor-focus'
 import {
   IconBack,
   IconChevron,
+  IconDown,
   IconPlus,
   IconQuill,
   IconRefresh,
   IconTrash,
+  IconUp,
 } from './icons'
 import { ErrorBar, Skeleton } from './parts'
 import type { Translate } from './text'
@@ -1250,7 +1252,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
                       aria-label={`${t('preset.editor.moveUp')}：${moduleLabel(module, index, t)}`}
                       onClick={() => moveModule(index, -1)}
                     >
-                      <IconChevron size={12} style={{ transform: 'rotate(-90deg)' }} />
+                      <IconUp size={12} />
                     </button>
                     <button
                       type="button"
@@ -1260,7 +1262,7 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
                       aria-label={`${t('preset.editor.moveDown')}：${moduleLabel(module, index, t)}`}
                       onClick={() => moveModule(index, 1)}
                     >
-                      <IconChevron size={12} style={{ transform: 'rotate(90deg)' }} />
+                      <IconDown size={12} />
                     </button>
                     <button
                       type="button"
@@ -1586,8 +1588,10 @@ function PresetImportView(props: {
 
         {error !== '' && <ErrorBar message={error} t={t} />}
 
-        {/* 落库请求在飞：预览先让位给骨架，避免「点了确认但界面一动不动」 */}
-        {busy && <Skeleton label={t('common.loading')} />}
+        {/* 落库请求在飞：预览先让位给骨架，避免「点了确认但界面一动不动」。
+            骨架形态按「它在替什么」选：这里替的是一条条模块预览 = 列表态 → cards
+            （detail 只留给详情页/表单回读，见 PresetPanel 编辑视图那一处）。 */}
+        {busy && <Skeleton shape="cards" label={t('common.loading')} />}
 
         {!busy && preview !== undefined && (
           <div className="awu-presetPreview">

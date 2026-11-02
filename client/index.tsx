@@ -60,6 +60,7 @@ import {
   sendFailureText,
   useComposerReady,
   useComposerSession,
+  useDistillOverlayOpen,
 } from './distill'
 import {
   dragHasFiles,
@@ -557,8 +558,9 @@ function NewCharacterDialog(props: {
     ? 'var(--awu-ink-mute)'
     : note.tone === 'err' ? 'var(--awu-danger)' : note.tone === 'warn' ? 'var(--awu-gold)' : 'var(--awu-teal)'
 
+  // busy 期间不许 Esc/点遮罩关掉：弹层里的按钮早就 disabled，只有 Overlay 这条路能绕过守卫
   return (
-    <Overlay label={t('new.title')} onClose={close}>
+    <Overlay label={t('new.title')} onClose={close} onRequestClose={() => !locked}>
       <div className="awu-dialogHead">
         <IconMask size={16} />
         <span>{t('new.title')}</span>
@@ -896,7 +898,12 @@ function ImportDialog(props: {
   }
 
   return (
-    <Overlay label={t('import.title')} onClose={close} onFilesDropped={() => setDropHint(t('import.dropHint'))}>
+    <Overlay
+      label={t('import.title')}
+      onClose={close}
+      onRequestClose={() => !locked}
+      onFilesDropped={() => setDropHint(t('import.dropHint'))}
+    >
       <div className="awu-dialogHead">
         <IconImport size={16} />
         <span>{t('import.title')}</span>
@@ -1083,7 +1090,16 @@ function DeleteDialog(props: {
    */
   const [armed, setArmed] = useState(false)
   return (
-    <Overlay label={t('delete.title')} onClose={onCancel}>
+    <Overlay
+      label={t('delete.title')}
+      onClose={onCancel}
+      onRequestClose={() => {
+        if (busy) return false
+        // 已经「上膛」的危险操作：第一次 Esc/点遮罩只卸膛，不直接关（避免把已确认的意图丢掉）
+        if (armed) { setArmed(false); return false }
+        return true
+      }}
+    >
       <div className="awu-dialogHead">
         <IconTrash size={16} />
         <span>{t('delete.title')}</span>
@@ -1139,7 +1155,7 @@ function ModeDialog(props: {
     { value: 'text', icon: <IconText size={16} />, label: t('mode.text'), hint: t('mode.textHint') },
   ]
   return (
-    <Overlay label={t('mode.title')} onClose={onCancel}>
+    <Overlay label={t('mode.title')} onClose={onCancel} onRequestClose={() => !busy}>
       <div className="awu-dialogHead">
         <IconMotion size={16} />
         <span>{t('mode.title')}</span>
@@ -1200,7 +1216,7 @@ function EditDiaryDialog(props: {
     onSave(text.trim())
   }
   return (
-    <Overlay label={t('diary.editTitle')} onClose={onCancel}>
+    <Overlay label={t('diary.editTitle')} onClose={onCancel} onRequestClose={() => !busy}>
       <div className="awu-dialogHead">
         <IconQuill size={16} />
         <span>{t('diary.editTitle')}</span>
@@ -1261,7 +1277,7 @@ function ForgetDialog(props: {
     onForget(keyword.trim())
   }
   return (
-    <Overlay label={t('forget.title')} onClose={onCancel}>
+    <Overlay label={t('forget.title')} onClose={onCancel} onRequestClose={() => !busy}>
       <div className="awu-dialogHead">
         <IconQuill size={16} />
         <span>{t('forget.title')}</span>
@@ -1308,7 +1324,15 @@ function ResetAllDialog(props: {
   /** 两步确认：与 DeleteDialog / ImportDialog 同一口径（见 DeleteDialog 里的说明）。 */
   const [armed, setArmed] = useState(false)
   return (
-    <Overlay label={t('reset.title')} onClose={onCancel}>
+    <Overlay
+      label={t('reset.title')}
+      onClose={onCancel}
+      onRequestClose={() => {
+        if (busy) return false
+        if (armed) { setArmed(false); return false }
+        return true
+      }}
+    >
       <div className="awu-dialogHead">
         <IconAlert size={16} />
         <span>{fresh ? t('reset.sessionTitle', { name }) : t('reset.confirmTitle', { name })}</span>
@@ -1609,11 +1633,13 @@ function CharacterDetailView(props: {
   morphFrom?: { name: string; rect: MorphRect }
   /** 播完（或跳过）后通知面板清掉起点，避免重复播放 */
   onMorphDone?: () => void
+  /** 正在退场（160ms 向左淡出）：根节点挂 data-state，期间不吃指针事件。 */
+  closing?: boolean
 }): JSX.Element {
   const {
     detail, loading, error, relation, live, boundHere, sessionId, busy, t,
     onBack, onRetry, onBindSession, onUnbindSession, onActivate, onDeactivate, onDelete, onEdit,
-    onOpenDiary, onExport, onSwitchMode, onNextOpening, morphFrom, onMorphDone,
+    onOpenDiary, onExport, onSwitchMode, onNextOpening, morphFrom, onMorphDone, closing = false,
   } = props
 
   /**
@@ -1642,6 +1668,23 @@ function CharacterDetailView(props: {
       if (hero !== null) hero.removeAttribute('data-morphing')
     }
   }, [detail, morphFrom, onMorphDone])
+
+  /**
+   * 退场开始：先把还在播的头像 morph 停掉并摘属性。
+   *
+   * 两个动画作用在**同一个元素**上（hero avatar）：morph 写 transform、退场写 opacity/位移，
+   * 期间还挂着 `data-morphing` 会让"退场中"和"共享元素"两套状态同时为真。
+   * 退场是"离开"，优先级更高，所以这里主动 cancel（cancel 会触发 morph 自己的 cleanup）。
+   */
+  useEffect(() => {
+    if (!closing) return
+    const hero = detailRootRef.current?.querySelector<HTMLElement>('.awu-detailHero [data-morph="avatar"]') ?? null
+    if (hero === null) return
+    for (const animation of hero.getAnimations()) {
+      try { animation.cancel() } catch { /* 已结束 */ }
+    }
+    hero.removeAttribute('data-morphing')
+  }, [closing])
 
   if (loading) return <Skeleton label={t('common.loading')} />
 
@@ -1684,7 +1727,19 @@ function CharacterDetailView(props: {
   const recentDiary = recentDiaryLines(detail.diary, DETAIL_DIARY_LINES)
 
   return (
-    <div className="awu-detail" ref={detailRootRef}>
+    <div
+      className="awu-detail"
+      ref={detailRootRef}
+      /*
+        退场（遗留 1）：方向恒为向左 —— 返回落点是左栏列表，进/出不该有两个方向。
+        pointer-events 在退场期关掉：否则 160ms 里还能点到正在淡出的「删除 / 重置」。
+        ⚠️ 玻璃铁律：这里只给**详情内容**加 opacity/transform 动画，
+        `.awu-panel` 及其祖先一律不动（KB 08 §3）。
+      */
+      {...presenceAttrs(closing)}
+      data-exit={closing ? 'left' : undefined}
+      style={closing ? { pointerEvents: 'none' } : undefined}
+    >
       {/*
         返回是一条独立的「导航」，不是「动作」：
         放在详情内容的左上角、单独一行，和启用/删除这类会改变状态的操作彻底分开。
@@ -2321,6 +2376,11 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    * ——宿主不认的 id 不会变成「可用」。
    */
   const sinkSessionId = useComposerSession()
+  /**
+   * 蒸馏弹层是否开着。它自己的 `open` 在 `DistillButton` 里，不在面板的 `dialog` 状态中，
+   * 所以面板级 Esc 必须单独问一句，否则 Esc 会把面板和弹层一起关掉。
+   */
+  const distillOverlayOpen = useDistillOverlayOpen()
   /** 会话 id 的镜像 ref：loadDetail 要在稳定的 useCallback 里读最新值，不让回调身份跟着变。 */
   const sessionIdRef = useRef('')
   useEffect(() => { sessionIdRef.current = sinkSessionId }, [sinkSessionId])
@@ -2404,6 +2464,13 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   // 递增信号：面板要求编辑器「走一遍未保存确认」（点入口/点遮罩时用）
   const [editorCloseSignal, setEditorCloseSignal] = useState(0)
   /**
+   * 保存成功后的编辑器退场（C 项）：置 true → 编辑器播 160ms 再被卸载。
+   * 「取消」路径由 card-editor 自己的 `useLayerExit` 负责，这条只补保存路径，
+   * 两条退出方式观感才一致（从前保存成功是 `setEditing(false)` 直接硬切）。
+   */
+  const [editorClosing, setEditorClosing] = useState(false)
+  const editorExitTimer = useRef<number | undefined>(undefined)
+  /**
    * 「本轮被世界书预算裁掉」的条目（打开编辑器时解析一次）。
    *
    * 来源优先 `GET /character` 的 diag（宿主新加），拿不到才去问 `GET /preview` 的 `lore`；
@@ -2411,9 +2478,15 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const [droppedLore, setDroppedLore] = useState<LoreDroppedInfo | undefined>(undefined)
 
-  // 编辑器关掉后清脏标记，避免下次打开误拦
+  // 编辑器关掉后清脏标记，避免下次打开误拦；顺便复位退场标记
   useEffect(() => {
-    if (!editing) setEditorDirty(false)
+    if (editing) return
+    setEditorDirty(false)
+    setEditorClosing(false)
+    if (editorExitTimer.current !== undefined) {
+      window.clearTimeout(editorExitTimer.current)
+      editorExitTimer.current = undefined
+    }
   }, [editing])
 
   /**
@@ -2699,7 +2772,10 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   /** 日记页要展示的角色名（空串 = 既没选也没启用）。 */
   const diaryTarget = tab === 'diary' ? subjectName : ''
   useEffect(() => {
-    if (subjectName === '') { setDetail(undefined); return }
+    // 空串时**不清 `detail`**：详情退场那 160ms 还要用它渲染上一次那张卡
+    // （清掉的话 `currentDetail` 变 undefined，视图会退回骨架屏，`data-exit` 动画就没对象了）。
+    // 串卡风险由 `currentDetail` / `diaryDetail` 的名字守卫挡住，不会显示错人。
+    if (subjectName === '') return
     void loadDetail(subjectName)
   }, [subjectName, loadDetail])
 
@@ -2882,7 +2958,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     const onKeyDown = (event: KeyboardEvent): void => {
       // 编辑器打开时 dialog 恰好是空串 —— 必须显式排除 editing，否则 Esc 会先关面板、
       // 编辑器随之卸载，用户未保存的改动一起没了。
-      if (event.key === 'Escape' && dialog === '' && !editing) {
+      // 蒸馏弹层同理：它不在面板的 `dialog` 状态里（由 `DistillButton` 自己持有 open），
+      // 不排除的话在蒸馏弹层里按 Esc 会把面板和弹层一起关掉（实测复现，2026-11-02 修）。
+      if (event.key === 'Escape' && dialog === '' && !editing && !distillOverlayOpen) {
         event.stopPropagation()
         setOpen(false)
       }
@@ -2893,7 +2971,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [open, dialog, editing, editorDirty])
+  }, [open, dialog, editing, editorDirty, distillOverlayOpen])
 
   // -------------------------------------------------------- 动作
   //
@@ -2949,7 +3027,9 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       }
       try {
         await deleteCharacter(target, withMemory)
-        if (detailName === target) { setDetailName(''); setDetail(undefined) }
+        // 删掉的正是当前详情：只清名字（触发退场），**不清 `detail`** ——
+        // 清掉的话这 160ms 里视图会退回骨架屏，退场动画就没对象了（与 closeDetail 同一口径）。
+        if (detailName === target) setDetailName('')
         showNotice(withMemory ? t('delete.doneWithMemory') : t('delete.done'), 'ok')
       } finally {
         setDeletingName('')
@@ -3115,7 +3195,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
           }
         }
         setDetail(fresh)
-        setEditing(false)
+        /*
+          保存成功不再直接 `setEditing(false)`（那会当场卸载、`.awu-editor` 的退场动画没对象可动）。
+          改成：先置 `editorClosing` 让根节点挂上 `data-state="closing"`，T_EXIT 之后再真正卸载。
+          计时器只用一个（重复保存不会叠加），并在 `editing` 变 false 时统一清掉。
+        */
+        setEditorClosing(true)
+        if (editorExitTimer.current !== undefined) window.clearTimeout(editorExitTimer.current)
+        editorExitTimer.current = window.setTimeout(() => {
+          editorExitTimer.current = undefined
+          if (aliveRef.current) setEditing(false)
+        }, T_EXIT)
         notifySaved(payload.loreChanged && !payload.structureChanged ? t('lore.saved') : t('edit.saved'), warnings)
         await reload()
       } catch (error) {
@@ -3177,7 +3267,25 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
     return () => { cancelled = true }
   }, [liveName])
 
-  const currentDetail = detailName !== '' && detailName === detail?.name ? detail : undefined
+  /**
+   * 详情视图的退场（契约 §2.2 / 遗留 1）：返回列表时先跑 160ms 再卸载，方向恒为「向左」。
+   *
+   * 为什么方向只有一种：`data-exit="left"` 对应「回到左栏列表」。窄屏 push 返回走的是
+   * 同一条路径（`closeDetail`），所以不另做一套右退。
+   *
+   * 退场期间要继续渲染**上一次那张详情**，否则 `detailName` 一清空、分支就没了，
+   * 动画对象也随之消失（和弹层宿主 `lastDialogRef` 是同一个问题）。
+   */
+  const detailOpen = tab === 'roster' && detailName !== ''
+  const detailPresence = usePresence(detailOpen, T_EXIT)
+  const lastDetailNameRef = useRef('')
+  useEffect(() => {
+    if (detailName !== '') lastDetailNameRef.current = detailName
+  }, [detailName])
+  /** 退场期沿用上一次的名字；为空串 = 真的没有详情可渲染。 */
+  const detailSubject = detailName !== '' ? detailName : (detailPresence.closing ? lastDetailNameRef.current : '')
+
+  const currentDetail = detailSubject !== '' && detailSubject === detail?.name ? detail : undefined
   // 日记页用的是 detailName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
   const diaryDetail = diaryTarget !== '' && detail !== undefined && detail.name === diaryTarget ? detail : undefined
 
@@ -3276,7 +3384,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       : document.querySelector<HTMLElement>('.awu-detailHero [data-morph="avatar"]')
     returnMorphRef.current = hero === null || detailName === '' ? null : { name: detailName, rect: rectOf(hero) }
     setDetailName('')
-    setDetail(undefined)
+    // 注意：**不清 `detail`** —— 退场 160ms 里还要拿它渲染上一次那张详情。
+    // 下一次打开会由 `loadDetail` 覆盖（`currentDetail` 有名字守卫，不会串卡）。
     setDetailError('')
     returnToList()
   }, [returnToList, detailName])
@@ -3667,6 +3776,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
               error={editError}
               closeSignal={editorCloseSignal}
               onDirtyChange={setEditorDirty}
+              closing={editorClosing}
               onCancel={() => setEditing(false)}
               onSave={onSaveCard}
               t={t}
@@ -4064,29 +4174,35 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 tabIndex={0}
                 aria-busy={busy}
               >
-                {tab === 'roster' && (detailName !== '' ? (
+                {/*
+                  详情渲染条件 = `presence.mounted || detailName !== ''`：
+                  - presence 首帧还没 mounted，但用户已经点了卡 → 不能闪一下「未选卡」空态；
+                  - 退场期间 detailName 已清空但 mounted 仍为 true → 继续渲染，让 160ms 动画有对象。
+                */}
+                {tab === 'roster' && ((detailPresence.mounted || detailName !== '') ? (
                   <CharacterDetailView
                     /* 换卡就重挂：`.awu-detail` 的 CSS 进场（awu-slide-in，从右 +8px）才会真的重播；
                        否则同一个 tab 内换对象只是内容替换，没有任何"进去了"的手感。 */
-                    key={detailName}
+                    key={detailSubject}
                     detail={currentDetail}
                     loading={detailLoading}
                     error={detailError}
                     relation={relation}
-                    live={live && liveName === detailName}
-                    boundHere={isBoundHere(detailName)}
+                    live={live && liveName === detailSubject}
+                    boundHere={isBoundHere(detailSubject)}
+                    closing={detailPresence.closing}
                     sessionId={sessionId}
                     busy={busy}
                     t={t}
                     onBack={closeDetail}
-                    onRetry={() => { void loadDetail(detailName) }}
-                    onBindSession={() => onBindSession(detailName)}
+                    onRetry={() => { void loadDetail(detailSubject) }}
+                    onBindSession={() => onBindSession(detailSubject)}
                     onUnbindSession={onUnbindSession}
-                    onActivate={() => onActivate(detailName)}
+                    onActivate={() => onActivate(detailSubject)}
                     onDeactivate={onDeactivate}
-                    onDelete={() => openDelete(detailName)}
-                    onEdit={() => { setEditError(''); setEditing(true) }}
-                    onOpenDiary={() => onOpenDiaryOf(detailName)}
+                    onDelete={() => openDelete(detailSubject)}
+                    onEdit={() => { setEditError(''); setEditorClosing(false); setEditing(true) }}
+                    onOpenDiary={() => onOpenDiaryOf(detailSubject)}
                     onExport={onExportDetail}
                     onSwitchMode={() => openDialog('mode')}
                     onNextOpening={onNextOpening}

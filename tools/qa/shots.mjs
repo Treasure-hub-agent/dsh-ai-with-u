@@ -66,6 +66,17 @@ const SCENES = [
   { name: 'light-guide', url: '/', w: 1440, h: 900, steps: [tabOf('指南')], note: '浅色 · 指南（阅读面排版）' },
   { name: 'light-dialog', url: '/?live=1', w: 1440, h: 900, steps: [clickText('自创角色卡')], note: '浅色 · 新建角色弹层' },
   { name: 'light-editor', url: '/?live=1', w: 1440, h: 900, steps: [DETAIL, `setTimeout(()=>{[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='编辑')?.click()},700)`], note: '浅色 · 角色卡编辑器' },
+  // ---- 加载态 / 报错态（`?slow=` / `?fail=` 沙盒开关，见 tools/preview/preview.tsx 文件头）
+  // 注 1：这两类界面以前从没被截过——沙盒没有 /presets、/preview 路由，面板永远走
+  //       「宿主接口还没做」的黄色提示。
+  // 注 2：slow 用 30000 而不是 1200/2500/6000。从导航到截图的耗时**不稳定**
+  //       （实测 2.6s ~ 10s：目标创建、重试、每一步 700ms 都在里面），任何"够用就好"的
+  //       延迟都会偶尔截到"刚加载完"的图（已经撞到两次）。所以直接把延迟拉到远大于
+  //       场景时长，保证截图一定落在加载态里 —— 这张图要证明的就是"加载时长什么样"。
+  { name: 'preset-loading', url: '/?slow=30000', w: 1200, h: 820, steps: [clickText('预设')], note: '加载态 · 预设列表骨架（?slow=30000）' },
+  { name: 'preset-error', url: '/?fail=presets', w: 1200, h: 820, steps: [clickText('预设')], note: '报错态 · 预设列表 ErrorBar（?fail=presets）' },
+  { name: 'preview-loading', url: '/?slow=30000', w: 1200, h: 820, steps: [clickText('预览')], note: '加载态 · 注入预览 Skeleton（?slow=30000）' },
+  { name: 'preview-error', url: '/?fail=preview', w: 1200, h: 820, steps: [clickText('预览')], note: '报错态 · 注入预览 ErrorBar（?fail=preview）' },
   // ---- 深色 · 同上
   { name: 'dark-roster', url: '/?live=1#dark', w: 1440, h: 900, steps: [DETAIL], note: '深色 · 角色簿 + 详情' },
   { name: 'dark-diary', url: '/?live=1#dark', w: 1440, h: 900, steps: [tabOf('日记')], note: '深色 · 日记' },
@@ -127,6 +138,7 @@ try {
   })
 
   for (const scene of scenes) {
+    const sceneStartedAt = Date.now()
     const { result: target } = await send('Target.createTarget', { url: 'about:blank' })
     const { result: attached } = await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })
     const sid = attached.sessionId
@@ -138,7 +150,20 @@ try {
     if (MEDIA_FEATURES.length > 0) {
       await send('Emulation.setEmulatedMedia', { features: MEDIA_FEATURES }, sid)
     }
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}${scene.url}` }, sid)
+    // 目标刚创建就导航，偶发 `net::ERR_ABORTED`（about:blank 还没加载完就被打断），
+    // 结果是截到一张几乎空白的图 —— 这种"假截图"比没截更糟，所以失败就重试，并留痕。
+    {
+      let nav = await send('Page.navigate', { url: `http://127.0.0.1:${port}${scene.url}` }, sid)
+      for (let attempt = 0; attempt < 3 && (nav.error !== undefined || nav.result?.errorText); attempt += 1) {
+        await sleep(250)
+        nav = await send('Page.navigate', { url: `http://127.0.0.1:${port}${scene.url}` }, sid)
+      }
+      const href = await send('Runtime.evaluate', { expression: 'location.href', returnByValue: true }, sid)
+      const got = href.result?.result?.value
+      if (typeof got !== 'string' || !got.startsWith(`http://127.0.0.1:${port}`)) {
+        console.error(`  ! ${scene.name} 导航失败（停在 ${String(got)}）—— 这张图不可信`)
+      }
+    }
     await sleep(1200)
     for (const code of scene.steps) {
       const r = await send('Runtime.evaluate', { expression: code, awaitPromise: true, returnByValue: true }, sid)
@@ -152,7 +177,8 @@ try {
     const file = join(outDir, `${scene.name}${mediaSuffix}.png`)
     await writeFile(file, Buffer.from(shot.result.data, 'base64'))
     const size = (await readdir(outDir)).length
-    console.log(`✓ ${scene.name}  ${scene.w}×${scene.h}  ${scene.note}  (${size} 张)`)
+    // 打一下"从导航到截图"的耗时：加载态场景靠它判断到底有没有落在 loading 窗口里
+    console.log(`✓ ${scene.name}  ${scene.w}×${scene.h}  ${scene.note}  (${size} 张，+${Date.now() - sceneStartedAt}ms)`)
     rows.push({ ...scene, file })
     await send('Target.closeTarget', { targetId: target.targetId })
   }

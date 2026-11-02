@@ -49,6 +49,22 @@ export function useScrollLock(active: boolean): void {
 export const DialogLayerContext = createContext<boolean>(false)
 
 /**
+ * 让弹层内的按钮也能走「先问 onRequestClose」这条路径。
+ *
+ * 背景：Overlay 只能拦截**它自己**能看到的三个入口（Esc、点遮罩、以及由它托管的外壳按钮）；
+ * 弹层正文里的「取消 / 关闭」按钮是 children，它们的 onClick 由调用方给。
+ * 如果调用方需要同一套拦截（比如"有未保存内容时别关"），不要在外面 patch 一套判断，
+ * 而是在按钮里调这个 hook 拿到 requestClose —— 语义与 Esc 完全一致，不会出现
+ * 「Esc 拦得住、按钮拦不住」这种两套口径。
+ */
+const OverlayRequestCloseContext = createContext<(() => void) | null>(null)
+
+/** 取当前 Overlay 的 `requestClose`（不在 Overlay 内时返回 null）。 */
+export function useOverlayRequestClose(): (() => void) | null {
+  return useContext(OverlayRequestCloseContext)
+}
+
+/**
  * 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。
  *
  * 另外**吞掉落在弹层上的文件拖放**：`.awu-scrim` 是 fixed 全屏遮罩，用户拖一张卡进来时
@@ -75,8 +91,17 @@ export function Overlay(props: {
    * 正确做法参照 `card-editor.tsx` 的 loreFocus 让位。
    */
   escYield?: boolean
+  /**
+   * 关闭前的拦截钩子：**返回 `false` 表示这次不要关**。
+   *
+   * 用途：弹层内部有"关了就丢"的状态（未保存草稿、已上膛的危险操作、正在提交）时，
+   * 由弹层决定这次 Esc / 点遮罩算不算数。**不要**在调用方自己 patch 一套判断 ——
+   * 那样 Esc 与按钮会变成两套口径（这次的 `card-editor` 硬切就是没走这条路的代价）。
+   * 不传时行为与从前逐字一致（永远放行）。
+   */
+  onRequestClose?: () => boolean
 }): JSX.Element {
-  const { label, onClose, children, onFilesDropped, escYield = false } = props
+  const { label, onClose, children, onFilesDropped, escYield = false, onRequestClose } = props
   const boxRef = useRef<HTMLDivElement | null>(null)
   /**
    * 退场态由宿主（CharacterPanel 的弹层宿主）通过 context 广播：
@@ -101,6 +126,16 @@ export function Overlay(props: {
   }, [])
 
   useScrollLock(true)
+
+  /**
+   * 关闭请求的唯一入口（Esc / 点遮罩 / 子节点按钮都走它）。
+   * 退场中直接吃掉：这一层已经在走，再 close 一次只会重置计时。
+   */
+  const requestClose = useCallback((): void => {
+    if (closing) return
+    if (onRequestClose !== undefined && onRequestClose() === false) return
+    onClose()
+  }, [closing, onRequestClose, onClose])
 
   // 焦点顺序不能换：先记回来处 → 再把焦点送进容器 → 最后拦 Tab。
   useRestoreFocus()
@@ -136,12 +171,12 @@ export function Overlay(props: {
         // 内层自己会 stop；不同文档级监听靠注册顺序不会互相拦掉）。
         if (escYield) return
         event.stopPropagation()
-        onClose()
+        requestClose()
       }
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose, escYield, closing])
+  }, [requestClose, escYield, closing])
 
   // 兜底：弹层卸载时再复位一次——万一拖放在中途被别的东西吃掉（Esc、焦点切换）
   // 没走到 drop，宿主的计数器也得有人归零
@@ -155,7 +190,7 @@ export function Overlay(props: {
       /* scrim 与 dialog 都要挂 data-state：只挂 dialog 的话遮罩层会硬切消失（契约 §2.2） */
       {...presenceAttrs(closing)}
       onMouseDown={event => {
-        if (event.target === event.currentTarget && !closing) onClose()
+        if (event.target === event.currentTarget && !closing) requestClose()
       }}
       onDragOver={swallowFileDrag}
       onDrop={event => {
@@ -175,7 +210,9 @@ export function Overlay(props: {
       >
         {/* TODO（第 3 批）：`distill.tsx:483` 还有一份自建的 scrim + dialog 副本，
             退场属性得两边同步；第 3 批把它换回这里的 Overlay 之后这段注释可删。 */}
-        {children}
+        <OverlayRequestCloseContext.Provider value={requestClose}>
+          {children}
+        </OverlayRequestCloseContext.Provider>
       </div>
     </div>,
     document.body,

@@ -82,6 +82,95 @@
         "我把鼓搬回来了\n\n……不是大鼓，就一套电鼓！很小！\n\n你不许说不行——"
       ]
     },
+    "ccv3": {
+      "spec": "chara_card_v3",
+      "spec_version": "3.0",
+      "data": {
+        "name": "虞照",
+        "description": "（沙盒合成卡：只用来让世界书与注入快照有东西可渲染，不是真实角色卡）",
+        "character_book": {
+          "name": "测试世界书",
+          "description": "沙盒合成世界书：1 条常驻 + 2 条关键词 + 1 条停用，用来验折叠、等级徽记与启用开关",
+          "scan_depth": 4,
+          "token_budget": 1200,
+          "recursive_scanning": false,
+          "extensions": {},
+          "entries": [
+            {
+              "id": 0,
+              "name": "合租房设定",
+              "keys": [],
+              "secondary_keys": [],
+              "content": "你们合租的两居室在城西老小区五楼，没有电梯。客厅那盏灯坏了一个月，谁都没换。",
+              "enabled": true,
+              "constant": true,
+              "insertion_order": 10,
+              "priority": 10,
+              "position": "before_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            },
+            {
+              "id": 1,
+              "name": "便利贴习惯",
+              "keys": [
+                "便利贴",
+                "早饭"
+              ],
+              "secondary_keys": [],
+              "content": "他每天出门前在显示器边上贴一张便利贴，写的都是今晚吃什么，末了一定加一句「记得吃早饭」。",
+              "enabled": true,
+              "constant": false,
+              "insertion_order": 20,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            },
+            {
+              "id": 2,
+              "name": "不喜欢雨天",
+              "keys": [
+                "下雨",
+                "伞"
+              ],
+              "secondary_keys": [
+                "雨天"
+              ],
+              "content": "他不太喜欢雨天，但从不解释为什么；伞永远往你那边偏。",
+              "enabled": true,
+              "constant": false,
+              "insertion_order": 30,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": true,
+              "use_regex": false
+            },
+            {
+              "id": 3,
+              "name": "旧书与书店（已停用）",
+              "keys": [
+                "旧书",
+                "书店"
+              ],
+              "secondary_keys": [],
+              "content": "他做旧书修复，工作台在阳台，手上常年有纸毛刺的味道。",
+              "enabled": false,
+              "constant": false,
+              "insertion_order": 40,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            }
+          ]
+        }
+      }
+    },
     "diary": [],
     "session": {},
     "relation": {
@@ -500,6 +589,95 @@
         "我把鼓搬回来了\n\n……不是大鼓，就一套电鼓！很小！\n\n你不许说不行——"
       ]
     },
+    "ccv3": {
+      "spec": "chara_card_v3",
+      "spec_version": "3.0",
+      "data": {
+        "name": "虞照",
+        "description": "（沙盒合成卡：只用来让世界书与注入快照有东西可渲染，不是真实角色卡）",
+        "character_book": {
+          "name": "测试世界书",
+          "description": "沙盒合成世界书：1 条常驻 + 2 条关键词 + 1 条停用，用来验折叠、等级徽记与启用开关",
+          "scan_depth": 4,
+          "token_budget": 1200,
+          "recursive_scanning": false,
+          "extensions": {},
+          "entries": [
+            {
+              "id": 0,
+              "name": "合租房设定",
+              "keys": [],
+              "secondary_keys": [],
+              "content": "你们合租的两居室在城西老小区五楼，没有电梯。客厅那盏灯坏了一个月，谁都没换。",
+              "enabled": true,
+              "constant": true,
+              "insertion_order": 10,
+              "priority": 10,
+              "position": "before_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            },
+            {
+              "id": 1,
+              "name": "便利贴习惯",
+              "keys": [
+                "便利贴",
+                "早饭"
+              ],
+              "secondary_keys": [],
+              "content": "他每天出门前在显示器边上贴一张便利贴，写的都是今晚吃什么，末了一定加一句「记得吃早饭」。",
+              "enabled": true,
+              "constant": false,
+              "insertion_order": 20,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            },
+            {
+              "id": 2,
+              "name": "不喜欢雨天",
+              "keys": [
+                "下雨",
+                "伞"
+              ],
+              "secondary_keys": [
+                "雨天"
+              ],
+              "content": "他不太喜欢雨天，但从不解释为什么；伞永远往你那边偏。",
+              "enabled": true,
+              "constant": false,
+              "insertion_order": 30,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": true,
+              "use_regex": false
+            },
+            {
+              "id": 3,
+              "name": "旧书与书店（已停用）",
+              "keys": [
+                "旧书",
+                "书店"
+              ],
+              "secondary_keys": [],
+              "content": "他做旧书修复，工作台在阳台，手上常年有纸毛刺的味道。",
+              "enabled": false,
+              "constant": false,
+              "insertion_order": 40,
+              "priority": 10,
+              "position": "after_char",
+              "case_sensitive": false,
+              "selective": false,
+              "use_regex": false
+            }
+          ]
+        }
+      }
+    },
     "diary": [
       {
         "date": "2026-10-29",
@@ -518,6 +696,15 @@
           "问我要不要过去吃饭。"
         ],
         "notes": []
+      },
+      {
+        "date": "2026-09-12",
+        "timeline": [
+          "（上个月的事）他第一次在便利贴上写「记得吃早饭」。"
+        ],
+        "notes": [
+          "那天之后便利贴就没断过。"
+        ]
       }
     ],
     "session": {
@@ -587,5 +774,224 @@
         "memoryCount": 0
       }
     ]
+  },
+  "presets": {
+    "ok": true,
+    "presets": [
+      {
+        "id": "test-a",
+        "name": "测试预设A · 克制文风",
+        "source": "custom",
+        "moduleCount": 4,
+        "enabledCount": 3,
+        "chars": 1240,
+        "updatedAt": "2026-10-31T10:00:00+08:00"
+      },
+      {
+        "id": "test-b",
+        "name": "测试预设B · 重体积",
+        "source": "st",
+        "moduleCount": 9,
+        "enabledCount": 8,
+        "chars": 24856,
+        "updatedAt": "2026-10-30T09:00:00+08:00"
+      },
+      {
+        "id": "test-c",
+        "name": "测试预设C · 空模块",
+        "source": "custom",
+        "moduleCount": 0,
+        "enabledCount": 0,
+        "chars": 0
+      }
+    ],
+    "active": {
+      "global": "test-a"
+    }
+  },
+  "presetDetails": {
+    "test-a": {
+      "ok": true,
+      "active": {
+        "global": "test-a"
+      },
+      "preset": {
+        "id": "test-a",
+        "name": "测试预设A · 克制文风",
+        "source": "custom",
+        "chars": 1240,
+        "modules": [
+          {
+            "name": "文风",
+            "enabled": true,
+            "content": "（沙盒合成模块）用短句，少形容词；一段不超过三行。"
+          },
+          {
+            "name": "语气",
+            "enabled": true,
+            "content": "（沙盒合成模块）口语，不用书面语连接词；不用感叹号堆情绪。"
+          },
+          {
+            "name": "越狱",
+            "enabled": true,
+            "content": "（沙盒合成模块）保持角色视角，不跳出人物解释设定。"
+          },
+          {
+            "name": "回复规则",
+            "enabled": false,
+            "content": "（沙盒合成模块）默认 2-3 段，用户要求长回复时再展开。"
+          }
+        ]
+      }
+    },
+    "test-b": {
+      "ok": true,
+      "active": {
+        "global": "test-a"
+      },
+      "preset": {
+        "id": "test-b",
+        "name": "测试预设B · 重体积",
+        "source": "st",
+        "chars": 24856,
+        "modules": [
+          {
+            "name": "System Prompt",
+            "enabled": true,
+            "content": "（沙盒合成模块）这是一条用于验证「重体积」提示的长模块占位文本。重复内容仅用于凑字符数。"
+          },
+          {
+            "name": "Jailbreak",
+            "enabled": true,
+            "content": "（沙盒合成模块）jailbreak 占位。"
+          },
+          {
+            "name": "NSFW",
+            "enabled": false,
+            "content": "（沙盒合成模块）停用模块占位。"
+          },
+          {
+            "name": "Enhance Definitions",
+            "enabled": true,
+            "content": "（沙盒合成模块）增强定义占位。"
+          },
+          {
+            "name": "Author's Note",
+            "enabled": true,
+            "content": "（沙盒合成模块）作者注占位。"
+          },
+          {
+            "name": "World Info (before)",
+            "enabled": true,
+            "content": "（沙盒合成模块）世界书前置占位。"
+          },
+          {
+            "name": "World Info (after)",
+            "enabled": true,
+            "content": "（沙盒合成模块）世界书后置占位。"
+          },
+          {
+            "name": "Post-History Instructions",
+            "enabled": true,
+            "content": "（沙盒合成模块）历史后指令占位。"
+          },
+          {
+            "name": "Vector Storage",
+            "enabled": true,
+            "content": "（沙盒合成模块）向量库占位。"
+          }
+        ]
+      }
+    },
+    "test-c": {
+      "ok": true,
+      "active": {
+        "global": "test-a"
+      },
+      "preset": {
+        "id": "test-c",
+        "name": "测试预设C · 空模块",
+        "source": "custom",
+        "chars": 0,
+        "modules": []
+      }
+    }
+  },
+  "preview": {
+    "ok": true,
+    "active": {
+      "enabled": true,
+      "character": "虞照"
+    },
+    "mode": "text+action",
+    "discipline": "lite",
+    "total": 3556,
+    "segments": [
+      {
+        "id": "aiwu:baseline",
+        "order": 0,
+        "label": "L0 底线",
+        "chars": 96,
+        "text": "（沙盒合成段）你是一个角色扮演引擎的一部分，保持人物一致，不替用户做决定。"
+      },
+      {
+        "id": "aiwu:discipline",
+        "order": 5000,
+        "label": "纪律包（lite）",
+        "chars": 420,
+        "text": "（沙盒合成段）纪律包 lite：保持视角、不跳出角色解释系统设定、不代替用户行动。"
+      },
+      {
+        "id": "aiwu:preset",
+        "order": 5080,
+        "label": "预设：测试预设A · 克制文风",
+        "chars": 1240,
+        "text": "（沙盒合成段）文风：短句，少形容词。语气：口语。越狱：不跳出人物。"
+      },
+      {
+        "id": "aiwu:active-character",
+        "order": 5100,
+        "label": "L1 角色设定",
+        "chars": 860,
+        "text": "（沙盒合成段）虞照，26 岁，两个月前搬进你合租房的室友……（此处为沙盒占位，不含真实角色卡正文）"
+      },
+      {
+        "id": "aiwu:lore",
+        "order": 5200,
+        "label": "世界书命中（2 条）",
+        "chars": 940,
+        "text": "（沙盒合成段）合租房设定：城西老小区五楼，没有电梯。便利贴习惯：每天出门前留一张。"
+      },
+      {
+        "id": "aiwu:clock",
+        "order": 9000,
+        "label": "时间差",
+        "chars": 0,
+        "text": ""
+      }
+    ],
+    "lore": {
+      "maxEntries": 6,
+      "budgetChars": 1200,
+      "constantBudgetChars": 600,
+      "usedChars": 940,
+      "count": 4,
+      "constantCount": 1,
+      "hitCount": 2,
+      "constantDropped": [
+        {
+          "id": 5,
+          "name": "常驻条目·超出预算示例",
+          "chars": 620
+        }
+      ],
+      "keywordDropped": [
+        {
+          "id": 6,
+          "name": "关键词命中·超预算示例",
+          "chars": 480
+        }
+      ]
+    }
   }
 }

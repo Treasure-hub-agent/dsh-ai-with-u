@@ -145,7 +145,11 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
       <div className="awu-dialogBody">
         <div className="awu-hint" style={{ marginBottom: 10 }}>{t('preview.hint')}</div>
 
-        {loading && data === undefined && <Skeleton label={t('preview.loading')} />}
+        {/*
+          加载骨架：`cards` 而非 `detail` —— 它替的是一串「注入段」（列表态），
+          `detail` 只用于详情页/表单回读（见预设编辑页那一处）。
+        */}
+        {loading && data === undefined && <Skeleton shape="cards" label={t('preview.loading')} />}
 
         {unavailable && <div className="awu-hint" data-tone="warn">{t('preview.unavailable')}</div>}
 

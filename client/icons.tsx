@@ -88,6 +88,28 @@ export const IconBack = icon(<path d="M9.8 3.4 5.2 8l4.6 4.6" />)
 /** 前进 / 进入详情。 */
 export const IconChevron = icon(<path d="M6.2 3.4 10.8 8l-4.6 4.6" />)
 
+/**
+ * 上移 / 下移（列表项的排序按钮）。
+ *
+ * 为什么要专门两枚：以前这两处是「把右箭头旋转 ±90°」凑出来的，属于用 transform 假装图标 ——
+ * 语义靠 CSS 内联样式表达，图标本身不是「上下」的形状，视觉重量也和真箭头不一样。
+ * 造型跟 `IconImport` / `IconDownload` 那套「杆 + 箭头」保持一致（16 格视野、描边 1.4、圆头）。
+ */
+export const IconUp = icon(
+  <>
+    <path d="M8 13.2V3.4" />
+    <path d="M3.6 7.8 8 3.4l4.4 4.4" />
+  </>,
+)
+
+/** 下移。 */
+export const IconDown = icon(
+  <>
+    <path d="M8 2.8v9.8" />
+    <path d="M3.6 8.2 8 12.6l4.4-4.4" />
+  </>,
+)
+
 /** 加号。 */
 export const IconPlus = icon(<path d="M8 3.4v9.2M3.4 8h9.2" />)
 

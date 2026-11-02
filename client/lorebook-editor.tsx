@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 
 import { FocusEditor } from './editor-focus'
-import { IconAlert, IconChevron, IconPlus, IconTrash } from './icons'
+import { IconAlert, IconChevron, IconDown, IconPlus, IconTrash, IconUp } from './icons'
 import { T_EXIT, presenceAttrs, usePresence } from './motion'
 import {
   LORE_BUDGET,
@@ -183,9 +183,9 @@ function LoreEntryCard(props: {
             aria-label={`${t('lore.moveUp')}：${shownLabel}`}
             onClick={() => onMove(-1)}
           >
-            <IconChevron size={12} style={{ transform: 'rotate(-90deg)' }} />
-            {/* 静态旋转（把右箭头转到朝上）：没有状态变化，所以不需要过渡；
-                正解是 icons.tsx 补 IconUp/IconDown（不在本批写域，已登记进汇报）。 */}
+            {/* 上移：用专门的 IconUp，不再把右箭头 rotate(-90deg) 假装成上箭头
+                （静态旋转没有过渡可言，且图标本身的形状/重量都不对） */}
+            <IconUp size={12} />
           </button>
           <button
             type="button"
@@ -195,7 +195,7 @@ function LoreEntryCard(props: {
             aria-label={`${t('lore.moveDown')}：${shownLabel}`}
             onClick={() => onMove(1)}
           >
-            <IconChevron size={12} style={{ transform: 'rotate(90deg)' }} />
+            <IconDown size={12} />
           </button>
           <button
             type="button"

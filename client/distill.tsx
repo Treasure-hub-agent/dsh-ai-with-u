@@ -28,8 +28,8 @@
  *      `DialogLayerContext.Provider` 驱动（`Overlay` 自己不接 `open`，卸载时机归调用方）。
  * 同时它落到 `.awu-dialog` 的标准几何（620 宽 / 24 圆角），
  * 旧的 `.awu-distill-dialog`（760 宽 / 16 圆角）覆盖类不再被使用 —— CSS 侧可删（属 CSS 写域）。
- * 仍留在本文件的唯一一处「自建」是 `close()` 里的 `busy` 守卫：`Overlay` 没有 `closable` 类入参，
- * 忙碌期禁止关闭只能由调用方在 `onClose` 里守（已在汇报里登记给 parts.tsx 的 owner）。
+ * 「忙碌期不许关」这条也不再靠本文件的守卫：`Overlay` 的 `onRequestClose={() => !busy}` 是
+ * Esc / 点遮罩的同一套拦截（`parts.tsx` 的 `onRequestClose`），本文件不再自己 patch 关闭判断。
  *
  * 发送契约（2026-10-14 / 10-17 对已安装 desktop 0.2.0-rc.2 实测，来源：本机 dsh-story 头部注释）：
  *  - `InputActions = { captureInsertion(), insertText(text, span) → boolean, setDraft(text), …, submit() }`；
@@ -142,6 +142,39 @@ export function DockSink(props: {
   }, [input])
 
   return null
+}
+
+/**
+ * 蒸馏弹层当前是否开着（模块级计数 + 订阅）。
+ *
+ * 为什么面板需要知道这件事：蒸馏弹层**不在面板的 `dialog` 状态里** —— 它由 `DistillButton`
+ * 自己持有 `open`。而面板级的 Esc 判断是「dialog 为空 且 不在编辑 → 关面板」，于是
+ * 在蒸馏弹层里按 Esc 会**连面板一起关掉**（实测：120ms 后 panel 进 closing）。
+ * 旧版是蒸馏自己监听文档级 Esc，同样抢不过面板（注册更晚），属存量问题。
+ * 现在给面板一个明确的判据：还有几层我们自己的浮层开着。
+ */
+let overlayOpenCount = 0
+const overlayListeners = new Set<(open: boolean) => void>()
+
+const notifyOverlay = (): void => {
+  const open = overlayOpenCount > 0
+  for (const listener of overlayListeners) listener(open)
+}
+
+/** 非 React 读取（给事件回调用）。 */
+export function distillOverlayOpen(): boolean {
+  return overlayOpenCount > 0
+}
+
+/** 订阅版本（给面板的 Esc 判断用）。 */
+export function useDistillOverlayOpen(): boolean {
+  const [open, setOpen] = useState<boolean>(() => overlayOpenCount > 0)
+  useEffect(() => {
+    overlayListeners.add(setOpen)
+    setOpen(overlayOpenCount > 0)
+    return () => { overlayListeners.delete(setOpen) }
+  }, [])
+  return open
 }
 
 /** dock 是否已拿到可用的输入框（决定面板按钮写「发送」还是「输入框未就绪」）。 */
@@ -402,12 +435,11 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
    * 关闭：**没发出去就 disarm**，把这次窗口收掉（否则上一条 arm 会一直挂着）；
    * 发出去了才 onDone()，让外层刷新/收尾。
    *
-   * ⚠️ 换到 `Overlay` 之后，`busy` 期禁止关闭这条语义**只能在这里守**：`Overlay` 的 Esc / 点遮罩
-   * 都会直接调 `onClose`，它没有 `closable` 之类的开关（缺这个 prop 已登记给 parts.tsx 的 owner）。
-   * 所以 busy 时这里直接 return，行为与旧的自建 Esc 监听（`if (… || busy) return`）一致。
+   * 「忙碌期不许关」**不在这里守**：那属于「这次 Esc/点遮罩算不算数」，交给 `Overlay` 的
+   * `onRequestClose={() => !busy}`（见下面的 JSX）。弹层内两个关闭按钮本来就是
+   * `disabled={busy}`，所以三条路径口径一致，不会出现「Esc 拦得住、按钮拦不住」。
    */
   const close = useCallback((): void => {
-    if (busy) return
     if (!sentRef.current) {
       void disarmDistill().catch((error: unknown) => {
         console.error('[ai-with-u] 取消蒸馏时 disarm 失败（不影响使用）', error)
@@ -416,7 +448,7 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
       onDone()
     }
     onClose()
-  }, [busy, onClose, onDone])
+  }, [onClose, onDone])
 
   const reasonText = (reason: 'no-dock' | 'flow-failed' | 'insert-failed' | 'submit-failed'): string =>
     sendFailureText(reason, t)
@@ -476,7 +508,16 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
     尺寸覆盖类因此不再使用（CSS 侧可删，属 CSS 写域）。
   */
   return (
-    <Overlay label={t('distill.title')} onClose={close}>
+    <Overlay
+      label={t('distill.title')}
+      onClose={close}
+      /*
+        忙碌期（arm / send 在飞）这次 Esc / 点遮罩不算数：返回 false 由 Overlay 吃掉。
+        口径与旧的自建 Esc 监听（`if (… || busy) return`）一致，但改成走共享拦截器，
+        弹层内按钮将来若去掉 `disabled` 也不会绕过它。
+      */
+      onRequestClose={() => !busy}
+    >
       <div className="awu-dialogHead">
         <IconQuill size={16} />
         <span>{t('distill.title')}</span>
@@ -607,6 +648,22 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
    * 功能正常但退场动画不会播。
    */
   const presence = usePresence(open, T_EXIT)
+
+  /**
+   * 把「本层开着」登记到模块级计数里，供面板的 Esc 判断使用。
+   * 只认 `open`（不认 presence.mounted）：一旦用户按下 Esc 开始退场，这一层就不再抢 Esc 了，
+   * 再按一次关面板是符合预期的。
+   */
+  useEffect(() => {
+    if (!open) return undefined
+    overlayOpenCount += 1
+    notifyOverlay()
+    return () => {
+      overlayOpenCount -= 1
+      notifyOverlay()
+    }
+  }, [open])
+
   return (
     <>
       <button

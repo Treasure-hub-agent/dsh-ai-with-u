@@ -363,8 +363,19 @@ export function CardEditor(props: {
   closeSignal?: number
   /** 草稿脏状态变化：面板据此在收起前先问一句。 */
   onDirtyChange?: (dirty: boolean) => void
+  /**
+   * 父级驱动的退场：**保存成功后**由面板置 true，编辑器先播 160ms 退场再被卸载
+   * （从前保存成功是 `setEditing(false)` 直接卸载 = 硬切，而「取消」走的是内部
+   * `useLayerExit` 的延迟卸载，两条退出路径观感不一致）。
+   *
+   * 与 `layerExit` 的关系：两者都表达「正在退场」，取或即可 —— 取消路径归本组件，
+   * 保存路径归面板，互不覆盖。
+   */
+  closing?: boolean
 }): JSX.Element {
-  const { card, ccv3, droppedLore, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange } = props
+  const {
+    card, ccv3, droppedLore, name, source, busy, error, onCancel, onSave, t, closeSignal, onDirtyChange, closing = false,
+  } = props
 
   const [draft, setDraft] = useState<Draft>(() => toDraft(card))
   // 默认展开：基本信息 + 声线（灵魂字段），其余折叠，避免一屏全是输入框
@@ -406,8 +417,8 @@ export function CardEditor(props: {
   // 的设计跳过。还焦由面板按稳定 id（#awu-detail-edit）补，见 index.tsx 的 wasEditingRef。
   // 三件套仍然要留：编辑器内部还有一层「未保存确认」要接管焦点。
   useRestoreFocus(true)
-  useInitialFocus(editorRef, true)
-  useFocusTrap(editorRef, !layerExit.leaving)
+  useInitialFocus(editorRef, !layerExit.leaving && !closing)
+  useFocusTrap(editorRef, !layerExit.leaving && !closing)
   useRestoreFocus(confirmLeave)
   useInitialFocus(confirmRef, confirmLeave)
   useFocusTrap(confirmRef, confirmLeave && !layerExit.leaving)
@@ -503,7 +514,8 @@ export function CardEditor(props: {
       role="dialog"
       aria-modal="true"
       aria-label={t('edit.title')}
-      {...presenceAttrs(layerExit.closing)}
+      /* 退场有两个来源：组件内（取消/遮罩/closeSignal）与父级（保存成功），取或即可 */
+      {...presenceAttrs(layerExit.closing || closing === true)}
     >
       {/* 顶部：标题栏 */}
       <header className="awu-editorHead">

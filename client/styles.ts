@@ -663,6 +663,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-pane {
   /* 骨架退场要脱离文档流（见 .awu-sk[data-state="closing"]），它需要这里当定位上下文 */
   position: relative;
+  /* 命名容器（C 条的兜底用）：只有左栏这条列表会用到 .awu-pane，内容宽 236~272px。
+     用 inline-size 而不是 size —— 纵向高度仍由 flex 决定，不参与容器查询。 */
+  container: awu-list / inline-size;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -780,6 +783,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 横向一律裁掉：详情页退场会 translateX(8px)，留着 auto 就会在退场那 160ms 里
+     抖出一条横向滚动条（整块内容跟着宽 8px 再弹回来）。本设计里滚动容器不需要横向滚动。 */
+  overflow-x: hidden;
   overscroll-behavior: contain;
   padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
 }
@@ -2517,6 +2523,14 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-sk[data-shape="detail"] .awu-skRow:first-child { height: 140px; }
 
+/* 形态兜底（W3 收口 C，可选）：detail 形态的意义是「详情页那种一大两小的竖排」，
+   在左栏窄列表里（236~272px）它会变成一块 140px 的空白巨石。
+   这里用命名容器兜住：只要骨架落在窄栏里，首行自动退回普通行高。
+   注意这是**兜底**不是常规路径 —— 列表态本来就该显式传 shape="cards"。 */
+@container awu-list (max-width: 420px) {
+  .awu-sk[data-shape="detail"] .awu-skRow:first-child { height: 76px; }
+}
+
 /* ================================================================ 编辑器（整面板接管） */
 .awu-editor {
   display: flex;
@@ -2658,11 +2672,19 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-editGroupChevron {
   flex: none;
   display: inline-flex;
-  color: var(--awu-ink-faint);
+  /* 从 ink-faint 提到 ink-mute（W3 收口）：这个箭头是"这里能展开"的**唯一**视觉线索，
+     faint 在深色下只有 1.5:1，不达 WCAG 1.4.11 对非文本 UI 的 3:1。
+     世界书的两处（.awu-loreDropped / .awu-loreInfoBlock）也复用这个类，一起受益。 */
+  color: var(--awu-ink-mute);
   transition: transform var(--awu-dur-2) var(--awu-ease), color var(--awu-dur-2) var(--awu-ease);
 }
 
-.awu-editGroup:hover .awu-editGroupChevron { color: var(--awu-ink-mute); }
+/* 三处可展开容器的 hover：箭头再提一档（原来只给 .awu-editGroup 写了） */
+.awu-editGroup:hover .awu-editGroupChevron,
+.awu-loreDroppedHead:hover .awu-editGroupChevron,
+.awu-loreInfoBlock .awu-btn:hover .awu-editGroupChevron { color: var(--awu-ink-dim); }
+
+/* 展开 = 右箭头转 90°（四处容器共用同一套旋转；lorebook 的静态图标换字方案不需要这条） */
 .awu-editGroup[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
 
 .awu-editGroupTitle {
@@ -4140,10 +4162,21 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
      · 默认（只有 data-state="closing"）：向右退。这是"从详情回列表"的方向，
        内容往它来的方向走，列表从左侧回到视野；
      · 需要反方向时 JSX 挂 data-exit="left"（或 "right" 显式声明），显式优先。
-   两条都带 pointer-events: none：退场期不该还能点中要消失的视图。 */
+   两条都带 pointer-events: none：退场期不该还能点中要消失的视图。
+   fill-mode 用 both（= backwards + forwards），不用单 backwards：
+     · backwards 负责"动画开始前就是 from 态"（本例 delay=0，实际不生效）；
+     · forwards 负责"动画结束后保持 to 态"（opacity 0）—— 这段才是关键。
+       只写 backwards，160ms 动画跑完到 motion.ts 真正卸载之间会闪回一帧可见（React 卸载
+       至少晚一个微任务，实测能看到"淡出后又亮一下"）。铁律里的"动画不跑不能隐身"由
+       animation 本身保证：animation-name 不生效时不会有关键帧，元素保持原样可见。 */
 .awu-detail[data-state="closing"] {
   animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
   pointer-events: none;
+  /* 退场期按住溢出与重排：translateX(8px) 会让滚动容器多出 8px 可用宽，
+     在 .awu-mainBody 上抖出一条横向滚动条（Windows 上尤其明显）；
+     contain: layout paint 让内部重排/重绘不外溢，也给它一个稳定的栅格化边界。 */
+  overflow: hidden;
+  contain: layout paint;
 }
 
 /* 显式方向：可挂在任意视图根节点（.awu-detail / .awu-guide / 以后的子视图）。
@@ -4152,12 +4185,16 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-detail[data-exit="right"] {
   animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
   pointer-events: none;
+  overflow: hidden;
+  contain: layout paint;
 }
 
 [data-exit="left"],
 .awu-detail[data-exit="left"] {
   animation: awu-exit-left var(--awu-t-exit) var(--awu-ease-out) both;
   pointer-events: none;
+  overflow: hidden;
+  contain: layout paint;
 }
 
 /* 四套折叠体的**收起**（展开见下面「折叠编排」段）。
@@ -4346,6 +4383,47 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   .awu-detail[data-state="closing"] { animation-name: awu-exit; }
   /* 常驻合成层在降级下没有意义：别为一个不会播的动画锁住 1120x900 的层。 */
   .awu-panel { will-change: auto; }
+}
+
+/* ================================================================ 无障碍：高对比（prefers-contrast: more）
+   原则：**不改布局，只把"读"变清楚**。三条主线：
+     1) 墨色抬档：ink-mute 直接提到 ink-dim 那一档 —— 12~13px 的小字（字段 key、说明、时间戳）
+        在高对比模式下是重灾区；ink-faint 保持不动，它本来只画线，抬档会把分隔线画成实线；
+     2) 分隔线抬档：line / line-strong 各提一级，卡片之间、行之间靠线分界的地方不再糊成一片；
+     3) 玻璃降噪：sheen 关掉（顶部高光在半透背景上就是一层雾），backdrop-filter 去掉 saturate
+        与 brightness —— 高对比模式下"玻璃质感"直接等于对比度损失，模糊只保留几何所需的半径。
+   必须写在变量作用域里：面板本体在 .awu-scope、侧栏入口在 .awu-layer、面板外壳在 .awu-panelFade、
+   弹层与遮罩是 portal 出来的 .awu-scrim / .awu-dialog，五个都得进清单（和浅色块的清单逐字一致）。 */
+@media (prefers-contrast: more) {
+  :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
+    --awu-ink-mute: rgba(235, 235, 245, .82);       /* 原本 .68，抬到 ink-dim 那一档 */
+    --awu-line: rgba(255, 255, 255, .18);           /* 原本 .10，抬到原 line-strong */
+    --awu-line-strong: rgba(255, 255, 255, .32);    /* 原本 .18 */
+    --awu-sheen: transparent;                       /* 关顶部高光 */
+    --awu-blur: blur(30px);                         /* 去掉 saturate(180%) */
+    --awu-blur-panel: blur(20px);                   /* 去掉 saturate(138%) */
+    --awu-card-hi: rgba(255, 255, 255, .06);        /* 指针高光 .12 → 一半：越 hover 越糊就白改了 */
+    --awu-glass-2-hi: rgba(98, 98, 112, .48);       /* hover 提亮幅度收一半（.52 → .48） */
+  }
+
+  /* 浅色必须单独一份：浅色块的变量选择器权重更高，只写上面那份在浅色下会被它压掉。 */
+  html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
+    --awu-ink-mute: rgba(60, 60, 67, .88);          /* 原本 .78 */
+    --awu-line: rgba(60, 60, 67, .24);              /* 原本 .14 */
+    --awu-line-strong: rgba(60, 60, 67, .34);       /* 原本 .24 */
+    --awu-sheen: transparent;
+    --awu-blur: blur(30px);
+    --awu-blur-panel: blur(20px);
+    --awu-card-hi: rgba(255, 255, 255, .28);        /* 原本 .55（浅色下过曝，高对比只留一点位置感） */
+    --awu-glass-2-hi: rgba(255, 255, 255, .77);     /* 原本 .86 */
+  }
+
+  /* 焦点环加粗到 3px。
+     25 条规则都写成 outline: 2px solid var(--awu-focus-ring) 简写，逐条改要动 25 处；
+     这里用 outline-width 单独覆盖（style/color 仍由简写提供），!important 才有资格压过 (0,2,0) 的简写。
+     用 outline-width 而不是重写 outline：verify-a11y ⑦ 只认 outline: 简写里的写死颜色，
+     这里不产生新的写死值，也保住"25 条都在走 token"这条信号。 */
+  *:focus-visible { outline-width: 3px !important; }
 }
 ${GUIDE_CSS}
 ${DISTILL_CSS}

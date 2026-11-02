@@ -97,26 +97,38 @@ focus ring 值只有一个来源（2 档 offset）；reduced-motion 从「手工
 
 ---
 
-## 6. 遗留清单（如实，未做/未验）
+## 6. 遗留清单（2026-11-02 收尾轮后更新）
 
-> 收尾轮（提交 `1297000`）已把原第 1/2/3 条做掉：`parts.tsx` 抽取（7 个纯零件）、
-> `distill` 换回 `Overlay`、list↔detail **头像共享元素**（含返回向）。下表是更新后的现状。
+> 收尾轮（四路并行）已关掉原 1/2/3/4/5/6/8 六条，另修掉两个过程中发现的存量 bug。
+> 下面只列**仍然开着**的与「已知但接受」的。
 
-1. **`.awu-detail` 的退场 presence 仍缺**：头像共享元素已经涵盖「返回」的运动，但详情视图本身
-   （列表卡片之外的内容块）卸载时仍是硬切。CSS 侧 `awu-exit-left/right` 已备好选择器，
-   只差给详情根挂 `usePresence` + `data-exit`。
-2. **`Overlay` 缺 `onRequestClose`/`closable`**：`distill` 的「busy 期禁止关闭」目前靠在调用方
-   `close()` 首行守（Esc/点遮罩/X 都走它），语义上应该在 `Overlay` 内建。
-3. **preset / preview 的 loading 与报错态缺 fixture 实跑证据**：沙盒没有 `/presets`、`/preview`
-   路由，走的是「宿主接口未就绪」分支，`Skeleton` 一闪而过、`ErrorBar` 不出现。
-   替换点靠 tsc + 与其它调用方共用同一份 `parts` 组件保证。
-4. **`Skeleton` 形态默认值**：`parts` 版默认 `data-shape="detail"`（首行 140px），
-   预设列表已改传 `shape="cards"`；其它新增调用点记得按形态传参。
-5. **`prefers-contrast: more` 整块仍缺**（原计划第 3 批，未做）。
-6. **ErrorBoundary 崩溃路径未活验**（只验了包一层后正常路径无回归）。
-7. **字体放大无效**（全 px，改用 rem 属跨轮改动，未做）。
-8. **lorebook 两处 chevron 是静态换图标**（不是过渡），彻底修法需 `icons.tsx` 补 `IconUp/IconDown`。
-9. **未推远端、未发 npm**（按主人指令：只本地提交）。
+### 6.1 仍在（需要主人或后续轮次）
+
+1. **字体放大无效**（全 px，改 rem 属跨轮改动）：系统字号放大对面板内文字无效。
+2. **未推远端、未发 npm**（按主人指令：只本地提交）。
+3. **`distill` 的 busy 分支只有代码级保证**：沙盒输入框未就绪 →「开始蒸馏」disabled，
+   进不了 arm/send 分支，无法实跑「busy 期 Esc/遮罩不关」。
+4. **`cards` 骨架在 620 弹层里是两列网格**：它替代的是纵向列表，观感略不符；
+   要"竖排行"需 CSS 加 `data-shape="rows"`（记录在 `tools/qa/index.md`）。
+5. **预设/预览的 ErrorBar 无「重试」按钮**：两者是 `parts.ErrorBar` 的 `message`-only 用法，
+   重试靠弹层头部刷新图标；要统一成带重试需给 `ErrorBar` 传 `onRetry`。
+
+### 6.2 已关闭（本轮）
+
+| 原条目 | 关闭方式 | 证据 |
+|---|---|---|
+| 1 `.awu-detail` 退场 presence | 详情根 `usePresence` + `data-exit="left"` + 退场期 `pointer-events:none`，并 cancel morph | 80ms 采样 `data-state="closing"`、+240ms 卸载；玻璃 `opacity=1/transform=none` |
+| 2 `Overlay` 缺 `onRequestClose` | 内建 `onRequestClose?: () => boolean` + `useOverlayRequestClose()`；7 个弹层接入真实用途 | 上膛时 Esc 只卸膛；busy/locked 期 Esc/遮罩关不掉 |
+| 3 preset/preview 缺 fixture | 沙盒补 `/presets` `/preset` `/preview` + `?slow=` `?fail=` `?crash=` | `states.mjs` 15 项、`preset-loading/-error` 图 |
+| 4 `Skeleton` 形态 | 列表态统一 `cards`（预设列表/导入落库/预览加载），`detail` 只留表单回读 | 实跑 `data-shape` 断言 |
+| 5 `prefers-contrast: more` | 新增整块（ink/line 抬档、去 saturate、焦点环 3px、hover 提亮减半），浅色变体单写 | CDP 模拟实测：mute .82/.88、sheen transparent、outline 3px |
+| 6 ErrorBoundary 崩溃路径 | `tools/qa/crash.mjs` 用真实 `CharacterEntry` 注入渲染期异常 | 10 项断言全绿，无未捕获异常，降级 UI + 重试可用 |
+| 8 lorebook chevron 静态换图 | `icons.tsx` 补 `IconUp/IconDown`，lorebook 两处 + preset 两处去掉内联 rotate | 实机：svg 无内联 transform，`[data-open]` 驱动旋转 |
+| （附带）保存后编辑器硬切 | `CardEditor` 加 `closing`，保存走「先 closing 再 T_EXIT 卸载」 | 80ms `closing`、~310ms 卸载、焦点回 `#awu-detail-edit` |
+| （附带）蒸馏弹层里 Esc 连面板一起关 | `distill` 导出 `distillOverlayOpen()`，面板 Esc 判断加 `!distillOverlayOpen` | 一次 Esc 只关弹层（面板 `open`），第二次才关面板 |
+| （附带）详情退场时滚动容器抖出横向滚动条 | `.awu-mainBody` 加 `overflow-x: hidden` + `contain` | 退场瞬间 `scrollWidth == clientWidth == 782` |
+| （附带）三处折叠缺实机证据 | fixture 补 `character_book` 与跨月日记后实跑 | 三处均：closing 2ms 挂上、165/166ms 卸载 |
+| （附带）截图脚本会产出空白假截图 | 导航重试 + `location.href` 校验 + 耗时日志 | 21 场景矩阵无空白图 |
 
 ---
 
