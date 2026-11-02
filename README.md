@@ -535,6 +535,8 @@ distill/flow  distill/arm  distill/disarm  distill/state
 npm run build            # 宿主 tsc + 前端 tsc + 打包 + 十套自检（各套通过项总数以 verify 输出为准）
 npm run verify           # 产物形状 / 新鲜度 / 孤儿产物
 npm run verify:bundle    # 客户端产物加载
+npm run verify:ui        # UI 纪律：模板串反引号/动画引用闭环/时长走令牌/选择器带值
+npm run verify:a11y      # 无障碍：div+onClick/图标标签/错误可播报/键集对称/焦点环 token
 npm run verify:wiring    # 接线体检：25 组契约（后端做了前端没接 / 验收项回归）
 npm run verify:tavern    # 卡格式 / 迁移幂等 / 世界书预算 / ST 兼容
 npm run verify:distill   # 蒸馏 / 补全武装与 kind
@@ -544,11 +546,11 @@ npm run verify:host      # 真实 cordis 宿主装配
 npm run typecheck:client # 只查浏览器侧类型
 ```
 
-`npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
+`npm run build` 串的顺序是：`tsc`(宿主) → `tsc`(前端) → esbuild 打包 → `verify-bundle` → `verify-ui` → `verify-a11y` → `verify-wiring` → `verify` → `verify-tavern` → `verify-distill` → `verify-import` → `verify-session` → `verify-host`。任何一项非 0 退出就整体失败。
 
 徽章上的数字 = build 串里十套自检的通过项之和，失败项必须为 0、skip 也必须为 0。**各套总数与合计以 verify 输出实测为准，不在文档里回填逐套分解清单**——1025 时代的教训：这套数字从手写成 515 起，先后漂移出 515 / 981 / 1025 三套口径（981 与 1025 曾一度并存），自检断言增减是常态，宁可每次实测也不要维护第二份会过期的清单。
 
-当前徽章 **1032** 是 2026-11-01 发布快照的全链实测回填：`verify 16 + bundle 9 + wiring 72 + tavern 306 + distill 121 + import 58 + session 324 + host 126`。下一次增删断言后它就会过期——重新跑全链按实测改徽章，不必另行更新本段。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
+当前徽章 **1047** 是 2026-11-02 v0.5.2 发布快照的全链实测回填：`bundle 9 + ui 7 + a11y 8 + wiring 72 + verify 16 + tavern 306 + distill 121 + import 58 + session 324 + host 126`。下一次增删断言后它就会过期——重新跑全链按实测改徽章，不必另行更新本段。旧徽章的 515 用的是更窄的口径（只数六套，不含 `verify` 与 `verify-wiring`），所以数字变大不全是因为新增了断言。
 
 `verify-wiring` 补的是其余七套查不到的盲区：**类型检查只问「类型对不对」，不问「有没有人调用」**。一个 17 KB 的世界书数据层可以零引用地躺在仓库里，一个 `POST /character/import` 可以注册完就没下文——这两种状态下 `tsc`、打包、其余自检全绿，但用户打开面板什么都看不到。脚本只做静态扫描（读源码找路由字符串与调用点），失败文案写清「缺什么 + 该找谁」。最后一组会把 `lib/prompt.js` 拿回来跟源码逐字比纪律包文本，抓「改了源码没重编」；产物不存在或比源码旧时跳过，不报红。
 
