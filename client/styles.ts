@@ -557,29 +557,22 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   animation: none;
 }
 
-/* ---- 面板进场：整层淡入（2026-11-02 重做，主人报「二段式」）
-   外壳 .awu-panelFade 只做 opacity（不位移、不缩放）：
-     1. 面板玻璃不动 —— backdrop-filter 只算一次，不会逐帧重采 1.1M px；
-     2. 100vmax 压暗与玻璃一起淡入，不会出现「先发白、顿一下再变实」的换档；
-     3. 外壳 pointer-events: none，面板自己 auto，点面板外仍落到宿主。
-   为什么不直接在面板上播：见本文件末尾 data-still 段的事故记录。 */
+/* ---- 面板进场：外壳放大上浮（2026-11-02 三次修订）
+   演进：① 直接在面板上播 → 动画期摘模糊省钱 → animationend 硬切（「二段式」）；
+        ② 面板静止 + 外壳纯淡入 → 主人反馈淡入没有线性感、不够利落；
+        ③ 现在：**放大上浮放回外壳上**，玻璃本身仍然恒定不换档。
+   为什么这次不会再有「顿一下」：外壳 .awu-panelFade 自己不带 backdrop-filter，
+   它只做 scale/translateY/opacity；玻璃在挂载首帧就完整就位（blur 与 100vmax 压暗
+   全程不换档），所以不存在「模糊在动画结束时被装回去」那一帧硬切。
+   幅度刻意收小（.992 / 3px）：外壳一动，里面那层模糊就要按新位置重新采样，
+   位移越小、时长越短，重采样帧数越少（本机软件合成下 1.1M px 模糊是秒级，
+   所以这里宁可"小一点、快一点"，也不做大幅弹入）。 */
 .awu-panelFade {
   position: fixed;
   inset: 0;
   z-index: 2147482000;
   pointer-events: none;
-  /* 终态就是 1：万一环境不跑过渡（老内核 / 冻结帧），面板也是「直接出现」而不是隐身。 */
-  opacity: 1;
-  transition: opacity var(--awu-t-base) var(--awu-ease-out);
-}
-
-/* 首帧从 0 起（Chromium 117+，本机 Electron 44 远超门槛）。
-   用 @starting-style 而不是 keyframes + fill:both —— 后者在「动画不跑」的环境里会把面板
-   永远停在 opacity:0；前者最坏情况只是没有淡入。 */
-@starting-style {
-  .awu-panelFade {
-    opacity: 0;
-  }
+  animation: awu-panel-in var(--awu-t-base) var(--awu-ease) both;
 }
 
 /* 面板自己是 auto：外壳不吞点击，但面板里的一切照常可点 */
@@ -3837,8 +3830,13 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-focusRead { font-family: var(--awu-sans); }
 
 /* ================================================================ 动效 */
-/* 面板进场（2026-11-02 重做）：见上方 .awu-panelFade 段 —— 那条用的是 transition +
-   @starting-style，不是 keyframes。故意保留这段说明，避免后人"补一个面板入场动画"回来。 */
+/* 面板进场（2026-11-02 三次修订）：跑在外壳 .awu-panelFade 上，玻璃本身不动。
+   见上方 .awu-panelFade 段的三段演进说明 —— 这里只留 keyframes，不要再把 animation
+   加回 .awu-panel（那会把「动画期换模糊」的硬切重新引回来）。 */
+@keyframes awu-panel-in {
+  from { opacity: 0; scale: .992; transform: translateY(3px); }
+  to { opacity: 1; scale: 1; transform: translateY(0); }
+}
 
 @keyframes awu-sheet-in {
   from { opacity: 0; transform: translateY(24px); }
