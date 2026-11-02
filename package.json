@@ -89,6 +89,10 @@
     "verify:session": "node scripts/verify-session.mjs",
     "verify:host": "node scripts/verify-host.mjs",
     "verify:tavern": "node scripts/verify-tavern.mjs",
-    "verify:distill": "node scripts/verify-distill.mjs"
+    "verify:distill": "node scripts/verify-distill.mjs",
+    "qa:matrix": "node tools/qa/shots.mjs",
+    "qa:states": "node tools/qa/states.mjs",
+    "qa:crash": "node tools/qa/crash.mjs",
+    "qa:collapse": "node tools/qa/collapse.mjs"
   }
 }

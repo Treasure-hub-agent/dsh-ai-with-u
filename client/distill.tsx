@@ -47,7 +47,7 @@ import { armDistill, disarmDistill, errorText, fetchDistillFlow, fetchDistillSta
 import type { DistillKind } from './api'
 import { IconClose, IconQuill } from './icons'
 import { T_EXIT, usePresence } from './motion'
-import { DialogLayerContext, Overlay } from './parts'
+import { DialogLayerContext, Overlay, RequestCloseButton } from './parts'
 import type { Translate } from './text'
 
 // ---------------------------------------------------------------- 输入框 sink
@@ -387,7 +387,8 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   return false
 }
 
-// ---------------------------------------------------------------- 弹层
+/* 弹层里的「关闭类」按钮统一用 `./parts` 的 RequestCloseButton（与 Esc / 点遮罩同一套拦截）；
+   本文件曾有一份本地副本，已合并进 parts，避免两套口径各自漂移。 */
 
 export interface DistillDialogProps {
   t: Translate
@@ -521,16 +522,14 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
       <div className="awu-dialogHead">
         <IconQuill size={16} />
         <span>{t('distill.title')}</span>
-        <button
-          type="button"
+        <RequestCloseButton
           className="awu-iconBtn awu-distill-close"
-          aria-label={t('common.close')}
-          title={t('common.close')}
-          onClick={close}
+          label={t('common.close')}
           disabled={busy}
+          fallback={close}
         >
           <IconClose size={14} />
-        </button>
+        </RequestCloseButton>
       </div>
 
       <div className="awu-dialogBody">
@@ -592,9 +591,9 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
         <div className="awu-dialogFoot">
           {step === 'confirm' ? (
             <>
-              <button type="button" className="awu-btn" onClick={close} disabled={busy}>
+              <RequestCloseButton className="awu-btn" disabled={busy} fallback={close}>
                 {t('common.cancel')}
-              </button>
+              </RequestCloseButton>
               <button
                 type="button"
                 className="awu-btn"
@@ -614,9 +613,9 @@ export function DistillDialog(props: DistillDialogProps): JSX.Element {
                   {t('distill.copy')}
                 </button>
               )}
-              <button type="button" className="awu-btn" data-kind="primary" onClick={close}>
+              <RequestCloseButton className="awu-btn" kind="primary" fallback={close}>
                 {t('distill.done')}
-              </button>
+              </RequestCloseButton>
             </>
           )}
         </div>
@@ -659,7 +658,13 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
     overlayOpenCount += 1
     notifyOverlay()
     return () => {
-      overlayOpenCount -= 1
+      /*
+        下限兜底：模块被重新求值（HMR / 打包出双副本）时模块级变量会归 0，
+        而此时**旧副本的 cleanup 仍会跑** → 直接减就是 −1 → 再开一层只回到 0，
+        `distillOverlayOpen()` 恒 false，面板的 Esc 判断会重新踩回「Esc 连面板一起关」。
+        clamp 到 0 之后，任何残留 cleanup 都不会把计数打到负数。
+      */
+      overlayOpenCount = Math.max(0, overlayOpenCount - 1)
       notifyOverlay()
     }
   }, [open])
@@ -697,14 +702,12 @@ export function DistillButton(props: { t: Translate; label?: string }): JSX.Elem
  * 为什么单独做一个组件而不是把说明塞进 `DistillButton`：按钮可以在工具行里内联用，
  * 而「CTA + 说明」是块级排版（`awu-distill-entry` 用 flex 竖排，宽度随容器走），两者共用一个按钮。
  *
- * 文案回退：`distill.entryHint` 还没并进 `client/text.ts` 时，`makeTranslator` 会把 key 原样返回
- * （`text.ts` 的兜底行为），这里检测到「原样返回」就退到已有的 `distill.entryTitle`，
- * 保证在 Lead 合并文案之前界面上也不会出现裸 key。
+ * 文案：`distill.entryHint` 已经并进 `text.ts`（zh/en 都有），所以直接取；
+ * 原先那套「key 原样返回就退回 entryTitle」的兜底已删（永不命中的死代码）。
  */
 export function DistillEntry(props: { t: Translate; label?: string; hint?: string }): JSX.Element {
   const { t, label, hint: hintProp } = props
-  const raw = hintProp ?? t('distill.entryHint')
-  const hint = raw === 'distill.entryHint' ? t('distill.entryTitle') : raw
+  const hint = hintProp ?? t('distill.entryHint')
   return (
     <div className="awu-distill-entry">
       <DistillButton t={t} label={label} />

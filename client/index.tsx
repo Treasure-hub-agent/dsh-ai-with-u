@@ -19,7 +19,7 @@ import type {
 } from 'react'
 
 import { useFocusTrap, useInitialFocus, useRestoreFocus } from './a11y'
-import { DialogLayerContext, ErrorBar, Field, Overlay, Section, Skeleton, useScrollLock } from './parts'
+import { DialogLayerContext, ErrorBar, Field, Overlay, RequestCloseButton, Section, Skeleton, useScrollLock } from './parts'
 // 动效单一真源（契约 §1）：时长/缓动只从这里取，不在 JSX 里写字面量。
 // pop 帧用 T_MID（= CSS 的 --awu-t-mid），退场用 T_EXIT（= --awu-t-exit）。
 import { EASE, T_BASE, T_ENTER, T_EXIT, T_MID, presenceAttrs, prefersReducedMotion, useFinePointer, usePresence } from './motion'
@@ -1122,7 +1122,7 @@ function DeleteDialog(props: {
         )}
       </div>
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('delete.cancel')}</button>
+        <RequestCloseButton label={t('delete.cancel')} fallback={onCancel} disabled={busy}>{t('delete.cancel')}</RequestCloseButton>
         <button
           type="button"
           className="awu-btn"
@@ -1183,7 +1183,7 @@ function ModeDialog(props: {
         ))}
       </div>
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" data-kind="ghost" onClick={onCancel}>{t('common.cancel')}</button>
+        <RequestCloseButton label={t('common.cancel')} fallback={onCancel} disabled={busy} className="awu-btn" >{t('common.cancel')}</RequestCloseButton>
       </div>
     </Overlay>
   )
@@ -1242,7 +1242,7 @@ function EditDiaryDialog(props: {
         {error !== '' && <div className="awu-hint" role="alert" style={{ color: 'var(--awu-danger)', marginTop: 8 }}>{error}</div>}
       </div>
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
+        <RequestCloseButton label={t('common.cancel')} fallback={onCancel} disabled={busy}>{t('common.cancel')}</RequestCloseButton>
         <button
           type="button"
           className="awu-btn"
@@ -1299,7 +1299,7 @@ function ForgetDialog(props: {
         )}
       </div>
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
+        <RequestCloseButton label={t('common.cancel')} fallback={onCancel} disabled={busy}>{t('common.cancel')}</RequestCloseButton>
         <button type="button" className="awu-btn" data-kind="danger" onClick={submit} disabled={busy}>
           {busy ? t('common.busy') : t('forget.do')}
         </button>
@@ -1346,7 +1346,7 @@ function ResetAllDialog(props: {
         )}
       </div>
       <div className="awu-dialogFoot">
-        <button type="button" className="awu-btn" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
+        <RequestCloseButton label={t('common.cancel')} fallback={onCancel} disabled={busy}>{t('common.cancel')}</RequestCloseButton>
         <button
           type="button"
           className="awu-btn"
@@ -1635,11 +1635,13 @@ function CharacterDetailView(props: {
   onMorphDone?: () => void
   /** 正在退场（160ms 向左淡出）：根节点挂 data-state，期间不吃指针事件。 */
   closing?: boolean
+  /** 面板持有的根节点 ref：`usePresence` 要拿它做退场首帧的焦点释放与卸载后还焦。 */
+  rootRef?: React.RefObject<HTMLDivElement | null>
 }): JSX.Element {
   const {
     detail, loading, error, relation, live, boundHere, sessionId, busy, t,
     onBack, onRetry, onBindSession, onUnbindSession, onActivate, onDeactivate, onDelete, onEdit,
-    onOpenDiary, onExport, onSwitchMode, onNextOpening, morphFrom, onMorphDone, closing = false,
+    onOpenDiary, onExport, onSwitchMode, onNextOpening, morphFrom, onMorphDone, closing = false, rootRef,
   } = props
 
   /**
@@ -1649,7 +1651,9 @@ function CharacterDetailView(props: {
    * 所以不能只在挂载时跑一次 —— 依赖 `detail`，等数据到位、hero 进 DOM 的那一帧再量。
    * `morphTriedRef` 保证一张卡只播一次（loading → error → retry 不会反复播）。
    */
-  const detailRootRef = useRef<HTMLDivElement | null>(null)
+  // 父级传了 ref 就用它（usePresence 必须拿同一个节点）；没传则自己兜一个
+  const localDetailRootRef = useRef<HTMLDivElement | null>(null)
+  const detailRootRef = rootRef ?? localDetailRootRef
   const morphTriedRef = useRef(false)
   useLayoutEffect(() => {
     if (detail === undefined || morphTriedRef.current) return undefined
@@ -2478,6 +2482,23 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    */
   const [droppedLore, setDroppedLore] = useState<LoreDroppedInfo | undefined>(undefined)
 
+  /**
+   * 面板收起 → 编辑器必须一起退出（修 6）。
+   *
+   * 现状：编辑器开着时点面板外，面板只是 `open=false`，`editing` 仍是 true；
+   * 再点入口重开，看到的还是那屏编辑器（用户预期是回到详情/列表）。
+   * 所以 `open=false` 时显式清掉编辑态与退场标记，并收掉保存退场遗留的计时器。
+   */
+  useEffect(() => {
+    if (open) return
+    if (editing) setEditing(false)
+    setEditorClosing(false)
+    if (editorExitTimer.current !== undefined) {
+      window.clearTimeout(editorExitTimer.current)
+      editorExitTimer.current = undefined
+    }
+  }, [open, editing])
+
   // 编辑器关掉后清脏标记，避免下次打开误拦；顺便复位退场标记
   useEffect(() => {
     if (editing) return
@@ -2941,7 +2962,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
   useEffect(() => {
     if (!open) return undefined
     const onPointerDown = (event: PointerEvent): void => {
-      if (dialog !== '') return
+      if (dialog !== '' || dialogPresence.closing) return
       const path = typeof event.composedPath === 'function' ? event.composedPath() : []
       const inside = path.includes(panelRef.current as EventTarget)
         || path.includes(layerRef.current as EventTarget)
@@ -2960,7 +2981,12 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       // 编辑器随之卸载，用户未保存的改动一起没了。
       // 蒸馏弹层同理：它不在面板的 `dialog` 状态里（由 `DistillButton` 自己持有 open），
       // 不排除的话在蒸馏弹层里按 Esc 会把面板和弹层一起关掉（实测复现，2026-11-02 修）。
-      if (event.key === 'Escape' && dialog === '' && !editing && !distillOverlayOpen) {
+      /*
+        口径统一（修 4）：弹层退场期（`dialogPresence.closing`）仍算「弹层开着」——
+        与 Overlay 那边一致（它退场期同样吃掉 Esc）。否则内层正在淡出、外层顺手把整个面板关掉，
+        两层对"这次 Esc 归谁"的理解不同，用户会看到"按一下关两层"。
+      */
+      if (event.key === 'Escape' && dialog === '' && !dialogPresence.closing && !editing && !distillOverlayOpen) {
         event.stopPropagation()
         setOpen(false)
       }
@@ -2971,7 +2997,7 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [open, dialog, editing, editorDirty, distillOverlayOpen])
+  }, [open, dialog, dialogPresence.closing, editing, editorDirty, distillOverlayOpen])
 
   // -------------------------------------------------------- 动作
   //
@@ -3275,15 +3301,48 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
    *
    * 退场期间要继续渲染**上一次那张详情**，否则 `detailName` 一清空、分支就没了，
    * 动画对象也随之消失（和弹层宿主 `lastDialogRef` 是同一个问题）。
+   *
+   * 判据必须是 **`mounted` 而不是 `closing`**：`closing` 是在「open 变 false」之后的一个
+   * effect 里才置 true 的，中间那次 commit 里它仍是 false —— 用 closing 判断的话，
+   * 点返回的瞬间（t≈6ms）详情会被摘掉、骨架屏出现，下一帧（t≈11ms）再挂回来，
+   * 退场动画实际跑在**新节点**上（离散事件碰巧在 paint 前 flush 才没被看见，非离散触发就闪骨架）。
+   * `mounted` 从 open 变 false 起就一直为 true（直到 160ms 后才翻），中间不会掉。
    */
   const detailOpen = tab === 'roster' && detailName !== ''
-  const detailPresence = usePresence(detailOpen, T_EXIT)
+  const detailRootRef = useRef<HTMLDivElement | null>(null)
+  const detailPresence = usePresence(detailOpen, T_EXIT, detailRootRef)
   const lastDetailNameRef = useRef('')
   useEffect(() => {
     if (detailName !== '') lastDetailNameRef.current = detailName
   }, [detailName])
   /** 退场期沿用上一次的名字；为空串 = 真的没有详情可渲染。 */
-  const detailSubject = detailName !== '' ? detailName : (detailPresence.closing ? lastDetailNameRef.current : '')
+  const detailSubject = detailName !== '' ? detailName : (detailPresence.mounted ? lastDetailNameRef.current : '')
+
+  /**
+   * 详情卸载后还焦（修 2）。
+   *
+   * `usePresence` 传了 root，会在**退场第一帧**把焦点请出详情（不能停在正在淡出、
+   * 且 pointer-events:none 的节点上）；卸载完成后由这里把焦点还给「进来之前的那张卡」——
+   * 用 `data-card-id` 反查（卡片是 <button>，天然可聚焦），取不到就退到左栏列表容器
+   * （`.awu-rail .awu-pane`，`tabIndex={-1}` 只可编程聚焦，不进 Tab 序列）。
+   */
+  const prevDetailMountedRef = useRef(false)
+  useEffect(() => {
+    const wasMounted = prevDetailMountedRef.current
+    prevDetailMountedRef.current = detailPresence.mounted
+    if (!wasMounted || detailPresence.mounted) return
+    if (typeof document === 'undefined') return
+    const name = lastDetailNameRef.current
+    const card = Array.from(document.querySelectorAll<HTMLElement>('.awu-card[data-card-id]'))
+      .find(el => el.getAttribute('data-card-id') === name) ?? null
+    const target = card ?? document.querySelector<HTMLElement>('.awu-rail .awu-pane')
+    if (target === null) return
+    try {
+      target.focus({ preventScroll: true })
+    } catch {
+      target.focus()
+    }
+  }, [detailPresence.mounted])
 
   const currentDetail = detailSubject !== '' && detailSubject === detail?.name ? detail : undefined
   // 日记页用的是 detailName 加载来的那一份，只要名字对得上就认（可能不是启用角色）
@@ -4077,7 +4136,8 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 )}
               </div>
 
-              <div className="awu-pane">
+              {/* tabIndex={-1}：只可编程聚焦（详情卸载后还焦的兜底落点），不进 Tab 序列 */}
+              <div className="awu-pane" tabIndex={-1}>
                 {skeletonPresence.mounted && (
                   <Skeleton shape="cards" label={t('common.loading')} closing={skeletonPresence.closing} />
                 )}
@@ -4175,15 +4235,17 @@ export function CharacterPanel(props: FooterActionProps): JSX.Element {
                 aria-busy={busy}
               >
                 {/*
-                  详情渲染条件 = `presence.mounted || detailName !== ''`：
-                  - presence 首帧还没 mounted，但用户已经点了卡 → 不能闪一下「未选卡」空态；
-                  - 退场期间 detailName 已清空但 mounted 仍为 true → 继续渲染，让 160ms 动画有对象。
+                  详情渲染条件直接看 `detailSubject`（与上面同一个判据，单一真源）：
+                  - 首帧 presence 还没 mounted 但 detailName 已有 → 渲染（不闪空态）；
+                  - 退场期 detailName 已空、mounted 仍 true → 继续渲染（动画有对象）；
+                  - 160ms 后 mounted 翻 false → detailSubject 归空 → 落回「未选卡」。
                 */}
-                {tab === 'roster' && ((detailPresence.mounted || detailName !== '') ? (
+                {tab === 'roster' && (detailSubject !== '' ? (
                   <CharacterDetailView
                     /* 换卡就重挂：`.awu-detail` 的 CSS 进场（awu-slide-in，从右 +8px）才会真的重播；
                        否则同一个 tab 内换对象只是内容替换，没有任何"进去了"的手感。 */
                     key={detailSubject}
+                    rootRef={detailRootRef}
                     detail={currentDetail}
                     loading={detailLoading}
                     error={detailError}

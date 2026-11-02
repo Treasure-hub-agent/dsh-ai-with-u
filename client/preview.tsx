@@ -146,10 +146,11 @@ export function PromptPreview(props: { t: Translate; onClose: () => void }): JSX
         <div className="awu-hint" style={{ marginBottom: 10 }}>{t('preview.hint')}</div>
 
         {/*
-          加载骨架：`cards` 而非 `detail` —— 它替的是一串「注入段」（列表态），
+          加载骨架：`rows`（单列满宽）—— 它替的是一串纵向「注入段」。
+          `cards` 是 minmax(240px,1fr) 的两列网格，在 620 弹层里与真实内容不同形，首帧会整块重排；
           `detail` 只用于详情页/表单回读（见预设编辑页那一处）。
         */}
-        {loading && data === undefined && <Skeleton shape="cards" label={t('preview.loading')} />}
+        {loading && data === undefined && <Skeleton shape="rows" label={t('preview.loading')} />}
 
         {unavailable && <div className="awu-hint" data-tone="warn">{t('preview.unavailable')}</div>}
 

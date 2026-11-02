@@ -448,7 +448,9 @@ export function CardEditor(props: {
   }, [])
 
   const requestClose = (): void => {
-    if (busy || layerExit.leaving) return
+    // `closing` = 父级驱动的退场（保存成功）。退场中再问"要不要放弃改动"毫无意义：
+    // 层已经 pointer-events:none、120ms 内就会随父级卸载，确认卡只会闪一下（实测 confirm 0→1→0）。
+    if (busy || layerExit.leaving || closing) return
     if (dirty) { setConfirmLeave(true); return }
     layerExit.beginLeave()
   }
@@ -460,6 +462,7 @@ export function CardEditor(props: {
    * 底下的编辑页再淡出 —— 同一动作里出现两次视觉事件。让父层带着它一起淡完 160ms 更干净。
    */
   const discardAndLeave = (): void => {
+    if (layerExit.leaving || closing) return
     layerExit.beginLeave()
   }
 
@@ -475,8 +478,10 @@ export function CardEditor(props: {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      // 退场期（160ms）不再接 Esc：这层已经在消失，Esc 该落到外层去了
-      if (layerExit.leaving) return
+      // 退场期（160ms）不再接 Esc：这层已经在消失，Esc 该落到外层去了。
+      // `closing` 也要一起挡 —— 保存成功的退场由父级驱动，`layerExit.leaving` 恒为 false，
+      // 只挡它的话 Esc 会走 dirty 分支、在正在淡出的层里弹「未保存确认」。
+      if (layerExit.leaving || closing) return
       // 全屏长文本层盖在最上面：Esc 归它（它自己会处理和「返回/丢弃」），
       // 两个 capture 监听按注册顺序跑，壳层不让步就会出现「一次 Esc 关两层」。
       if (loreFocus) return
@@ -487,7 +492,7 @@ export function CardEditor(props: {
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
-  }, [dirty, confirmLeave, layerExit, loreFocus])
+  }, [dirty, confirmLeave, layerExit, loreFocus, closing])
 
   /**
    * 保存：两条链路分开走（见 `CardSavePayload` 的注释）。
@@ -496,7 +501,7 @@ export function CardEditor(props: {
    * 面板据此决定一次发一个键、还是先发 ccv3 再发 card。
    */
   const save = (): void => {
-    if (busy) return
+    if (busy || closing) return
     const ccv3Next = loreDirty ? mergeLoreIntoCard(ccv3, lore.book, lore.entries) : undefined
     onSave({
       view: mergeCard(card, draft),
@@ -514,6 +519,8 @@ export function CardEditor(props: {
       role="dialog"
       aria-modal="true"
       aria-label={t('edit.title')}
+      /* 退场中整层对读屏不可见：内容正在淡出，念它只会让用户困惑 */
+      aria-hidden={layerExit.leaving || closing ? true : undefined}
       /* 退场有两个来源：组件内（取消/遮罩/closeSignal）与父级（保存成功），取或即可 */
       {...presenceAttrs(layerExit.closing || closing === true)}
     >
@@ -589,7 +596,7 @@ export function CardEditor(props: {
         <span className="awu-editorDirty" data-dirty={dirty ? 'true' : 'false'}>
           {dirty ? t('edit.dirty') : t('edit.clean')}
         </span>
-        <button type="button" className="awu-btn" onClick={requestClose} disabled={busy}>
+        <button type="button" className="awu-btn" onClick={requestClose} disabled={busy || closing}>
           {t('common.cancel')}
         </button>
         <button
@@ -597,7 +604,7 @@ export function CardEditor(props: {
           className="awu-btn"
           data-kind="primary"
           onClick={save}
-          disabled={busy || !dirty}
+          disabled={busy || closing || !dirty}
         >
           {busy ? t('common.busy') : t('edit.save')}
         </button>

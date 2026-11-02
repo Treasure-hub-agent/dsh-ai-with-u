@@ -65,6 +65,41 @@ export function useOverlayRequestClose(): (() => void) | null {
 }
 
 /**
+ * 放在弹层正文里的「关闭 / 取消」按钮：与 Esc、点遮罩走**同一个** `requestClose`。
+ *
+ * 为什么必须是组件：`Overlay` 的 Provider 在它自己的 children 里，弹层组件本身在 Provider
+ * **之上**执行 —— 在弹层里直接调 `useOverlayRequestClose()` 会拿到 null（等于没接）。
+ * 只有作为 Overlay 子节点渲染的组件才在 Provider 之下。
+ *
+ * `fallback` 是「没有拦截器时怎么办」（通常是弹层自己的 onClose），保证不在 Overlay 里用时也正常。
+ */
+export function RequestCloseButton(props: {
+  /** 无障碍名（aria-label / title）；图标按钮必填，纯文字按钮可省略 */
+  label?: string
+  /** 没有拦截器时的回落行为（一般就是弹层原来的 onCancel） */
+  fallback: () => void
+  disabled?: boolean
+  className?: string
+  /** 按钮语气（主操作/危险等），透传给 data-kind */
+  kind?: 'primary' | 'danger'
+  children: JSX.Element | JSX.Element[] | string
+}): JSX.Element {
+  const request = useContext(OverlayRequestCloseContext)
+  return (
+    <button
+      type="button"
+      className={props.className ?? 'awu-btn'}
+      {...(props.label === undefined ? {} : { title: props.label, 'aria-label': props.label })}
+      {...(props.kind === undefined ? {} : { 'data-kind': props.kind })}
+      onClick={() => { if (request !== null) request(); else props.fallback() }}
+      disabled={props.disabled === true}
+    >
+      {props.children}
+    </button>
+  )
+}
+
+/**
  * 弹层通用行为：Esc 关闭 + 点击遮罩关闭 + 焦点陷阱（Tab 不出去、关闭后焦点回原位）。
  *
  * 另外**吞掉落在弹层上的文件拖放**：`.awu-scrim` 是 fixed 全屏遮罩，用户拖一张卡进来时
@@ -222,11 +257,12 @@ export function Overlay(props: {
 /**
  * 骨架屏。`shape` 交给 CSS 决定形态（`data-shape`）：
  *  - `detail`（默认）：详情页那种竖排行；
- *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片。
+ *  - `cards`：角色簿加载时的卡片网格，避免加载完从 62px 竖条突然跳成两列卡片；
+ *  - `rows`：列表行形态（一字排开的短条，给「每行一条」的列表用，如预设/世界书条目）。
  *
  * `closing` 由调用方的 `usePresence` 驱动：退场 160ms 只动 opacity，到点再真正卸载。
  */
-export function Skeleton(props: { shape?: 'detail' | 'cards'; label?: string; closing?: boolean }): JSX.Element {
+export function Skeleton(props: { shape?: 'detail' | 'cards' | 'rows'; label?: string; closing?: boolean }): JSX.Element {
   return (
     <div
       className="awu-sk"

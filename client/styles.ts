@@ -180,6 +180,11 @@ const CSS = `
   --awu-gap-9: 24px;
   --awu-gap-10: 32px;
   --awu-gutter: 32px;
+  /* 栏内左右内距的唯一真源：桌面 = gutter(32)，<900 收成 16（见断点块）。
+     单独一个令牌是因为"骨架退场的绝对定位"必须和栏内 padding 用同一个值 ——
+     absolute 的 left/right 是从 padding box 量的，写 0 会得到"padding box 宽"(336)，
+     比内容宽(272) 宽 64px，实测就是那次"骨架退场宽度跳变 + 左移 32px"。 */
+  --awu-pane-pad-x: var(--awu-gutter);
   /* 长表单/长文本的阅读宽度：1120 全宽对中文表单太宽，正文收在 760 */
   --awu-content-max: 760px;
   /* 两栏骨架：左栏（列表）固定宽，右栏自适应。
@@ -238,6 +243,8 @@ const CSS = `
   /* 骨架屏：底色与扫光分两个 token —— 旧版把 .04/.10 写死，浅色下等于白扫白（对比 1.02） */
   --awu-sk-base: rgba(255, 255, 255, .05);
   --awu-sk-sweep: rgba(255, 255, 255, .14);
+  /* 骨架单行高：默认形态与 detail 兜底共用（原来两处各写一次 76px） */
+  --awu-sk-row-h: 76px;
 
   /* ---- 动效令牌 v2（W0-B 地基）----
      语义名是唯一真源；下面的 --awu-dur-* 全部降级为别名，全库 300 处调用一处不改。
@@ -670,7 +677,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
+  /* 左右内距走 --awu-pane-pad-x：骨架退场要按同一个值做绝对定位，
+     两处要是各写各的（一处 gutter、一处 gap-7），窄屏下就会差 4px。 */
+  padding: var(--awu-gap-6) var(--awu-pane-pad-x) var(--awu-gap-9);
 }
 
 /* ---- 滚动条（W1-C：原来三处复制，第四处漏抄）----
@@ -787,7 +796,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
      抖出一条横向滚动条（整块内容跟着宽 8px 再弹回来）。本设计里滚动容器不需要横向滚动。 */
   overflow-x: hidden;
   overscroll-behavior: contain;
-  padding: var(--awu-gap-6) var(--awu-gutter) var(--awu-gap-9);
+  padding: var(--awu-gap-6) var(--awu-pane-pad-x) var(--awu-gap-9);
 }
 
 /* tabpanel 容器是可聚焦的（tabIndex=0，供键盘用户跳过 rail 直接进内容区），
@@ -804,7 +813,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    （.awu-detail 的 awu-slide-in、.awu-guide 等都在本行之后声明），
    这里只兜住"没有自己动画"的那几个视图。 */
 .awu-mainBody > * {
-  animation: awu-view-in var(--awu-t-fast) var(--awu-ease-out) both;
+  animation: awu-view-in var(--awu-t-fast) var(--awu-ease-out) backwards;
 }
 
 /* 左栏"正在看：X"一行（diary tab 下显示，data-empty 时隐藏）。
@@ -841,9 +850,14 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   .awu-workspace { display: block; overflow-y: auto; }
   .awu-rail { width: 100%; }
   .awu-main { min-height: auto; }
-  .awu-pane { padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-8); }
-  .awu-mainBody { padding: var(--awu-gap-5) var(--awu-gap-7) var(--awu-gap-8); }
-  .awu-panel { --awu-gutter: 20px; }
+  .awu-pane { padding: var(--awu-gap-5) var(--awu-pane-pad-x) var(--awu-gap-8); }
+  .awu-mainBody { padding: var(--awu-gap-5) var(--awu-pane-pad-x) var(--awu-gap-8); }
+  .awu-panel {
+    --awu-gutter: 20px;
+    /* 窄屏的栏内左右内距是 16（不是 20 的 gutter）：这是历史值，骨架退场的绝对定位
+       要和它同一个真源，否则窄屏下会差 4px（W4 实测过的"宽度跳变"就是从这类不同源来的）。 */
+    --awu-pane-pad-x: var(--awu-gap-7);
+  }
 
   /* push / pop：详情覆盖列表。用 position + z-index 而不是 display:none ——
      display 切换会让 rail 的滚动位置在返回时丢失，且第 2 批要给"覆盖"做位移。
@@ -2501,7 +2515,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 .awu-skRow {
   position: relative;
-  height: 76px;
+  /* 行高统一走 --awu-sk-row-h：默认形态、detail 兜底、rows 形态都用它，
+     避免出现两处各写 76px 的"同一件事两个数"（W4 审查点名的重复写死值）。 */
+  height: var(--awu-sk-row-h);
   border-radius: var(--awu-r-lg);
   background: var(--awu-sk-base);
   overflow: hidden;
@@ -2528,7 +2544,29 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    这里用命名容器兜住：只要骨架落在窄栏里，首行自动退回普通行高。
    注意这是**兜底**不是常规路径 —— 列表态本来就该显式传 shape="cards"。 */
 @container awu-list (max-width: 420px) {
-  .awu-sk[data-shape="detail"] .awu-skRow:first-child { height: 76px; }
+  .awu-sk[data-shape="detail"] .awu-skRow:first-child { height: var(--awu-sk-row-h); }
+}
+
+/* ---- 形态 rows（W4 新增，配合 JSX 把预设列表/预览加载改成单列）----
+   与 cards 的区别：cards 是"卡片墙"（网格、按卡高），rows 是"一列行条目"（预设/世界书列表）。
+   行距跟真实列表同源（--awu-gap-6 = 12，和 .awu-grid 的 gap 一致），
+   行高 84 = 真实行（56 内容 + 上下 14 内距）向上取整，保证"骨架 → 内容"时高度不跳。 */
+.awu-sk[data-shape="rows"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--awu-gap-6);
+  padding: 0;
+}
+
+.awu-sk[data-shape="rows"] .awu-skRow {
+  /* 84 = 两个控件高(36×2) + 一行间距(12)：等于真实行"56 内容 + 上下内距"向上取整，
+     且完全由令牌算出，不新增裸 px（W4 审查点 8 的要求）。 */
+  height: calc(var(--awu-ctrl-h) * 2 + var(--awu-gap-6));
+}
+
+/* rows 在左栏窄容器里也是单列 —— 不需要容器查询，本来就是一列。 */
+@media (max-width: 900px) {
+  .awu-sk[data-shape="rows"] { gap: var(--awu-gap-4); }
 }
 
 /* ================================================================ 编辑器（整面板接管） */
@@ -2684,8 +2722,17 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-loreDroppedHead:hover .awu-editGroupChevron,
 .awu-loreInfoBlock .awu-btn:hover .awu-editGroupChevron { color: var(--awu-ink-dim); }
 
-/* 展开 = 右箭头转 90°（四处容器共用同一套旋转；lorebook 的静态图标换字方案不需要这条） */
-.awu-editGroup[data-open="true"] .awu-editGroupChevron { transform: rotate(90deg); }
+/* 展开 = 头部自己的箭头转 90°。
+   必须是「.awu-editGroupHead 内部」限定：写成纯后代选择器时，世界书分区一展开，
+   里面嵌套的 .awu-loreDropped / .awu-loreInfoBlock 的箭头也会跟着转
+   （reviewer 实测：子块 data-open="false" 时 transform 仍是 rotate90）。 */
+.awu-editGroup[data-open="true"] > .awu-editGroupHead .awu-editGroupChevron { transform: rotate(90deg); }
+
+/* 兜底：嵌套块的箭头只认自己的展开态。
+   用 :not([data-open="true"]) 而不是 [data-open="false"] —— .awu-loreInfoBlock 关闭时
+   JSX 是**移掉属性**（data-open 为 undefined），写 ="false" 永远匹配不到。 */
+.awu-loreDropped:not([data-open="true"]) .awu-editGroupChevron,
+.awu-loreInfoBlock:not([data-open="true"]) .awu-editGroupChevron { transform: none; }
 
 .awu-editGroupTitle {
   font-family: var(--awu-sans);
@@ -3905,6 +3952,22 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   to { opacity: 1; }
 }
 
+/* 面板退场（2026-11-02 五次修订）：**玻璃框依然不动**，只有内容层淡出 + 外壳压暗淡出。
+   为什么不能给 .awu-panel 挂动画：它是含 backdrop-filter 的元素，任何 animation/will-change
+   都会把它提升成独立渲染表面 → 背板采样退化（主人看到的「彻底半透明」就是这个）；
+   而且退场那 160ms 里玻璃会重新采样，反而更卡。
+   所以分工是：玻璃原地不动 → 内容（head/status/workspace）淡出 → 外壳 ::before 的压暗淡出
+   → usePresence 到点把整棵树摘掉。 */
+@keyframes awu-content-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-2px); }
+}
+
+@keyframes awu-scrim-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 @keyframes awu-sheet-in {
   from { opacity: 0; transform: translateY(24px); }
   to { opacity: 1; transform: translateY(0); }
@@ -3989,7 +4052,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-reviewMonth > .awu-diary,
 .awu-previewText,
 .awu-previewEmpty {
-  animation: awu-fold-in var(--awu-t-base) var(--awu-ease-out) both;
+  animation: awu-fold-in var(--awu-t-base) var(--awu-ease-out) backwards;
 }
 
 /* ---- 提示条编排（契约 §3：notice 进场 / 退场）----
@@ -3999,7 +4062,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 .awu-notice,
 .awu-status[data-status="info"],
 .awu-status[data-status="warn"] {
-  animation: awu-rise var(--awu-t-base) var(--awu-ease) both;
+  animation: awu-rise var(--awu-t-base) var(--awu-ease) backwards;
 }
 
 /* ---- 视图编排（契约 §3：tab 切换 T_FAST crossfade，不带位移、不带 stagger）----
@@ -4013,14 +4076,15 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
 
 /* ---- 骨架退场（JSX 用 data-state="closing" 标 160ms 再卸载）----
    骨架是"加载中"的替身，淡出比硬消失少一次闪；只动 opacity。
-   ⚠️ 必须同时脱离文档流（position: absolute + left/right 撑满）：内容是在骨架还挂在树上时
-   就渲染出来的，留在流里会让"骨架 + 内容"上下并存 160ms，看起来像页面抖了一下。
-   用 left:0/right:0 而不是 inset:0 —— top 保持 auto 就会留在自己的静态位置（与淡出前同一处），
-   只把宽度按容器撑满；.awu-pane / .awu-mainBody 是它的定位上下文（见各自规则）。 */
+   ⚠️ 必须同时脱离文档流，否则"骨架 + 内容"上下并存 160ms 像页面抖了一下。
+   水平方向用 inset-inline: var(--awu-pane-pad-x) 而不是 0：
+   absolute 的 left/right 是从**padding box** 量的，写 0 会得到 336px（=内容 272 + 两侧 32 的 padding），
+   再因为 left 贴到 padding 外沿而整体左移 32px —— 实测的"宽度跳变 272→336"就是这个。
+   垂直方向保持 auto：元素停在自己的静态位置（与淡出前同一处），不跳。
+   宽度与容器内容宽严格相等，所以不会产生横向滚动。 */
 .awu-sk[data-state="closing"] {
   position: absolute;
-  left: 0;
-  right: 0;
+  inset-inline: var(--awu-pane-pad-x);
   animation: awu-exit var(--awu-t-exit) var(--awu-ease-out) both;
   pointer-events: none;
 }
@@ -4133,8 +4197,9 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   to { opacity: 0; transform: translateY(-8px); }
 }
 
-/* 大层：只淡出（160ms）。data-state 由 presenceAttrs() 提供。 */
-.awu-panel[data-state="closing"],
+/* 大层：只淡出（160ms）。data-state 由 presenceAttrs() 提供。
+   ⚠️ 这里**没有** .awu-panel：面板是含 backdrop-filter 的玻璃，它不能播动画（见下面面板退场段）。
+   其余五个（scrim / dialog / focus / editor / editorConfirm）都不是玻璃本体的采样源。 */
 .awu-scrim[data-state="closing"],
 .awu-dialog[data-state="closing"],
 .awu-focus[data-state="closing"],
@@ -4143,6 +4208,23 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   animation: awu-exit var(--awu-t-exit) var(--awu-ease-out) both;
   /* 只在退场这 160ms 里买一次层提升，结束后随卸载一起消失 */
   will-change: opacity;
+}
+
+/* ---- 面板退场：玻璃不动，只让内容淡出 + 外壳压暗淡出 ----
+   选择器写 (0,3,0) 是为了压过进场那条 (.awu-panel > .awu-head = (0,2,0))。
+   进场用 backwards（基线可见），退场用 both（跑完保持透明，撑到 usePresence 卸载）。 */
+.awu-panel[data-state="closing"] > .awu-head,
+.awu-panel[data-state="closing"] > .awu-status,
+.awu-panel[data-state="closing"] > .awu-workspace {
+  animation: awu-content-out var(--awu-t-exit) var(--awu-ease-in) both;
+  pointer-events: none;
+}
+
+/* 外壳压暗同步淡出。data-state 挂在 .awu-panel 上（presenceAttrs 的目标是面板本身），
+   所以用 :has() 从外壳反查 —— Chromium 105+ 支持；万一不支持，最坏只是压暗在 160ms 后
+   随整棵树一起消失，不会留下"永远压暗"的残影。 */
+.awu-panelFade:has(> .awu-panel[data-state="closing"])::before {
+  animation: awu-scrim-out var(--awu-t-exit) var(--awu-ease-in) both;
 }
 
 /* 只给"有父层接着兜点击"的那几层关掉命中：dialog/focus/editorConfirm 在 scrim 里、
@@ -4161,8 +4243,7 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
    —— verify-ui 的 keyframes 闭环为此开了白名单。第 3 批接上：
      · 默认（只有 data-state="closing"）：向右退。这是"从详情回列表"的方向，
        内容往它来的方向走，列表从左侧回到视野；
-     · 需要反方向时 JSX 挂 data-exit="left"（或 "right" 显式声明），显式优先。
-   两条都带 pointer-events: none：退场期不该还能点中要消失的视图。
+     · 需要反方向时 JSX 在同一个节点上挂 data-exit="left"（或 "right" 显式声明），显式优先。
    fill-mode 用 both（= backwards + forwards），不用单 backwards：
      · backwards 负责"动画开始前就是 from 态"（本例 delay=0，实际不生效）；
      · forwards 负责"动画结束后保持 to 态"（opacity 0）—— 这段才是关键。
@@ -4171,27 +4252,26 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
        animation 本身保证：animation-name 不生效时不会有关键帧，元素保持原样可见。 */
 .awu-detail[data-state="closing"] {
   animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
-  pointer-events: none;
-  /* 退场期按住溢出与重排：translateX(8px) 会让滚动容器多出 8px 可用宽，
-     在 .awu-mainBody 上抖出一条横向滚动条（Windows 上尤其明显）；
-     contain: layout paint 让内部重排/重绘不外溢，也给它一个稳定的栅格化边界。 */
-  overflow: hidden;
-  contain: layout paint;
 }
 
-/* 显式方向：可挂在任意视图根节点（.awu-detail / .awu-guide / 以后的子视图）。
-   写成「属性 + 类」两个选择器是为了让它在 .awu-detail[data-state] 之上（同为 (0,2,0)，靠顺序赢）。 */
-[data-exit="right"],
+/* 显式方向：只认 .awu-detail 上的属性（不用全局裸属性选择器 ——
+   挂 [data-exit] 的可能是任何视图，裸选择器会顺手给它加上"不可点 + 裁切"）。
+   方向规则的权重 (0,2,0) 与上面那条相同，靠顺序赢。 */
 .awu-detail[data-exit="right"] {
   animation: awu-exit-right var(--awu-t-exit) var(--awu-ease-out) both;
-  pointer-events: none;
-  overflow: hidden;
-  contain: layout paint;
 }
 
-[data-exit="left"],
 .awu-detail[data-exit="left"] {
   animation: awu-exit-left var(--awu-t-exit) var(--awu-ease-out) both;
+}
+
+/* 三条共用一份"退场期约束"（原来在每条里各写一遍）：
+   pointer-events 关掉命中；overflow + contain 按住横向溢出 ——
+   translateX(8px) 会让滚动容器多出 8px 可用宽，在 .awu-mainBody 上抖出一条横向滚动条
+   （Windows 上尤其明显）；contain: layout paint 给内部重排/重绘一个稳定边界。 */
+.awu-detail[data-state="closing"],
+.awu-detail[data-exit="right"],
+.awu-detail[data-exit="left"] {
   pointer-events: none;
   overflow: hidden;
   contain: layout paint;
@@ -4226,29 +4306,17 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
   pointer-events: none;
 }
 
-/* ---- 动画期层提升（契约 §2.1 的 data-still）----
-   历史：这里原本还做了两件事 —— backdrop-filter: none 与摘掉大投影，用来省掉
-   进场那 320ms 里对 1.12M px 的逐帧模糊。2026-11-02 主人实测后改掉了：
-   blur 与 box-shadow 都不可过渡，animationend 那一刻摘掉 data-still = 一次性硬切
-   （实测 t≈401ms 从 none 跳到 blur(18px) saturate(1.85) brightness(1.03)），
-   肉眼就是「先半透明发白、顿一下才变实」。省下的重绘抵不过这条观感损伤。
-
-   现在的规矩：
-     1. 整段进场里 backdrop-filter / box-shadow 保持恒定，不做任何换档 ——
-        进场只动 opacity 与 scale，两者都是合成属性，不必逐帧重算模糊；
-     2. data-still 只负责买一次层提升（will-change），让 100vmax 巨影随层一次性栅格化；
-     3. 动画结束立刻撤回层提升，避免 1120×900 的层永久驻留。
-   代价：进场期背板真的会做模糊采样（本机实测帧间隔仍 ~16ms），换来一条连续的淡入。 */
-/* 面板不再出现在这里：给带 backdrop-filter 的元素加 will-change: opacity/transform
-   同样会让它变成独立渲染表面，backdrop 采样退化（就是主人看到「彻底半透明」那个症状）。
-   面板现在不播动画，也就不需要层提升。 */
-.awu-dialog[data-still="true"],
-.awu-scrim[data-still="true"],
-.awu-editor[data-still="true"],
-.awu-focus[data-still="true"],
-.awu-editorConfirm[data-still="true"] {
-  will-change: opacity, transform, scale;
-}
+/* ---- 关于 data-still（契约 §2.1）：这里不再有任何规则 ----
+   历史三段演进，结论是「这条属性在 CSS 侧无事可做」：
+     1. 最初它做 backdrop-filter:none + 摘大投影省模糊，但 blur 不可过渡，
+        animationend 那一刻摘属性 = 一次硬切（实测 t≈401ms 从 none 跳到
+        blur(18px) saturate(1.85)）→ 观感「先发白、顿一下」；
+     2. 之后只剩 will-change: opacity/transform/scale 当"层提升"，可给含 backdrop-filter
+        的元素加 will-change 会让它变成独立渲染表面、背板采样退化（主人看到的「彻底半透明」），
+        连最近一条挂在 .awu-dialog / .awu-focus / .awu-editorConfirmCard 上的也一并删了；
+     3. 现在面板/弹层的进场全靠外壳 .awu-panelFade 的纯 opacity 淡入，玻璃本体不播任何动画，
+        自然也不需要层提升。
+   JSX 侧继续挂 data-still="true" 无害（没有任何选择器命中它），第 4 批可以顺手摘掉。 */
 
 /* ================================================================ 无障碍：降低透明度（W1-C 补齐）
    降级 = 真·不透明。旧实现有两个问题，这里一起修：
@@ -4292,14 +4360,19 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     --awu-line-soft: rgba(60, 60, 67, .10);
   }
 
-  /* 8 个模糊面全部关掉（清单与代码里全部 backdrop-filter 出现处逐一对应）：
-     trigger / panel / editorFoot / editorConfirm / editorConfirmCard / scrim / dialog / focus */
+  /* 全部 8 个模糊面（与代码里每一处 backdrop-filter 声明逐一对应）：
+     trigger / panel / menu / editorFoot / editorConfirm / editorConfirmCard / dialog / focus。
+     两条实测校准（W4 审查）：
+       · 补 .awu-menu —— 弹出菜单实测仍是 blur(30px) saturate(1.8)，上一版漏了它，
+         症状是"开了降低透明度只有菜单还糊"；
+       · 去掉 .awu-scrim —— 它已经不再声明 backdrop-filter（实测 computed 就是 none），
+         留在清单里属于"清单比现实多一项"，会让下一个人误以为遮罩还带模糊。 */
   .awu-trigger,
   .awu-panel,
+  .awu-menu,
   .awu-editorFoot,
   .awu-editorConfirm,
   .awu-editorConfirmCard,
-  .awu-scrim,
   .awu-dialog,
   .awu-focus {
     backdrop-filter: none;
@@ -4404,6 +4477,12 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     --awu-blur-panel: blur(20px);                   /* 去掉 saturate(138%) */
     --awu-card-hi: rgba(255, 255, 255, .06);        /* 指针高光 .12 → 一半：越 hover 越糊就白改了 */
     --awu-glass-2-hi: rgba(98, 98, 112, .48);       /* hover 提亮幅度收一半（.52 → .48） */
+    /* 玻璃本体一起抬：小字压在壁纸上正是高对比要解决的那件事。
+       .70/.44 时 14px 正文在浅灰壁纸上会"浮"，抬到 .84/.56 后正文底色才稳。 */
+    --awu-glass-1: rgba(20, 20, 24, .84);
+    --awu-glass-2: rgba(72, 72, 82, .56);
+    --awu-scrim-bg: rgba(0, 0, 0, .50);             /* 压暗加深，别让亮壁纸把正文对比拉回去 */
+    --awu-focus-ring-w: 3px;                        /* 焦点环宽度（唯一真源，见下一条规则） */
   }
 
   /* 浅色必须单独一份：浅色块的变量选择器权重更高，只写上面那份在浅色下会被它压掉。 */
@@ -4416,14 +4495,39 @@ html:not([data-ds-dark-theme]) body:not([data-ds-dark-theme]) :is(.awu-scope, .a
     --awu-blur-panel: blur(20px);
     --awu-card-hi: rgba(255, 255, 255, .28);        /* 原本 .55（浅色下过曝，高对比只留一点位置感） */
     --awu-glass-2-hi: rgba(255, 255, 255, .77);     /* 原本 .86 */
+    --awu-glass-1: rgba(255, 255, 255, .72);        /* 原本 .54 —— 高对比下小字不能浮在壁纸上 */
+    --awu-glass-2: rgba(255, 255, 255, .84);        /* 原本 .68 */
+    --awu-scrim-bg: rgba(18, 20, 26, .30);          /* 原本 .16 */
+    --awu-focus-ring-w: 3px;
   }
 
-  /* 焦点环加粗到 3px。
+  /* 焦点环加粗到 3px（宽度走令牌 --awu-focus-ring-w）。
      25 条规则都写成 outline: 2px solid var(--awu-focus-ring) 简写，逐条改要动 25 处；
      这里用 outline-width 单独覆盖（style/color 仍由简写提供），!important 才有资格压过 (0,2,0) 的简写。
      用 outline-width 而不是重写 outline：verify-a11y ⑦ 只认 outline: 简写里的写死颜色，
      这里不产生新的写死值，也保住"25 条都在走 token"这条信号。 */
-  *:focus-visible { outline-width: 3px !important; }
+  *:focus-visible { outline-width: var(--awu-focus-ring-w) !important; }
+}
+
+/* ================================================================ 无障碍：强制颜色（forced-colors: active）
+   Windows「高对比主题」/ 强制颜色模式下系统接管全部颜色，但那**不会**顺手关掉 backdrop-filter：
+   实测此时仍是 blur(20px) saturate(1.38)，于是文字底下永远混着一层"系统实色 + 模糊 + 饱和"，
+   还会把系统给的背景色洗淡。sheen 与 specular 同理 —— 渐变与阴影不受 forced-colors 的颜色替换，
+   会以半透明白的形式继续叠在系统色上。
+   这里用 * 而不是枚举：系统接管后任何一处残留模糊都是错的，枚举必然漏（上一版降透明清单就漏过 .awu-menu）。 */
+@media (forced-colors: active) {
+  *,
+  *::before,
+  *::after {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  :is(.awu-scope, .awu-layer, .awu-panelFade, .awu-scrim, .awu-dialog) {
+    --awu-sheen: transparent;                        /* 顶部高光 = 系统色上的白雾 */
+    --awu-glass-edge: transparent;                   /* 面板顶部的 1px 亮边渐变 */
+    --awu-specular: inset 0 0 0 0 transparent;       /* 玻璃高光描边 */
+  }
 }
 ${GUIDE_CSS}
 ${DISTILL_CSS}

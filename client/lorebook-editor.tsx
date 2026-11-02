@@ -709,11 +709,12 @@ export function LorebookSection(props: LorebookSectionProps): JSX.Element {
             discard: t('edit.discard'),
           }}
           /*
-            退场期（FocusEditor 已开始淡出、还没卸载）立刻把 Esc 让回壳层：
-            不传 onClosing 的话，那 160ms 里 card-editor 的 Esc 会被 `loreFocus` 白白吞掉，
-            用户得按两下才关得掉编辑器（契约 §2.2-契约 4）。
+            退场期怎么处理 Esc 由**意图**决定（契约 §2.2-契约 4 + 2026-11-02 review）：
+            取消 → 缓冲已经不要了，立刻把 Esc 还回壳层；
+            提交 → 正文还要等 160ms 后 `onDone` 才写进草稿，这期间继续让位，否则
+            「保存后立刻按 Esc」会连编辑器一起关掉、刚写的内容丢失。
           */
-          onClosing={() => setFocusClosing(true)}
+          onClosing={intent => setFocusClosing(intent === 'cancel')}
           onDone={next => {
             patchEntry(focusEntry.id, { content: next })
             setFocusId('')

@@ -18,7 +18,7 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { launch, reporter } from './cdp.mjs'
+import { assertSandbox, launch, reporter } from './cdp.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
@@ -63,6 +63,14 @@ const clickBy = (selector, text) => `(() => {
 })()`
 
 const sel = { lore: '.awu-loreBody', diary: '.awu-diary', preview: '.awu-previewText, .awu-previewEmpty' }
+
+// 端口认领（P2.11）：59621 上可能是别人的服务，认不出本沙盒就直接退出，
+// 否则探针会对着别人的页面做断言 —— 全绿但毫无意义。
+const identity = await assertSandbox(port)
+if (!identity.ok) {
+  console.error(`沙盒校验失败（http://127.0.0.1:${port}）：${identity.reason}`)
+  process.exit(1)
+}
 
 const browser = await launch()
 try {

@@ -25,7 +25,7 @@ import { join } from 'node:path'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { launch, reporter } from './cdp.mjs'
+import { assertSandbox, launch, reporter } from './cdp.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
@@ -39,6 +39,14 @@ const outDir = arg('out', join(here, '../../06-tmp/ui-audit'))
 const url = `http://127.0.0.1:${port}/?crash=1`
 const r = reporter()
 console.log(`崩溃探针：${url}\n`)
+
+// 端口认领（P2.11）：59621 上可能是别人的服务，认不出本沙盒就直接退出，
+// 否则探针会对着别人的页面做断言 —— 全绿但毫无意义。
+const identity = await assertSandbox(port)
+if (!identity.ok) {
+  console.error(`沙盒校验失败（http://127.0.0.1:${port}）：${identity.reason}`)
+  process.exit(1)
+}
 
 const browser = await launch()
 try {
@@ -69,6 +77,14 @@ try {
   r.check(page.exceptions.length === 0, '无未捕获异常（被边界接住）', page.exceptions.length === 0 ? '' : page.exceptions[0].slice(0, 120))
   const boundaryLogged = page.consoleErrors.some((t) => t.includes('面板渲染失败'))
   r.check(boundaryLogged, 'componentDidCatch 留下了上下文日志', boundaryLogged ? '' : '没抓到 "面板渲染失败" 的 console.error')
+  /*
+   * 归因断言（P1.5）：只断言"降级 UI 出现"是不够的 —— 任何别的 TypeError 把面板搞崩，
+   * 边界同样会降级，于是这条探针会**为一个无关的 bug 开绿灯**。
+   * 所以必须证明"崩的就是我们注入的那个错"：console.error 里要出现 crash probe 的原文。
+   */
+  const probeLogged = page.consoleErrors.some((t) => t.includes('crash probe'))
+  r.check(probeLogged, '崩的是探针注入的那个错（console.error 里有 crash probe 原文）',
+    probeLogged ? '' : `控制台里没有 "crash probe"：${page.consoleErrors.slice(0, 2).join(' | ').slice(0, 160) || '（空）'}`)
 
   await page.screenshot(join(outDir, 'crash-1-fallback.png'))
 

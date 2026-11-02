@@ -20,7 +20,7 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { launch, reporter } from './cdp.mjs'
+import { assertSandbox, launch, reporter } from './cdp.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
@@ -39,6 +39,14 @@ const clickText = (text, selector = 'button') => `(() => {
   hit.click()
   return 'ok'
 })()`
+
+// 端口认领（P2.11）：59621 上可能是别人的服务，认不出本沙盒就直接退出，
+// 否则探针会对着别人的页面做断言 —— 全绿但毫无意义。
+const identity = await assertSandbox(port)
+if (!identity.ok) {
+  console.error(`沙盒校验失败（http://127.0.0.1:${port}）：${identity.reason}`)
+  process.exit(1)
+}
 
 const browser = await launch()
 const r = reporter()
@@ -79,7 +87,12 @@ try {
     await page.screenshot(join(outDir, 'state-2-preset-list.png'))
   }
 
-  // ---------------------------------------------------------------- ③ 预设：500
+  // ---------------------------------------------------------------- ③ 预设：宿主 400
+  //
+  // 断言的是**宿主真的会返回的形状**：`src/web.ts:191-198` 的 guard 把任何异常统一下成
+  // `400 + {ok:false,error:<原文>}`，没有 500 路径。沙盒也照这个形状注入（见
+  // tools/preview/preview.tsx 的 `failed`），否则就是在验证"沙盒自己捏的东西"——
+  // 那种断言等于 fixture 自证。
   {
     const page = await browser.newPage({ width: 1200, height: 820 })
     await page.goto(`${base}/?fail=presets`, 1600)
@@ -91,19 +104,85 @@ try {
       const err = document.querySelector('.awu-err')
       return JSON.stringify({
         errFound: err !== null,
-        errText: err === null ? '' : (err.textContent || '').trim().slice(0, 60),
+        errText: err === null ? '' : (err.textContent || '').trim().slice(0, 120),
         role: err === null ? '' : (err.getAttribute('role') || ''),
         rows: document.querySelectorAll('.awu-presetRow').length,
-        retry: err === null ? false : !!err.querySelector('button'),
       })
     })()`)
     const fail = res.ok ? JSON.parse(res.value) : {}
     console.log(`③ ?fail=presets：${res.ok ? res.value : res.error}`)
     r.check(fail.errFound === true, '③ 预设列表错误时出 ErrorBar', fail.errText ?? '')
     r.check(fail.role === 'alert', '③ ErrorBar 带 role=alert（读屏能播报）', `role=${fail.role}`)
-    r.check(fail.errText.includes('500'), '③ 错误文案里带上了 HTTP 状态', fail.errText ?? '')
+    // 关键：UI 显示的是宿主信封里的 error 原文（不是 client 自己拼的通用文案）
+    r.check(
+      String(fail.errText).includes('沙盒注入 400'),
+      '③ UI 显示的是宿主信封里的 error 原文（400 形状）',
+      fail.errText ?? '',
+    )
+    r.check(!String(fail.errText).includes('500'), '③ 不再出现世界上不存在的 500 文案', fail.errText ?? '')
     r.check(fail.rows === 0, '③ 出错时没有列表行', `rows=${fail.rows}`)
     await page.screenshot(join(outDir, 'state-3-preset-error.png'))
+  }
+
+  // ---------------------------------------------------------------- ③b 面板 ErrorBar 的「重试」是真的能点
+  //
+  // 预设/预览弹层里的错误条是各自手写的 div（没有重试按钮），带「重试」的那条是面板级
+  // `ErrorBar`（parts.tsx）。用 `?fail=characters` 触发它 —— **不能**用 `?fail=overview`：
+  // `reload()` 对 overview 是 `.catch(() => undefined)` 故意咽掉的，面板不会因此报错。
+  // 并且**验证点下去真的重新发请求** —— 只断言"按钮存在"等于没验（死按钮也能过）。
+  {
+    const page = await browser.newPage({ width: 1200, height: 820 })
+    await page.goto(`${base}/?fail=characters`, 1600)
+    // 包一层 fetch 计数器（在页面里），用来证明重试真的重发了请求
+    await page.eval(`(() => {
+      if (window.__awuReq) return 'already'
+      window.__awuReq = []
+      const orig = window.fetch
+      window.fetch = (input, init) => { window.__awuReq.push(String(input)); return orig(input, init) }
+      return 'installed'
+    })()`)
+    await page.eval(OPEN)
+    await page.sleep(1200)
+    const before = await page.eval(`(() => {
+      const err = document.querySelector('.awu-status.awu-err')
+      const btn = err === null ? null : [...err.querySelectorAll('button')].find(b => !b.disabled)
+      return JSON.stringify({
+        errFound: err !== null,
+        errText: err === null ? '' : (err.textContent || '').trim().slice(0, 80),
+        role: err === null ? '' : (err.getAttribute('role') || ''),
+        retry: btn === undefined || btn === null ? null : (btn.textContent || '').trim(),
+        retryDisabled: btn === null ? null : btn.disabled === true,
+        reqs: (window.__awuReq || []).length,
+      })
+    })()`)
+    const panelErr = before.ok ? JSON.parse(before.value) : {}
+    console.log(`③b ?fail=characters：${before.ok ? before.value : before.error}`)
+    r.check(panelErr.errFound === true, '③b 面板级 ErrorBar 出现', panelErr.errText ?? '')
+    r.check(panelErr.role === 'alert', '③b 面板级 ErrorBar 带 role=alert', `role=${panelErr.role}`)
+    r.check(panelErr.retry !== null && panelErr.retry !== '', '③b 有「重试」按钮', `retry=${JSON.stringify(panelErr.retry)}`)
+    r.check(panelErr.retryDisabled === false, '③b 「重试」按钮可点（未 disabled）', `disabled=${panelErr.retryDisabled}`)
+    await page.eval(`(() => {
+      const err = document.querySelector('.awu-status.awu-err')
+      const btn = err === null ? null : [...err.querySelectorAll('button')].find(b => !b.disabled)
+      btn?.click()
+      return btn === null ? 'no-btn' : 'clicked'
+    })()`)
+    await page.sleep(900)
+    const after = await page.eval(`(() => JSON.stringify({
+      reqs: (window.__awuReq || []).length,
+      overviewHits: (window.__awuReq || []).filter(u => u.includes('/characters')).length,
+      stillErr: document.querySelector('.awu-status.awu-err') !== null,
+    }))()`)
+    const afterClick = after.ok ? JSON.parse(after.value) : {}
+    console.log(`   点重试后：${after.ok ? after.value : after.error}`)
+    r.check(
+      (afterClick.reqs ?? 0) > (panelErr.reqs ?? 0),
+      '③b 点「重试」真的重新发了请求（不是死按钮）',
+      `reqs ${panelErr.reqs} → ${afterClick.reqs}`,
+    )
+    r.check((afterClick.overviewHits ?? 0) >= 2, '③b 重试打的是 /characters', `hits=${afterClick.overviewHits}`)
+    r.check(afterClick.stillErr === true, '③b 仍然失败时错误条还在（没被清空骗人）', `stillErr=${afterClick.stillErr}`)
+    await page.screenshot(join(outDir, 'state-3b-panel-retry.png'))
   }
 
   // ---------------------------------------------------------------- ④ 预览：慢响应（Skeleton）

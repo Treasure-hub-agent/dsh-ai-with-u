@@ -56,13 +56,17 @@ export interface FocusEditorProps {
   /** 点「返回」/Esc：丢弃缓冲 */
   onCancel: () => void
   /**
-   * 本层**开始退场**（不是"已经卸载"）。
+   * 本层**开始退场**（不是"已经卸载"），并带上**意图**。
    *
-   * 父级据此把「Esc 让位」立刻放行：契约 §2.2-契约 4 —— closing 期间这层已经没有资格再吃 Esc，
-   * 否则用户要按两下才能关掉外层（一次给 dying 的层，一次给外层）。
-   * 父级拿不到这个信号时也能工作，只是那 160ms 里 Esc 会被白白吞掉。
+   * 父级据此决定要不要立刻把 Esc 还回去：
+   *  - `'cancel'`（返回 / 丢弃）→ 缓冲已经不要了，立刻放行（契约 §2.2-契约 4：closing 期间
+   *    不该再吃 Esc，否则用户要按两下才关得掉外层）；
+   *  - `'commit'`（保存 / 完成）→ **必须继续让位**：正文还在本地缓冲里，要等 160ms 后
+   *    `onDone()` 跑完、父级的 `patch` 与脏判定重算生效，Esc 才能重新落到外层。
+   *    否则会出现「保存后 50ms 按 Esc → 外层直接关掉、刚写的内容无声丢弃」。
+   *    （2026-11-02 review 实测复现；不带意图的旧签名就是那个 bug。）
    */
-  onClosing?: () => void
+  onClosing?: (intent: 'cancel' | 'commit') => void
 }
 
 /** 按码点数字数（emoji 不算两字）。 */
@@ -217,10 +221,14 @@ export function FocusEditor(props: FocusEditorProps): JSX.Element {
   useInitialFocus(rootRef, true, readOnly ? '.awu-focusRead' : '.awu-focusInput')
   useFocusTrap(rootRef, !layerExit.leaving)
 
-  /** 走退场：先通知父级「本层不再吃 Esc」，再把真正的卸载动作排到 160ms 后。 */
-  const beginLeave = useCallback((exit?: () => void): void => {
-    // 契约 §2.2-契约 4：closing 期间 escYield 必须放行，否则用户要按两下才能关外层
-    onClosing?.()
+  /**
+   * 走退场：先通知父级这次是「取消」还是「提交」，再把真正的卸载动作排到 160ms 后。
+   *
+   * `intent` 不是可有可无的元数据 —— 父级的 `escYield` 靠它决定这 160ms 里 Esc 归谁：
+   * 提交路径必须继续让位（正文还在本层缓冲里），取消路径立刻放行（见 `onClosing` 的注释）。
+   */
+  const beginLeave = useCallback((exit?: () => void, intent: 'cancel' | 'commit' = 'cancel'): void => {
+    onClosing?.(intent)
     if (exit === undefined) layerExit.beginLeave()
     else layerExit.beginLeave(exit)
   }, [layerExit, onClosing])
@@ -247,7 +255,8 @@ export function FocusEditor(props: FocusEditorProps): JSX.Element {
 
   const commit = useCallback(() => {
     if (readOnly) { beginLeave(); return }
-    beginLeave(() => { onDone(text) })
+    // `'commit'`：父级要在这 160ms 里继续让位，直到 `onDone` 的 patch 与脏判定生效
+    beginLeave(() => { onDone(text) }, 'commit')
   }, [beginLeave, onDone, readOnly, text])
 
   // Esc / Cmd+Enter：捕获阶段自己处理，壳层负责把 Esc 让给本层

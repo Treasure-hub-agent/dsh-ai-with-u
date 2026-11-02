@@ -14,11 +14,16 @@
  * ── 场景开关（都只影响沙盒，URL 上叠加即可） ────────────────────────────────
  *   ?live=1             模拟「已启用一张卡」：overview.active 打开、详情带日记与会话，
  *                       用来验收日记时间线、启用态横幅这些「只有启用后才出现」的界面。
+ *   ?bound=1            模拟「本会话已绑定」：overview 带 sessionId + bindings.current +
+ *                       preset.current(source=session)，状态带走「当前会话（已绑定）」。
+ *                       以前所有图都停在「当前会话不可识别」的降级分支，会话绑定 /
+ *                       预设摘要 / 纪律档位这三块零覆盖。
  *   ?dark=1             强制深色（`index.html` 里那条 html[data-ds-dark-theme] 开关）。
  *   ?slow=1200          所有 fixture 响应延迟 N 毫秒 —— 用来**真的看到**骨架屏 / 加载提示。
- *   ?fail=presets       对应路由返回 HTTP 500 + `{ok:false,error}` 信封 —— 用来**真的看到**
- *   ?fail=preview       ErrorBar（在此之前沙盒没这两条路由，面板永远走「宿主接口未就绪」的
- *   ?fail=all           黄色提示分支，红色错误条从来没被实机看到过）。
+ *   ?fail=presets       对应路由返回 **HTTP 400** + `{ok:false,error}`（宿主唯一会用的失败
+ *   ?fail=preview       形状：web.ts 的 guard 把异常统一下成 400，没有 500 路径）——
+ *   ?fail=overview      用来**真的看到** ErrorBar（含「重试」按钮那条）。
+ *   ?fail=all
  *   ?crash=1            渲染期崩溃探针：给面板传一个「一调用就抛错」的 `t`，并用
  *                       `CharacterEntry`（内含 `PanelBoundary`）包住 —— 验证 P0 的
  *                       ErrorBoundary 降级路径：**显示「重试」而不是白屏**。
@@ -75,7 +80,9 @@ function installCrashProbe(): void {
 
 /** 场景参数（只读一次；改 URL 刷新即可换场景）。 */
 const query = new URLSearchParams(window.location.search)
-const scenario = query.get('live') === '1' ? 'live' : 'default'
+const scenario = query.get('bound') === '1'
+  ? 'bound'
+  : query.get('live') === '1' ? 'live' : 'default'
 const slowMs = Math.max(0, Math.min(10000, Number(query.get('slow') ?? '0') || 0))
 const failKeys = new Set(
   (query.get('fail') ?? '').split(',').map(s => s.trim()).filter(s => s !== ''),
@@ -128,12 +135,33 @@ if (scenario === 'live' && data.liveOverview !== undefined) {
 /** `?crash=1`：先把面板的运行环境弄坏（见 installCrashProbe 的注释）。 */
 if (crashProbe) installCrashProbe()
 
+/*
+ * `?bound=1`：「会话已绑定」。以前所有图都停在「当前会话不可识别」的降级分支 ——
+ * 会话绑定 / 预设摘要 / 纪律档位这三块界面零覆盖。这份夹具带 `sessionId` +
+ * `bindings.current` + `preset.current(source=session)`，状态带会走
+ * 「当前会话（已绑定）」那条分支。
+ */
+if (scenario === 'bound' && data.boundOverview !== undefined) {
+  const boundOverview = data.boundOverview
+  const boundDetail = data.boundDetail
+  ROUTES.unshift(
+    { key: 'overview', pattern: /\/overview$/, build: () => boundOverview },
+    { key: 'character', pattern: /\/character$/, build: () => boundDetail },
+  )
+}
+
 const jsonResponse = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
   status,
   headers: { 'Content-Type': 'application/json' },
 })
 
-/** 被 `?fail=` 点名的路由：500 + `{ok:false,error}` 信封（api.ts 会把它变成一条 ErrorBar 文案）。 */
+/**
+ * 被 `?fail=` 点名的路由：返回 **400 + `{ok:false,error}`**，和真实宿主的失败形状一致。
+ *
+ * 为什么不是 500：宿主**没有 500 路径** —— `src/web.ts:191-198` 的 `guard` 把任何异常都
+ * 统一下成 400 + `{ok:false,error:<原文>}`；client 也不会自己补状态码。用 500 验出来的
+ * 只是"沙盒自己捏的形状"，那种断言等于 fixture 自证。
+ */
 const failed = (key: string): boolean => failKeys.has(key) || failKeys.has('all')
 
 const originalFetch = globalThis.fetch
@@ -146,7 +174,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   for (const route of ROUTES) {
     if (!route.pattern.test(url.pathname)) continue
     if (failed(route.key)) {
-      return jsonResponse({ ok: false, error: `沙盒注入的失败：/${route.key} 返回 500（URL 上带了 ?fail=）` }, 500)
+      return jsonResponse({ ok: false, error: `沙盒注入 400：读取 /${route.key} 失败（模拟宿主 guard 兜底）` }, 400)
     }
     return jsonResponse(route.build(url))
   }

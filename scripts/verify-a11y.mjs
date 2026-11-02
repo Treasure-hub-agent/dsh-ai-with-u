@@ -70,8 +70,65 @@ const styleNames = ['styles.ts', 'guide.styles.ts', 'distill.styles.ts'].filter(
 /** 行号（1 起），用于把失败指到文件:行。 */
 const lineOf = (text, index) => text.slice(0, index).split('\n').length
 
-/** 去掉块注释（`/* … *\/`，也覆盖 JSX 的 `{/* … *\/}` 与 JSDoc），避免扫描到注释里的示例代码。 */
-const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+/**
+ * 源码净化：把**注释**抹成空格（保留行号），并标出**字符串内部**的位置。
+ *
+ * 两件事都在解决同一类假红：
+ *  1. 注释里为了讲道理会写示例代码（`t('nope.nope')`、`<div onClick>`），不剥就会误报；
+ *  2. 字符串里也可能出现 `'<div onClick>'`（本脚本自己就有这种样例），
+ *     光剥注释不够 —— 用 mask 标出来，扫标签时跳过 mask=1 的位置。
+ *
+ * 字符串内部的 `<div onClick>` 由 `insideStringAt` 按行判断。
+ */
+function sanitize(source) {
+  const chars = source.split('')
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      // 跳过整个字符串字面量，别让字符串里的 `//` / `/*` 被当成注释
+      let j = i + 1
+      while (j < source.length) {
+        if (source[j] === '\\') { j += 2; continue }
+        if (source[j] === ch) break
+        if (ch !== '`' && source[j] === '\n') break   // 普通字符串不跨行
+        j += 1
+      }
+      i = j
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      const stop = end < 0 ? source.length : end + 2
+      for (let j = i; j < stop; j += 1) if (chars[j] !== '\n') chars[j] = ' '
+      i = stop - 1
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      while (i < source.length && source[i] !== '\n') { chars[i] = ' '; i += 1 }
+      i -= 1
+    }
+  }
+  return chars.join('')
+}
+
+/**
+ * 这个 `<` 是不是落在**同一行**的某个字符串字面量里（`'<div onClick>'` 这种样例）。
+ * 行内判断的代价是跨行模板串里可能误判，但那种地方本来也不写 JSX。
+ */
+function insideStringAt(text, index) {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1
+  let quote = ''
+  for (let i = lineStart; i < index; i += 1) {
+    const ch = text[i]
+    if (quote !== '') {
+      if (ch === '\\') { i += 1; continue }
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch
+  }
+  return quote !== ''
+}
 
 /**
  * 从 `from`（指向 `<`）开始找这个开标签的结束 `>`。
@@ -95,10 +152,11 @@ function findTagEnd(text, from) {
   return -1
 }
 
-/** 收集所有 JSX 标签：{ name, index, tag }。 */
+/** 收集所有 JSX 标签：{ name, index, tag }。`mask` 里标为字符串的位置直接跳过。 */
 function jsxTags(text) {
   const out = []
   for (const m of text.matchAll(/<([A-Za-z][A-Za-z0-9]*)\b/g)) {
+    if (insideStringAt(text, m.index)) continue
     const end = findTagEnd(text, m.index)
     if (end < 0) continue
     out.push({ name: m[1].toLowerCase(), index: m.index, tag: text.slice(m.index, end) })
@@ -106,25 +164,33 @@ function jsxTags(text) {
   return out
 }
 
+/** 每个文件一份净化后的源码（注释已抹）。 */
+const clean = new Map()
+for (const [name, raw] of src) clean.set(name, sanitize(raw))
+
 console.log('无障碍静态自检（只读源码，不启动宿主）：')
 
 // ================================================================ ① 结构
 
 console.log('')
-console.log('① 可点击元素必须是真 button（全仓 0 处 div/li/span + onClick）')
+console.log('① 可点击元素必须是真 button（0 处 div/li/span + onClick/onPointerDown）')
 {
   const maybeClickable = new Set(['div', 'li', 'ul', 'ol', 'span', 'p', 'section', 'aside', 'a', 'td', 'tr', 'label'])
   let hits = 0
   for (const name of tsxNames) {
-    const text = stripComments(src.get(name))
+    const text = clean.get(name)
     for (const t of jsxTags(text)) {
       if (!maybeClickable.has(t.name)) continue
-      if (!/\bonClick\b/.test(t.tag)) continue
+      // onClick 之外，pointerdown/up 与双击同样意味着"这块要能用键盘操作"：用 div 接这些
+      // 事件的元素，键盘用户永远够不到。`role="presentation"` 的纯遮罩除外 —— 它的语义
+      // 就是"点空白关掉"，可关闭性由 Esc 那条路兜住（焦点三件套负责）。
+      if (!/\b(?:onClick|onPointerDown|onPointerUp|onDoubleClick)\b/.test(t.tag)) continue
+      if (/role="presentation"/.test(t.tag)) continue
       hits += 1
-      bad('① 非 button 元素绑了 onClick', `${name}:${lineOf(text, t.index)} <${t.name}> —— 换成 <button type="button">，或加 role+tabIndex+onKeyDown`)
+      bad('① 非 button 元素绑了点击/指针事件', `${name}:${lineOf(text, t.index)} <${t.name}> —— 换成 <button type="button">，或加 role+tabIndex+onKeyDown`)
     }
   }
-  if (hits === 0) ok('① 没有 div/li/span 之类的 onClick', `${tsxNames.length} 个 .tsx 全扫过`)
+  if (hits === 0) ok('① 没有 div/li/span 之类的点击/指针事件', `${tsxNames.length} 个 .tsx 全扫过`)
 }
 
 // ================================================================ ② 图标按钮名字
@@ -135,7 +201,7 @@ console.log('② 图标型按钮必须有可访问名（aria-label / aria-labell
   let icons = 0
   let naked = 0
   for (const name of tsxNames) {
-    const text = stripComments(src.get(name))
+    const text = clean.get(name)
     for (const m of text.matchAll(/<button\b/g)) {
       const openEnd = findTagEnd(text, m.index)
       if (openEnd < 0) continue
@@ -146,8 +212,10 @@ console.log('② 图标型按钮必须有可访问名（aria-label / aria-labell
       // 注意 `\b`：`<IconSpinner` 里 `Icon` 后面紧跟字母，`/<(Icon|svg)\b/` 永远匹配不上
       // （第一版就踩了这个坑，导致只认出 1 个图标按钮）。这里显式吃掉组件名后缀。
       if (!/<(?:Icon[A-Za-z0-9]*|svg)[\s/>]/.test(body)) continue
-      // 有文案（t('…') / labels.x / 变量）就不算图标按钮
-      if (/\bt\(|labels\.|props\./.test(body)) continue
+      // 有文案（t('…') / labels.x / 整段就是一个 props.xxx 表达式）就不算图标按钮。
+      // ⚠️ `props.` 不能整词放行：`{props.on ? <IconA/> : null}` 是图标按钮，却会被当成
+      // "有文案"跳过 —— 那是真漏洞。只有"整段就是一个 props.xxx 表达式"才算文案。
+      if (/\bt\(|labels\.|\{props\.[\w$.]+\}/.test(body)) continue
       const stripped = body.replace(/<[^>]*>/g, '').replace(/\{[^{}]*\}/g, '').trim()
       if (/[A-Za-z\u4e00-\u9fff]{2,}/.test(stripped)) continue
       icons += 1
@@ -167,7 +235,7 @@ console.log('③ <button> 必须显式 type="button"（否则默认 submit）')
   let total = 0
   let missing = 0
   for (const name of tsxNames) {
-    const text = stripComments(src.get(name))
+    const text = clean.get(name)
     for (const m of text.matchAll(/<button\b/g)) {
       const openEnd = findTagEnd(text, m.index)
       if (openEnd < 0) continue
@@ -189,7 +257,7 @@ console.log('④ 错误/校验提示能被读屏念出来（role="alert" / aria-
   let silent = 0
   let emptyStates = 0
   for (const name of tsxNames) {
-    const text = stripComments(src.get(name))
+    const text = clean.get(name)
     // ④-1 `.awu-err` 这一类"错误块"必须自带 role / aria-live
     for (const t of jsxTags(text)) {
       if (!/awu-err/.test(t.tag)) continue
@@ -198,8 +266,10 @@ console.log('④ 错误/校验提示能被读屏念出来（role="alert" / aria-
       silent += 1
       bad('④ .awu-err 没有 role="alert"', `${name}:${lineOf(text, t.index)} —— 读屏不会播报这条错误`)
     }
-    // ④-2 直接渲染错误变量（{error} / {dialogError} …）的节点，附近必须有 live 语义
-    for (const m of text.matchAll(/\{\s*(error|dialogError|editError|detailError)\s*\}/g)) {
+    // ④-2 直接渲染错误变量（{error} / {dialogError} / {err} / {error.message} …）的节点，
+    // 附近必须有 live 语义。变量名放宽到常见缩写：只认 error* 会漏掉 `{err}` 与
+    // `{error.message}` 这两种同样常见的写法。
+    for (const m of text.matchAll(/\{\s*(?:error|dialogError|editError|detailError|err|errText|errorText)(?:\.\w+)?\s*\}/g)) {
       // 属性上的 `error={editError}` 只是传 prop，不是渲染出来的文本 → 不算
       if (/=\s*$/.test(text.slice(Math.max(0, m.index - 2), m.index))) continue
       const windowStart = Math.max(0, m.index - 400)
@@ -261,7 +331,7 @@ console.log('⑤ 中英字典对称 + t(\'字面量\') 键都存在')
       let indirect = 0
       for (const [name, text0] of src) {
         if (name === 'text.ts') continue
-        const text = stripComments(text0)
+        const text = clean.get(name)
         for (const m of text.matchAll(/\bt\(\s*'([^']+)'/g)) {
           literalUses += 1
           if (allKeys.has(m[1])) continue
@@ -383,12 +453,13 @@ function templateLiterals(text) {
 // ================================================================ ⑦ 焦点环 token
 
 console.log('')
-console.log('⑦ 焦点环不许写死颜色（outline: Npx solid 必须跟 var(...)）')
+console.log('⑦ 焦点环不许写死颜色（outline / outline-color 都必须跟 var(...)）')
 {
   let literal = 0
   let rings = 0
   for (const name of styleNames) {
     const text = src.get(name)
+    // 7a：`outline: <宽> <样式> <颜色>` 的简写形式
     for (const m of text.matchAll(/outline:\s*([^;{}]+);/g)) {
       const value = m[1].trim()
       if (!/^[\d.]+px\s+solid\s+/.test(value)) continue
@@ -397,8 +468,16 @@ console.log('⑦ 焦点环不许写死颜色（outline: Npx solid 必须跟 var(
       literal += 1
       bad('⑦ 焦点环写死了颜色', `${name}:${lineOf(text, m.index)} outline: ${value} —— 换成 var(--awu-accent)`)
     }
+    // 7b：`outline-color: <颜色>` 单独写的那一半（拆开写时 7a 看不到它）
+    for (const m of text.matchAll(/outline-color:\s*([^;{}]+);/g)) {
+      const value = m[1].trim()
+      rings += 1
+      if (/^var\(/.test(value)) continue
+      literal += 1
+      bad('⑦ outline-color 写死了颜色', `${name}:${lineOf(text, m.index)} outline-color: ${value} —— 换成 var(--awu-accent)`)
+    }
   }
-  if (literal === 0) ok('⑦ 焦点环都走 token', `共 ${rings} 条 outline 规则`)
+  if (literal === 0) ok('⑦ 焦点环都走 token', `共 ${rings} 条 outline / outline-color 规则`)
 }
 
 // ================================================================ 汇总

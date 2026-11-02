@@ -132,6 +132,48 @@ focus ring 值只有一个来源（2 档 offset）；reduced-motion 从「手工
 
 ---
 
+## 6.3 审查轮（四名审查员，2026-11-02 下午）
+
+四名审查员分域复查本轮新代码（浮层生命周期 / CSS 动效与降级 / 子视图数据流 / 验证基建），
+结论：**P0 = 1（全在验证基建）、P1 = 6、P2 = 20+**，全部已修。
+
+### 已修的关键项
+
+| 域 | 问题 | 修法 | 证据 |
+|---|---|---|---|
+| CSS | `data-still` 的 `will-change` 仍挂在 `.awu-dialog/.awu-focus/.awu-editorConfirmCard` 三张带 blur 的层上 | 整段删除（那三个属性已无事可做） | `.awu-dialog` willChange `auto` |
+| CSS | **面板退场自己在动玻璃**（`awu-exit` + `will-change:opacity`） | 从大层退场组移除；改内容层 `awu-content-out` + 外壳 `::before` `awu-scrim-out` | `.awu-panel` `getAnimations()=0`、`animationName:none` |
+| CSS | 骨架退场 `left/right:0` 按 padding box 算 → 宽度 272→336、左移 32px | `inset-inline: var(--awu-pane-pad-x)`（提成令牌） | 骨架宽 272 = 容器内容宽 |
+| CSS | 世界书分区展开会把嵌套块箭头一起转（后代选择器过宽） | 收窄成 `> .awu-editGroupHead`，嵌套块 `:not([data-open="true"])` 兜底 | 外层 rotate90、嵌套 `transform:none` |
+| CSS | 进场 fill 用了 `both`（3 处）、缺 `forced-colors`、降透明清单与实际不符、高对比没抬玻璃 | 逐条修正 | 见 `verify-ui` 7 项 + CDP 采样 |
+| 浮层 | 详情退场判据用 `closing`（晚一帧）→ 中间态先摘详情再重挂 | 判据换 `mounted`，渲染条件收敛成单一判据 | 8/16/30/60/90ms 同一节点、骨架计数恒 0 |
+| 浮层 | 详情返回后焦点落 `body` | `usePresence` 传 root + 卸载按 `data-card-id` 还焦，兜底列表容器 | `activeElement` = 原卡片 |
+| 浮层 | 保存退场 160ms 内按 Esc 弹出「未保存确认」并随父级消失 | `requestClose/Esc/save` 加 `leaving \|\| closing` 早退，按钮禁用 + `aria-hidden` | confirm 计数 0 |
+| 浮层 | 弹层退场期第二次 Esc 连带关面板 | 面板 Esc 与点外面都补 `!dialogPresence.closing`（口径=退场期仍算开着） | 退场期 Esc 后面板仍在 |
+| 浮层 | `useOverlayRequestClose()` 零调用（注释承诺不成立） | 新增 `RequestCloseButton`（必须在 Overlay 子节点里才能读到 context），5 个弹层 + distill 三处接入 | arm 期点「再想想」只卸膛 |
+| 浮层 | 重开面板仍落进编辑器 | `open=false` 时显式退编辑态并清计时器 | 重开 `.awu-editor` 为 null |
+| 视图 | **专注层「保存」后 50ms 按 Esc → 弹层关、改动丢失**（数据安全） | `onClosing(intent: 'cancel' \| 'commit')`，只有 cancel 放行 escYield | 保存→50ms Esc→弹层仍在且正文已落盘；取消路径仍立刻放行 |
+| 视图 | 三处竖排列表用了 `cards` 形态（两列网格） | 新增 `shape="rows"`（单列、行高 84、gap 12） | `data-shape="rows"`、3 行 × 84px × 宽 580 |
+| 视图 | 计数 cleanup 无下限（HMR 双副本会到 −1） | `Math.max(0, n-1)` + 注释 | 代码级 |
+| 视图 | 「启用 off」中英混排 | 改走 `preview.discipline.off` | 实测 pill 显示「关闭」 |
+| 视图 | preset 确认层硬切、`renderConfirm()` 调两次 | 接 `usePresence` + `useStillAttr`，删重复调用 | count=1、80ms closing、320ms 卸载 |
+| QA | **矩阵没有失败通道**：沙盒没起 / 打包 500 / 步骤点了不存在的元素，全部 `✓ + exit 0` | 加 F1–F5 判红（导航落地/bundle 健康/步骤有效/图不空/与基线栅格差）+ `失败 N` 非 0 退出 | 三种假绿复测均 exit 1，基线 exit 0 |
+| QA | `crash.mjs` 崩溃不可归因（别的异常也能全绿） | 断言 `consoleErrors` 含探针原文 | 11/11 绿 |
+| QA | `states.mjs` 的"错误文案带 500"是 fixture 自证（宿主只产 400） | fixture 改真实 400 信封 + 断言文案原文；「重试」做成真断言（fetch 计数 1→2） | 23/23 绿 |
+| QA | fixture 契约漂移 → 会话绑定/预设摘要/纪律档位**零覆盖** | 逐字段补齐 `/overview` `/character` `/preview`；新增 `?bound=1` 与第 21 个场景 `bound-session` | 该场景实测渲染「本会话 / 全局」与「解除绑定」 |
+| QA | `verify-ui`/`verify-a11y` 的 6 类漏检/误报 | 收尾行容忍注释、剥行注释、自动发现 `*.styles.ts`、`props.` 表达式、`onPointerDown`、`outline-color`、`{err}` 渲染 | 16 组注入样本 + 2 条基线全部符合预期 |
+| QA | 产物默认写进仓库、端口不校验、Windows 下 `process.exit` 撞 libuv | 默认落仓库外 + `.gitignore` 补 `06-tmp/`；加 `assertSandbox()` 端口认领；先关 ws/杀 chrome 再退出 | 59624 被挡住并提示换端口 |
+
+### 审查轮结论
+
+- 上一轮引入的机制（`onRequestClose` 三入口同源、退场期吃 Esc、计数让位、`editorClosing` 复位、
+  玻璃铁律）经逐条实测**逻辑正确**；问题集中在"边界时刻"（退场 160ms 窗口、焦点归还、
+  提交与取消的意图区分）与**验证基建的可信度**。
+- 新增/更新的经验已同步进知识库：`02` #43（退场期仍算开着）、`03` ⑭（提交/取消要带意图）、
+  `04` 静态扫描四条加固、`08` §7（退场同样不能动玻璃）、`09` §7–§8（矩阵必须会红 + fixture 必须对齐真实响应）。
+
+---
+
 ## 7. 复验命令
 
 ```bash

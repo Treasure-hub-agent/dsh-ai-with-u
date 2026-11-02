@@ -33,7 +33,7 @@ import {
   savePreset,
 } from './api'
 import type { PresetActiveState, PresetDetail, PresetModule, PresetSummary } from './api'
-import { FocusEditor } from './editor-focus'
+import { FocusEditor, useStillAttr } from './editor-focus'
 import {
   IconBack,
   IconChevron,
@@ -45,6 +45,7 @@ import {
   IconUp,
 } from './icons'
 import { ErrorBar, Skeleton } from './parts'
+import { T_BASE, T_EXIT, presenceAttrs, usePresence } from './motion'
 import type { Translate } from './text'
 
 /** 与设计稿对齐的上限（宿主也会拦；这里先就地提示，保存前再挡一道）。 */
@@ -488,6 +489,12 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
   /** 导入视图里粘进来但还没落库的 JSON：丢了同样找不回，所以也算未保存改动 */
   const [importDirty, setImportDirty] = useState(false)
   const confirmRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * 确认层的退场（与 `card-editor` 的确认层同款）：`confirmLeave` 决定"该开"，
+   * `confirmPresence` 决定"还留不留"——按「继续编辑」收掉时是 160ms 淡出，不是硬切。
+   */
+  const confirmPresence = usePresence(confirmLeave, T_EXIT)
+  const attachConfirm = useStillAttr(confirmRef, T_BASE + 60)
 
   /**
    * 脏判定的口径：名字与模块**分开算**。
@@ -711,17 +718,12 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
   /**
    * 确认层正文：编辑视图与导入视图的草稿性质不同，分开两句。
    *
-   * 两个 key（`preset.editor.discardBody` / `preset.import.discardBody`）还没并进 `text.ts` 时
-   * `makeTranslator` 会把 key 原样返回，这里检测到原样返回就退到角色卡那句通用文案
-   * （口径一致、不露裸 key）；文案合并后无需再改本文件（同 `distill.tsx:644-647` 的兜底写法）。
+   * 两个 key（`preset.editor.discardBody` / `preset.import.discardBody`）已经并进 `text.ts`
+   * （zh/en 都在），所以原先那套「`t(key) === key` 就退回角色卡文案」的兜底是**死代码**，已删。
    */
-  const discardBodyText = (): string => {
-    const key = view === 'import' && importDirty
-      ? 'preset.import.discardBody'
-      : 'preset.editor.discardBody'
-    const value = t(key)
-    return value === key ? t('edit.discardBody') : value
-  }
+  const discardBodyText = (): string => t(
+    view === 'import' && importDirty ? 'preset.import.discardBody' : 'preset.editor.discardBody',
+  )
 
   /**
    * 未保存确认层（三个视图共用一份）。
@@ -729,14 +731,18 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
    * 结构、类名、按钮顺序与 `card-editor.tsx:448-464` 逐字对齐——`.awu-editorConfirm` 是
    * `position: absolute; inset: 0`，而 `.awu-dialog` 是 `position: relative`，所以它自动盖住整个弹层，
    * 不需要为弹层场景再造一层浮层。
+   *
+   * 退场也跟 card-editor 对齐：`confirmLeave` 决定"该开"、`confirmPresence` 决定"还留不留"，
+   * 按「继续编辑」收掉时是 160ms 淡出而不是硬切。
    */
-  const renderConfirm = (): JSX.Element | null => (confirmLeave ? (
+  const renderConfirm = (): JSX.Element | null => (confirmPresence.mounted ? (
     <div
-      ref={confirmRef}
+      ref={attachConfirm}
       className="awu-editorConfirm"
       role="dialog"
       aria-modal="true"
       aria-label={t('edit.discardTitle')}
+      {...presenceAttrs(confirmPresence.closing)}
     >
       <div className="awu-editorConfirmCard">
         <div className="awu-editorConfirmTitle">
@@ -796,7 +802,9 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
           {unavailable && <div className="awu-hint" data-tone="warn">{t('preset.unavailable')}</div>}
           {error !== '' && <ErrorBar message={error} t={t} />}
 
-          {loading && list.length === 0 && <Skeleton shape="cards" label={t('common.loading')} />}
+          {/* 竖排列表 → `rows`（单列满宽）。`cards` 是 minmax(240px,1fr) 的两列网格，
+              620 宽弹层里会跟真实内容（单列列表）在首帧错位重排。 */}
+          {loading && list.length === 0 && <Skeleton shape="rows" label={t('common.loading')} />}
 
           {!loading && error === '' && list.length === 0 && (
             <div className="awu-empty" data-kind="empty">
@@ -1342,8 +1350,6 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
           </button>
         </div>
 
-        {renderConfirm()}
-
         {/* 全屏正文编辑：复用 editor-focus（本地缓冲 + 关层提交 + 自带焦点三件套） */}
         {focusModule !== undefined && (
           <FocusEditor
@@ -1360,7 +1366,11 @@ export function PresetPanel(props: PresetPanelProps): JSX.Element {
             }}
             onDone={next => { patchModule(focusIndex, { content: next }); setFocusIndex(-1) }}
             onCancel={() => setFocusIndex(-1)}
-            onClosing={() => setFocusClosing(true)}
+            onClosing={intent => {
+              // 只有「取消」把 Esc 立刻还回外壳；「保存」继续让位，等 onDone 落进草稿、
+              // dirty 重算完再放（否则保存后马上 Esc = 弹层关闭 + 刚写的正文丢失）
+              if (intent === 'cancel') setFocusClosing(true)
+            }}
           />
         )}
 
@@ -1591,7 +1601,7 @@ function PresetImportView(props: {
         {/* 落库请求在飞：预览先让位给骨架，避免「点了确认但界面一动不动」。
             骨架形态按「它在替什么」选：这里替的是一条条模块预览 = 列表态 → cards
             （detail 只留给详情页/表单回读，见 PresetPanel 编辑视图那一处）。 */}
-        {busy && <Skeleton shape="cards" label={t('common.loading')} />}
+        {busy && <Skeleton shape="rows" label={t('common.loading')} />}
 
         {!busy && preview !== undefined && (
           <div className="awu-presetPreview">
@@ -1616,7 +1626,12 @@ function PresetImportView(props: {
                 <li key={index} data-enabled={isEnabled(module) ? 'true' : 'false'}>
                   <span className="awu-presetPreviewName">{moduleLabel(module, index, t)}</span>
                   <span className="awu-presetPreviewExcerpt">{excerpt(module.content)}</span>
-                  {!isEnabled(module) && <span className="awu-pill" data-tone="none">{t('preset.editor.enabled')} off</span>}
+                  {/* 「停用」徽记全走 i18n：以前是 `{t('preset.editor.enabled')} off`，
+                      中文界面会渲染成「启用 off」（半句中文半句英文）。
+                      复用 `preview.discipline.off`（zh「关闭」/ en「Off」）——它就是「关」这个状态词，
+                      与这里语义一致；若要更贴切（「已停用」/「Disabled」），建议新增
+                      `preset.editor.disabled`，换一行即可。 */}
+                  {!isEnabled(module) && <span className="awu-pill" data-tone="none">{t('preview.discipline.off')}</span>}
                 </li>
               ))}
             </ul>

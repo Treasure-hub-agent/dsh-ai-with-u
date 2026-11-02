@@ -51,6 +51,27 @@ async function waitFor(fn, timeout = 15000, label = '等待超时') {
   }
 }
 
+/**
+ * 认领端口：确认 `port` 上跑的是**本仓库的**预览沙盒。
+ *
+ * 为什么必须查：59621 这种固定端口上完全可能是别的进程（实测过——照样返回 200，探针
+ * 于是对着别人的页面做断言，全绿但毫无意义）。标记取 `index.html` 的标题，只有本仓库的
+ * `tools/preview/index.html` 才有。
+ */
+export async function assertSandbox(port, base = 'http://127.0.0.1') {
+  try {
+    const res = await fetch(`${base}:${port}/index.html`)
+    if (!res.ok) return { ok: false, reason: `GET /index.html → HTTP ${res.status}` }
+    const html = await res.text()
+    if (!html.includes('面板预览沙盒')) {
+      return { ok: false, reason: 'index.html 里没有本仓库的标题标记「面板预览沙盒」—— 这个端口上是别人的服务' }
+    }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: `连不上：${error instanceof Error ? error.message : String(error)}（先起 node tools/preview/serve.mjs）` }
+  }
+}
+
 /** 起一个浏览器；失败时抛错（调用方决定退出码）。 */
 export async function launch() {
   const chrome = await findChrome()
