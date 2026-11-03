@@ -32,7 +32,8 @@ D:\CODEX\deepseek-work\03-reference\dsh-dev-kb\
 | `docs/design/2026-11-02-ui-motion-system.md` | 本项目 UI 动效契约（令牌 / `data-*` / 编排 / 禁止项） |
 | `docs/design/2026-11-02-ui-upgrade-report.md` | UI 升级轮的交付报告与遗留清单 |
 | `docs/design/*.md`（更早） | 各主题的设计与验收记录（liquid-glass / panel-ui / visual-qa / a11y-merge …） |
-| `docs/audit/2026-11-02-ui/` | 五份前端审计报告 + 方案 |
+| `docs/audit/2026-11-02-ui/` | 前端审计原文（A–E 五份 + W1C/W3C 分批日志 + 升级方案） |
+| `docs/audit/2026-11-02-review/` | 审查轮四份复查（浮层 / CSS / 子视图 / 验证基建） |
 
 新增坑的流程：**先在知识库对应文件里追加一条**（编号往后排，不改写历史结论），
 如果它同时需要在本项目留痕，就写进 `docs/DEVELOPMENT.md` 的当轮记录里，**不要在这里恢复正文**。
