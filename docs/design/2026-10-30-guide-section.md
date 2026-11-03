@@ -3,7 +3,7 @@
 > 归属：dsh-ai-with-u 面板（452px 悬浮面板）的第 4 个 tab。
 > 依据：`README.md`、`docs/DEVELOPMENT.md` §二 / §九、`06-tmp/aiwu-survey/client.md`、
 > `client/text.ts`、`client/index.tsx`，以及**活着的实例**（`http://127.0.0.1:59609/_dsh/ai-with-u/overview`
-> 与 `/characters` 实测：3 张预置卡、`root=C:\Users\11387\.dsh\ai-with-u`、`active.enabled=false`、
+> 与 `/characters` 实测：3 张预置卡、`root=<数据根>`（Windows 下默认为 `C:\Users\<你>\.dsh\ai-with-u`）、`active.enabled=false`、
 > `memoryEntries=0`；数据根下确实只有 `_index.json` + `characters/<角色名>/card.json`）。
 > 行号以提交 `e07bf58` 为准。**本文没有半成品：每个数字都是实测值，每段文案都可直接粘贴。**
 
